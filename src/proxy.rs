@@ -71,18 +71,16 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
 }
 
 async fn connect_with_retry(path: &Path) -> std::io::Result<transport::LocalStream> {
-    let mut last_error = None;
-    for _ in 0..50 {
-        match transport::connect(path).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => {
-                last_error = Some(error);
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
+    // Retry briefly while the upstream finishes binding its socket. Sleep only
+    // between attempts; the final attempt's real error propagates directly rather
+    // than through a synthesized placeholder.
+    for _ in 0..49 {
+        if let Ok(stream) = transport::connect(path).await {
+            return Ok(stream);
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Err(last_error
-        .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "proxy connect failed")))
+    transport::connect(path).await
 }
 
 async fn pump<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(

@@ -7,15 +7,6 @@ use serde::{Deserialize, Serialize};
 /// Override the entire mcp-pool home (config + state) for tests/isolation.
 const ENV_HOME: &str = "MCP_POOL_HOME";
 
-#[allow(dead_code)]
-pub fn home_dir() -> io::Result<PathBuf> {
-    if let Ok(custom) = std::env::var(ENV_HOME) {
-        return Ok(PathBuf::from(custom));
-    }
-    dirs::home_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))
-}
-
 pub fn config_dir() -> io::Result<PathBuf> {
     if let Ok(custom) = std::env::var(ENV_HOME) {
         return Ok(PathBuf::from(custom).join("config"));
@@ -31,7 +22,7 @@ pub fn state_dir() -> io::Result<PathBuf> {
     }
     // dirs::state_dir() is None on Windows; fall back to the local data dir.
     let base = dirs::state_dir()
-        .or_else(|| dirs::data_local_dir())
+        .or_else(dirs::data_local_dir)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "state directory not found"))?;
     Ok(base.join("mcp-pool"))
 }
@@ -66,15 +57,24 @@ fn home_scope_hash() -> String {
     format!("{:08x}", hash as u32)
 }
 
+/// Resolve a Unix socket path under `resolved` (the state/run dir) or fall back to
+/// /tmp when directory resolution fails. Single owner of the fallback scheme so the
+/// two socket-path builders cannot drift; the primary and fallback share one
+/// `file_name`, keeping the path identity stable regardless of which branch wins.
+#[cfg(unix)]
+fn unix_socket_path(resolved: io::Result<PathBuf>, file_name: &str) -> PathBuf {
+    resolved
+        .map(|dir| dir.join(file_name))
+        .unwrap_or_else(|_| PathBuf::from(format!("/tmp/{file_name}")))
+}
+
 /// Control socket path. Unix: a socket file in the state dir.
 /// Windows: a named-pipe name, namespaced by the home hash so isolated homes do
 /// not share one global control pipe.
 pub fn control_socket_path() -> PathBuf {
     #[cfg(unix)]
     {
-        state_dir()
-            .map(|dir| dir.join("control.sock"))
-            .unwrap_or_else(|_| PathBuf::from("/tmp/mcp-pool-control.sock"))
+        unix_socket_path(state_dir(), "mcp-pool-control.sock")
     }
     #[cfg(windows)]
     {
@@ -88,9 +88,7 @@ pub fn server_socket_path(name: &str) -> PathBuf {
     let safe = sanitize_socket_name(name);
     #[cfg(unix)]
     {
-        run_dir()
-            .map(|dir| dir.join(format!("mcp-pool-{safe}.sock")))
-            .unwrap_or_else(|_| PathBuf::from(format!("/tmp/mcp-pool-{safe}.sock")))
+        unix_socket_path(run_dir(), &format!("mcp-pool-{safe}.sock"))
     }
     #[cfg(windows)]
     {
@@ -186,7 +184,7 @@ impl PoolConfig {
             std::fs::create_dir_all(parent)?;
         }
         let serialized = toml::to_string_pretty(self)
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+            .map_err(|error| io::Error::other(error.to_string()))?;
         // Atomic write: temp file + rename.
         let temp = path.with_extension("toml.tmp");
         std::fs::write(&temp, serialized)?;

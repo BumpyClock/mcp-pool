@@ -11,7 +11,7 @@ pub enum ServerStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerStatus {
     pub name: String,
-    pub status: String,
+    pub status: ServerStatus,
     pub socket_path: String,
     pub uptime_seconds: Option<u64>,
     pub connection_count: u32,

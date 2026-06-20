@@ -57,7 +57,6 @@ pub struct SocketProxy {
     id_allocator: Arc<IdAllocator>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
-    ready_notify: Arc<Notify>,
     // Fires when the upstream request sender is published (or when the upstream
     // stops), so a client that connects mid-startup waits for the sender instead
     // of dropping its first request.
@@ -83,7 +82,6 @@ impl SocketProxy {
             id_allocator: Arc::new(IdAllocator::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(Notify::new()),
-            ready_notify: Arc::new(Notify::new()),
             upstream_ready: Arc::new(Notify::new()),
             started_at: Mutex::new(None),
             total_connections: Arc::new(AtomicU32::new(0)),
@@ -126,11 +124,6 @@ impl SocketProxy {
         self.total_connections.load(Ordering::SeqCst)
     }
 
-    #[allow(dead_code)]
-    pub fn ready_notifier(&self) -> Arc<Notify> {
-        self.ready_notify.clone()
-    }
-
     pub fn take_exit_receiver(&self) -> Option<oneshot::Receiver<()>> {
         self.exit_complete_rx.lock().take()
     }
@@ -145,7 +138,6 @@ impl SocketProxy {
         // endpoint.
         if !self.owned {
             *self.status.lock() = ServerStatus::Running;
-            self.ready_notify.notify_waiters();
             return Ok(());
         }
 
@@ -163,8 +155,8 @@ impl SocketProxy {
         // the router consumes them and dispatches by id.
         let (response_tx, response_rx) = mpsc::channel::<String>(1024);
 
-        // Bind before flipping to Running so ready_notifier waiters connect
-        // against a live endpoint.
+        // Bind before flipping to Running so a client connecting the instant we
+        // report Running reaches a live endpoint.
         let listener = Arc::new(crate::transport::bind(&self.socket_path)?);
         *self.listener.lock() = Some(listener.clone());
 
@@ -175,7 +167,6 @@ impl SocketProxy {
         // failure or exit, overriding this. Bind success + tasks spawned == ready.
         *self.status.lock() = ServerStatus::Running;
         *self.started_at.lock() = Some(Instant::now());
-        self.ready_notify.notify_waiters();
 
         diagnostics::log(format!("pool_proxy_started name={} socket={}", self.name, self.socket_path.display()));
         Ok(())
@@ -194,7 +185,6 @@ impl SocketProxy {
         let status = self.status.clone();
         let shutdown = self.shutdown.clone();
         let shutdown_notify = self.shutdown_notify.clone();
-        let ready_notify = self.ready_notify.clone();
         let upstream_ready = self.upstream_ready.clone();
         let clients = self.clients.clone();
         let request_map = self.request_map.clone();
@@ -211,7 +201,6 @@ impl SocketProxy {
                 *status.lock() = ServerStatus::Stopped;
                 shutdown.store(true, Ordering::SeqCst);
                 shutdown_notify.notify_waiters();
-                ready_notify.notify_waiters();
                 // Wake any client waiting for the upstream sender so it re-checks,
                 // sees shutdown, and stops waiting instead of blocking the timeout.
                 upstream_ready.notify_waiters();
@@ -250,7 +239,7 @@ impl SocketProxy {
                 // Periodic gauge so a backed-up router is visible without
                 // per-message spam. A climbing pending_requests count means
                 // responses are not draining as fast as requests arrive.
-                if processed % 500 == 0 {
+                if processed.is_multiple_of(500) {
                     let pending = request_map.lock().len();
                     let live = clients.lock().len();
                     diagnostics::log(format!(
@@ -446,8 +435,12 @@ async fn handle_client(
                                 // REQUEST: method + non-null id.
                                 (true, Some(original_id)) => {
                                     let pool_id = id_allocator.allocate();
+                                    // Key the pending request through the same
+                                    // canonical helper route_response uses to look
+                                    // it up, so the insert and lookup keys cannot
+                                    // drift (numeric id -> identical string).
                                     request_map.lock().insert(
-                                        pool_id.to_string(),
+                                        jsonrpc::id_key(&Value::from(pool_id)),
                                         (client_id.clone(), original_id, Instant::now()),
                                     );
                                     // Record this client as most-recently-active
@@ -747,7 +740,7 @@ async fn send_to_client(
 /// REQUEST_TTL_SECS. Throttled via a counter so the router hot path stays cheap.
 fn cleanup_stale_requests(request_map: &RequestMap, cleanup_counter: &Arc<AtomicU32>) {
     let count = cleanup_counter.fetch_add(1, Ordering::Relaxed);
-    if count % CLEANUP_INTERVAL != 0 {
+    if !count.is_multiple_of(CLEANUP_INTERVAL) {
         return;
     }
 

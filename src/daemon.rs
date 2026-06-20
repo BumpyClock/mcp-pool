@@ -18,7 +18,7 @@ pub async fn serve() -> anyhow::Result<()> {
     diagnostics::init_from_env();
 
     // Validate config up front so a malformed file is surfaced immediately, but
-    // keep running either way: dispatch reloads it on Start/List so a fixed
+    // keep running either way: dispatch reloads it on Start so a fixed
     // config becomes effective without restarting the daemon.
     if let Err(error) = PoolConfig::load() {
         diagnostics::log(format!("config load failed at startup: {error}"));
@@ -184,17 +184,6 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
                 Ok(value) => ControlResponse::data(value),
                 Err(error) => ControlResponse::err(error.to_string()),
             }
-        }
-        ControlRequest::List => {
-            let config = match PoolConfig::load() {
-                Ok(config) => config,
-                Err(error) => return ControlResponse::err(error.to_string()),
-            };
-            let mut names: Vec<String> = config.server.keys().cloned().collect();
-            names.sort();
-            serde_json::to_value(names)
-                .map(ControlResponse::data)
-                .unwrap_or_else(|error| ControlResponse::err(error.to_string()))
         }
         ControlRequest::Shutdown => ControlResponse::ok(),
     }

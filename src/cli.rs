@@ -180,24 +180,21 @@ fn build_server_def(
             (first.clone(), rest.to_vec())
         }
     };
-    let has_remote = url.is_some();
     let has_stdio = !stdio_command.is_empty();
 
     // Exactly one source allowed.
-    match (has_remote, has_stdio) {
-        (true, true) | (false, false) => Err(anyhow::anyhow!(
+    match (url, has_stdio) {
+        (Some(_), true) | (None, false) => Err(anyhow::anyhow!(
             "specify exactly one of: --url <URL>  OR  a stdio command (-- COMMAND...)"
         )),
-        (true, false) => {
+        (Some(url), false) => {
             let transport = transport
                 .map(|value| normalize_transport(&value))
                 .transpose()?
                 .unwrap_or_else(|| "http".to_string());
-            Ok(ServerDef { url: url.expect("checked: has_remote"), transport, ..Default::default() })
+            Ok(ServerDef { url, transport, ..Default::default() })
         }
-        (false, true) => {
-            Ok(ServerDef { command: stdio_command, args, ..Default::default() })
-        }
+        (None, true) => Ok(ServerDef { command: stdio_command, args, ..Default::default() }),
     }
 }
 
@@ -244,12 +241,11 @@ fn remove_server(name: &str, yes: bool) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    if !yes && io::stdin().is_terminal() {
-        if !confirm(&format!("remove server '{name}'?")) {
+    if !yes && io::stdin().is_terminal()
+        && !confirm(&format!("remove server '{name}'?")) {
             println!("aborted");
             return Ok(());
         }
-    }
 
     let removed = pool_config.remove(name);
     pool_config.save()?;
@@ -313,7 +309,7 @@ fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
             }
         }
         OutputMode::Table => {
-            println!("{:<20} {:<10} {}", "NAME", "TRANSPORT", "SOCKET");
+            println!("{:<20} {:<10} SOCKET", "NAME", "TRANSPORT");
             for (name, transport, socket) in &entries {
                 println!("{:<20} {:<10} {socket}", name, transport);
             }
@@ -416,7 +412,6 @@ fn print_response_data(
         ControlRequest::Stop { name } => println!("{yellow}stopped{reset} {name}"),
         ControlRequest::Restart { name } => println!("{green}restarted{reset} {name}"),
         ControlRequest::Shutdown => println!("{yellow}daemon shutting down{reset}"),
-        ControlRequest::List => println!("ok"),
         ControlRequest::Status { name } => print_status_table(data.as_ref(), name.as_deref(), color),
     }
 }
@@ -455,7 +450,7 @@ fn print_status_table(data: Option<&serde_json::Value>, filter: Option<&str>, co
         return;
     }
 
-    println!("{:<20} {:<10} {:<10} {:<6} {}", "NAME", "STATUS", "TRANSPORT", "CONNS", "SOCKET");
+    println!("{:<20} {:<10} {:<10} {:<6} SOCKET", "NAME", "STATUS", "TRANSPORT", "CONNS");
     for server in shown {
         let status = str_field(server, "status");
         let (prefix, suffix) = match status {
@@ -499,13 +494,16 @@ async fn retry_connect(socket_path: &std::path::Path) -> anyhow::Result<transpor
         }
     }
     let error = last_error
-        .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "control socket unreachable"));
+        .unwrap_or_else(|| std::io::Error::other("control socket unreachable"));
     Err(anyhow::anyhow!(
         "could not reach daemon after launch ({}). Try `mcp-pool serve` manually.",
         error
     ))
 }
 
+// The daemon is spawned fire-and-forget as a detached process, not an
+// async-managed child, so std::process::Command (not tokio's) is correct here.
+#[allow(clippy::disallowed_methods)]
 fn spawn_daemon_detached() -> anyhow::Result<()> {
     let executable = std::env::current_exe()?;
     let mut command = std::process::Command::new(&executable);
@@ -517,6 +515,7 @@ fn spawn_daemon_detached() -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(clippy::disallowed_methods)]
 fn configure_detached(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     // CREATE_NO_WINDOW (0x08000000): the daemon runs headless on Windows.
@@ -528,6 +527,7 @@ fn configure_detached(command: &mut std::process::Command) {
 }
 
 #[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
 fn configure_detached(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     // New process group so the daemon survives the CLI's controlling terminal.

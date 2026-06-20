@@ -114,7 +114,7 @@ impl UpstreamHandle {
         let client = reqwest::Client::builder()
             .use_rustls_tls()
             .build()
-            .map_err(|error| io::Error::new(io::ErrorKind::Other, error.to_string()))?;
+            .map_err(|error| io::Error::other(error.to_string()))?;
 
         let (request_tx, mut request_rx) = mpsc::channel::<String>(1024);
 
@@ -207,7 +207,7 @@ fn spawn_stdout_reader(stdout: tokio::process::ChildStdout, response_tx: mpsc::S
                         Err(mpsc::error::TrySendError::Closed(_)) => break,
                     }
                     forwarded += 1;
-                    if forwarded % 1000 == 0 {
+                    if forwarded.is_multiple_of(1000) {
                         diagnostics::log(format!(
                             "upstream_stdout_gauge forwarded={} channel_available={}",
                             forwarded,
@@ -250,18 +250,31 @@ fn spawn_stderr_logger(stderr: tokio::process::ChildStderr) {
     });
 }
 
+/// Build and send a JSON-RPC POST. Both the JSON and SSE forwarders share this
+/// request setup; only the response handling differs. `accept_event_stream`
+/// adds the `Accept: text/event-stream` header the SSE path requires.
+async fn post_jsonrpc(
+    client: &reqwest::Client,
+    url: &str,
+    line: &str,
+    accept_event_stream: bool,
+) -> reqwest::Result<reqwest::Response> {
+    let mut request = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+    if accept_event_stream {
+        request = request.header(reqwest::header::ACCEPT, "text/event-stream");
+    }
+    request.body(line.to_string()).send().await
+}
+
 async fn forward_json_request(
     client: &reqwest::Client,
     url: &str,
     line: &str,
     response_tx: &mpsc::Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let response = client
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(line.to_string())
-        .send()
-        .await?;
+    let response = post_jsonrpc(client, url, line, false).await?;
 
     let content_type = content_type_root(response.headers());
 
@@ -284,13 +297,7 @@ async fn forward_sse_request(
     line: &str,
     response_tx: &mpsc::Sender<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let response = client
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .body(line.to_string())
-        .send()
-        .await?;
+    let response = post_jsonrpc(client, url, line, true).await?;
 
     stream_sse(response, response_tx).await
 }
@@ -310,16 +317,15 @@ async fn stream_sse(
     let text = String::from_utf8_lossy(&body);
 
     for event_block in text.split("\n\n") {
-        for payload in extract_sse_data_payloads(event_block) {
-            if response_tx.send(payload).await.is_err() {
+        if let Some(payload) = extract_sse_data_payloads(event_block)
+            && response_tx.send(payload).await.is_err() {
                 return Ok(());
             }
-        }
     }
     Ok(())
 }
 
-fn extract_sse_data_payloads(block: &str) -> Vec<String> {
+fn extract_sse_data_payloads(block: &str) -> Option<String> {
     // Multi-line `data:` fields concatenate with a newline between them per the
     //SSE spec; an MCP server only ever sends single-line JSON payloads, so we
     // join the gathered data lines and treat the join as one JSON-RPC object.
@@ -343,14 +349,14 @@ fn extract_sse_data_payloads(block: &str) -> Vec<String> {
     }
 
     if data_lines.is_empty() {
-        return Vec::new();
+        return None;
     }
 
     let joined = data_lines.join("\n");
     if joined.is_empty() {
-        return Vec::new();
+        return None;
     }
-    vec![joined]
+    Some(joined)
 }
 
 fn content_type_root(headers: &reqwest::header::HeaderMap) -> String {

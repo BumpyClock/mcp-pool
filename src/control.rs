@@ -9,7 +9,6 @@ pub enum ControlRequest {
     Stop { name: String },
     Restart { name: String },
     Status { name: Option<String> },
-    List,
     Shutdown,
 }
 
@@ -68,7 +67,6 @@ mod tests {
             serde_json::to_string(&ControlRequest::Restart { name: "a".into() }).unwrap(),
             serde_json::to_string(&ControlRequest::Status { name: None }).unwrap(),
             serde_json::to_string(&ControlRequest::Status { name: Some("a".into()) }).unwrap(),
-            serde_json::to_string(&ControlRequest::List).unwrap(),
             serde_json::to_string(&ControlRequest::Shutdown).unwrap(),
         ];
         for serialized in serializations {

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::RwLock;
 
@@ -23,33 +22,17 @@ impl Pool {
         }
     }
 
-    pub fn is_running(&self, name: &str) -> bool {
-        let proxies = self.proxies.read();
-        if let Some(proxy) = proxies.get(name) {
-            if proxy.status() == ServerStatus::Running {
-                return socket_alive(&proxy.socket_path());
-            }
-        }
-        false
-    }
-
-    #[allow(dead_code)]
-    pub fn socket_path(&self, name: &str) -> Option<PathBuf> {
-        let proxies = self.proxies.read();
-        proxies.get(name).map(|proxy| proxy.socket_path())
-    }
-
     pub fn start(&self, name: &str, spec: UpstreamSpec) -> std::io::Result<()> {
         // Hold the write lock across the whole check-bind-insert so concurrent
         // auto-starts (every proxy now self-starts) cannot both pass the liveness
         // check and race to bind the same socket. parking_lot is not reentrant, so
-        // the liveness check is inlined here rather than calling is_running().
+        // the liveness check is inlined here rather than factored into a helper
+        // that would need to re-acquire the lock.
         let mut proxies = self.proxies.write();
-        if let Some(existing) = proxies.get(name) {
-            if existing.status() == ServerStatus::Running && socket_alive(&existing.socket_path()) {
+        if let Some(existing) = proxies.get(name)
+            && existing.status() == ServerStatus::Running && socket_alive(&existing.socket_path()) {
                 return Ok(());
             }
-        }
 
         let socket_path = crate::config::server_socket_path(name);
         let proxy = Arc::new(SocketProxy::new(
@@ -106,28 +89,6 @@ impl Pool {
             }
         }
         proxies.clear();
-    }
-
-    #[allow(dead_code)]
-    pub async fn wait_for_socket(&self, name: &str, timeout: Duration) -> bool {
-        if self.is_running(name) {
-            return true;
-        }
-
-        // Grab the notifier under a short-lived read lock; without a proxy there
-        // is nothing to wait on.
-        let notify = {
-            let proxies = self.proxies.read();
-            match proxies.get(name) {
-                Some(proxy) => proxy.ready_notifier(),
-                None => return false,
-            }
-        };
-
-        match tokio::time::timeout(timeout, notify.notified()).await {
-            Ok(()) => self.is_running(name),
-            Err(_) => false,
-        }
     }
 
     /// On Windows named pipes are not filesystem entries to enumerate, so there
@@ -198,7 +159,7 @@ impl Pool {
             .iter()
             .map(|(name, proxy)| crate::types::McpServerStatus {
                 name: name.clone(),
-                status: status_string(proxy.status()),
+                status: proxy.status(),
                 socket_path: proxy.socket_path().display().to_string(),
                 uptime_seconds: proxy.uptime_seconds(),
                 connection_count: proxy.connection_count(),
@@ -265,13 +226,4 @@ pub fn socket_name_from_path(path: &Path) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
-}
-
-fn status_string(status: ServerStatus) -> String {
-    match status {
-        ServerStatus::Stopped => "stopped",
-        ServerStatus::Starting => "starting",
-        ServerStatus::Running => "running",
-    }
-    .to_string()
 }
