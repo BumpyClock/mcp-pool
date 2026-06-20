@@ -45,6 +45,12 @@ pub struct SocketProxy {
     listener: Mutex<Option<Arc<LocalListener>>>,
     clients: Arc<Mutex<HashMap<String, ClientSender>>>,
     request_map: RequestMap,
+    // Most-recently-active client: the last client to send a REQUEST. Used as a
+    // HEURISTIC to route server-initiated requests (e.g. sampling/createMessage,
+    // roots/list) back to a single client, since broadcasting a request that
+    // expects one answer would make every client respond. parking_lot::Mutex
+    // matches this struct's interior-mutability style.
+    last_active_client: Arc<Mutex<Option<String>>>,
     // Per-upstream id translation: client request ids are rewritten to pool-unique
     // ids before forwarding, so concurrent clients (which independently reuse
     // 1, 2, 3, ...) never collide on the shared upstream connection.
@@ -73,6 +79,7 @@ impl SocketProxy {
             listener: Mutex::new(None),
             clients: Arc::new(Mutex::new(HashMap::new())),
             request_map: Arc::new(Mutex::new(HashMap::new())),
+            last_active_client: Arc::new(Mutex::new(None)),
             id_allocator: Arc::new(IdAllocator::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(Notify::new()),
@@ -191,6 +198,7 @@ impl SocketProxy {
         let upstream_ready = self.upstream_ready.clone();
         let clients = self.clients.clone();
         let request_map = self.request_map.clone();
+        let last_active_client = self.last_active_client.clone();
         let cleanup_counter = self.cleanup_counter.clone();
         let exit_complete_tx = self.exit_complete_tx.clone();
         let name = self.name.clone();
@@ -237,7 +245,7 @@ impl SocketProxy {
                     },
                     _ = shutdown_notify.notified() => break,
                 };
-                route_response(&message, &clients, &request_map, &cleanup_counter).await;
+                route_response(&message, &clients, &request_map, &cleanup_counter, &last_active_client).await;
                 processed += 1;
                 // Periodic gauge so a backed-up router is visible without
                 // per-message spam. A climbing pending_requests count means
@@ -260,6 +268,7 @@ impl SocketProxy {
     fn spawn_accept_loop(&self, listener: Arc<LocalListener>) {
         let clients = self.clients.clone();
         let request_map = self.request_map.clone();
+        let last_active_client = self.last_active_client.clone();
         let request_tx = self.request_tx.clone();
         let id_allocator = self.id_allocator.clone();
         let upstream_ready = self.upstream_ready.clone();
@@ -287,6 +296,7 @@ impl SocketProxy {
 
                         let clients_for_drop = clients.clone();
                         let request_map_for_drop = request_map.clone();
+                        let last_active_for_client = last_active_client.clone();
                         let request_tx_for_client = request_tx.clone();
                         let id_allocator_for_client = id_allocator.clone();
                         let upstream_ready_for_client = upstream_ready.clone();
@@ -303,6 +313,7 @@ impl SocketProxy {
                                 upstream_ready_for_client,
                                 id_allocator_for_client,
                                 request_map_for_drop,
+                                last_active_for_client,
                                 clients_for_drop,
                                 shutdown_for_client,
                                 shutdown_notify_for_client,
@@ -386,6 +397,7 @@ async fn handle_client(
     upstream_ready: Arc<Notify>,
     id_allocator: Arc<IdAllocator>,
     request_map: RequestMap,
+    last_active_client: Arc<Mutex<Option<String>>>,
     clients: Arc<Mutex<HashMap<String, ClientSender>>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
@@ -418,28 +430,42 @@ async fn handle_client(
                     if line.is_empty() {
                         continue;
                     }
-                    // Rewrite the client's request id to a pool-unique id so
-                    // concurrent clients never collide on the shared upstream; the
-                    // original is restored on the matching response. Notifications
-                    // (no id) and unparseable lines forward verbatim.
+                    // Classify by JSON-RPC message kind (presence of `method`
+                    // and a non-null `id`) rather than by id alone. Only a
+                    // REQUEST gets its id rewritten and stored; a client
+                    // RESPONSE (no `method`) answers a server-initiated request
+                    // and carries the SERVER's id, so it must pass through with
+                    // its id intact and unstored. Notifications and unparseable
+                    // lines forward verbatim.
                     let forward_line = match serde_json::from_str::<Value>(&line) {
-                        Ok(Value::Object(object)) => {
-                            // Clone the original id (ending the borrow) before moving
-                            // the object into `with_id`.
-                            let original_id = match object.get("id") {
-                                Some(id) if !id.is_null() => Some(id.clone()),
-                                _ => None,
-                            };
-                            match original_id {
-                                Some(original_id) => {
+                        Ok(value) if value.is_object() => {
+                            // Clone the original id (ending the borrow) before
+                            // moving the object into `with_id`.
+                            let original_id = non_null_id(&value).cloned();
+                            match (message_has_method(&value), original_id) {
+                                // REQUEST: method + non-null id.
+                                (true, Some(original_id)) => {
                                     let pool_id = id_allocator.allocate();
                                     request_map.lock().insert(
                                         pool_id.to_string(),
                                         (client_id.clone(), original_id, Instant::now()),
                                     );
-                                    jsonrpc::with_id(object, Value::from(pool_id))
+                                    // Record this client as most-recently-active
+                                    // so a server-initiated callback can route
+                                    // back to it (see route_server_request).
+                                    *last_active_client.lock() = Some(client_id.clone());
+                                    match value {
+                                        Value::Object(object) => {
+                                            jsonrpc::with_id(object, Value::from(pool_id))
+                                        }
+                                        // Unreachable: guarded by is_object above,
+                                        // but match instead of unwrap to stay panic-free.
+                                        _ => line.clone(),
+                                    }
                                 }
-                                None => line.clone(),
+                                // NOTIFICATION (method, no id) or RESPONSE
+                                // (no method): forward verbatim, never store.
+                                _ => line.clone(),
                             }
                         }
                         Ok(_) => line.clone(),
@@ -565,66 +591,130 @@ async fn acquire_request_sender(
     }
 }
 
-/// Route one upstream response (single JSON-RPC object, no trailing newline) to
-/// the client that issued the matching request, restoring that client's original
-/// id. Id-less notifications and ids we never issued (e.g. server-initiated
-/// requests) broadcast to all clients; a response whose client has disconnected
-/// is dropped.
+/// Route one upstream message (single JSON-RPC object, no trailing newline) to
+/// the right client(s), classified by JSON-RPC message kind:
+/// - RESPONSE (no `method`, has id): restore the issuing client's original id
+///   and send to that one client; drop if the id was never issued or the client
+///   has disconnected (never rebroadcast — a restored id could collide with a
+///   live client's in-flight id).
+/// - SERVER-INITIATED REQUEST (`method` + id the pool never issued): route to a
+///   single client (broadcasting would make every client answer the same
+///   request, producing duplicate/conflicting responses upstream).
+/// - NOTIFICATION (`method`, no id): broadcast to every client.
+/// - unparseable / non-object: broadcast (avoid silently dropping data).
 async fn route_response(
     line: &str,
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
     request_map: &RequestMap,
     cleanup_counter: &Arc<AtomicU32>,
+    last_active_client: &Arc<Mutex<Option<String>>>,
 ) {
     cleanup_stale_requests(request_map, cleanup_counter);
 
-    // Look up the pool id, restore the client's original id, and target that
-    // client. Anything without a matching pending request broadcasts.
-    let routed: Option<(String, String)> = match serde_json::from_str::<Value>(line) {
-        Ok(Value::Object(object)) => {
-            // Compute the lookup key (ending the borrow) before moving the object
-            // into `with_id`.
-            let key = match object.get("id") {
-                Some(id) if !id.is_null() => Some(jsonrpc::id_key(id)),
-                _ => None,
-            };
-            match key {
-                Some(key) => match request_map.lock().remove(&key) {
-                    Some((client_id, original_id, _)) => {
-                        Some((client_id, jsonrpc::with_id(object, original_id)))
+    match serde_json::from_str::<Value>(line) {
+        Ok(value) if value.is_object() => {
+            // Clone the id (ending the borrow) before potentially moving the
+            // object into `with_id`.
+            let id = non_null_id(&value).cloned();
+            match (message_has_method(&value), id) {
+                // SERVER-INITIATED REQUEST: method + id. Route to one client.
+                (true, Some(_)) => {
+                    route_server_request(line, clients, last_active_client).await;
+                }
+                // RESPONSE: no method, has id. Restore the client's original id.
+                (false, Some(id)) => {
+                    let key = jsonrpc::id_key(&id);
+                    let restored = match request_map.lock().remove(&key) {
+                        Some((client_id, original_id, _)) => match value {
+                            Value::Object(object) => {
+                                Some((client_id, jsonrpc::with_id(object, original_id)))
+                            }
+                            // Unreachable: guarded by is_object above.
+                            _ => None,
+                        },
+                        None => None,
+                    };
+                    match restored {
+                        Some((client_id, payload)) => {
+                            send_to_client(&client_id, payload, clients).await;
+                        }
+                        None => {
+                            // Orphan/late response: the request is gone (TTL
+                            // cleanup or client disconnect). Drop, never broadcast.
+                            diagnostics::log(format!(
+                                "pool_response_orphaned id={} reason=no_pending_request",
+                                key
+                            ));
+                        }
                     }
-                    None => None,
-                },
-                None => None,
+                }
+                // NOTIFICATION (method, no id) or non-routable object: broadcast.
+                _ => broadcast_to_all(line, clients).await,
             }
         }
-        Ok(_) => None,
+        Ok(_) => broadcast_to_all(line, clients).await,
         Err(_) => {
             diagnostics::log(format!("pool_response_parse_failed bytes={}", line.len()));
-            None
+            broadcast_to_all(line, clients).await;
+        }
+    }
+}
+
+/// Route a server-initiated request to a SINGLE client.
+///
+/// HEURISTIC: target the most-recently-active client — the one currently driving
+/// the upstream is assumed to have triggered the callback (e.g. sampling/roots).
+/// This is not capability-aware; matching the client that advertised the relevant
+/// capability at `initialize` is a future improvement. Falls back to any one
+/// connected client if the last-active client has disconnected, and drops the
+/// request if there are no clients. The line is forwarded VERBATIM so the
+/// server's id is preserved and the client's response id matches.
+async fn route_server_request(
+    line: &str,
+    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+    last_active_client: &Arc<Mutex<Option<String>>>,
+) {
+    // Snapshot last-active (releasing its lock) before locking clients, so the
+    // two parking_lot mutexes are never held nested.
+    let last_active = last_active_client.lock().clone();
+    let target = {
+        let clients_guard = clients.lock();
+        match last_active {
+            Some(id) if clients_guard.contains_key(&id) => Some(id),
+            // Fall back to any one connected client (first by iteration order).
+            _ => clients_guard.keys().next().cloned(),
         }
     };
 
-    let Some((client_id, payload)) = routed else {
-        broadcast_to_all(line, clients).await;
+    let Some(client_id) = target else {
+        diagnostics::log(format!(
+            "pool_server_request_dropped bytes={} reason=no_clients",
+            line.len()
+        ));
         return;
     };
+    diagnostics::log(format!("pool_server_request_routed client_id={}", client_id));
+    send_to_client(&client_id, line.to_string(), clients).await;
+}
 
-    let sender = clients.lock().get(&client_id).cloned();
+/// Deliver one already-serialized payload to a single client. Preserves the
+/// head-of-line-blocking-aware try_send-then-send pattern: the response router is
+/// a single task shared by every client, so when a client drains its bounded
+/// channel slower than messages arrive, `send().await` parks the *whole* router.
+/// try_send first records (and times) the stall instead of stalling silently. A
+/// payload for a vanished client is dropped, never rebroadcast.
+async fn send_to_client(
+    client_id: &str,
+    payload: String,
+    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+) {
+    let sender = clients.lock().get(client_id).cloned();
     let Some(sender) = sender else {
-        // The originating client is gone. Dropping is correct here: rebroadcasting
-        // a response bearing that client's original id could collide with another
-        // client's in-flight id.
         diagnostics::log(format!("pool_response_orphaned client_id={}", client_id));
         return;
     };
 
     let byte_len = payload.len();
-    // The response router is a single task shared by every client. When a client
-    // drains its bounded channel slower than responses arrive, `send().await`
-    // parks the *whole* router here — head-of-line blocking that stalls every
-    // other client. try_send first so the stall is recorded (and timed) instead
-    // of happening silently.
     match sender.try_send(payload) {
         Ok(()) => diagnostics::log(format!(
             "pool_response_routed client_id={} bytes={}",
@@ -682,6 +772,23 @@ async fn broadcast_to_all(line: &str, clients: &Arc<Mutex<HashMap<String, Client
     diagnostics::log(format!("pool_response_broadcast bytes={} clients={}", line.len(), senders.len()));
 }
 
+/// True if the message carries a `method` field. JSON-RPC requests and
+/// notifications have `method`; responses (carrying `result`/`error`) do not, so
+/// this is the primary discriminator between the two families.
+fn message_has_method(value: &Value) -> bool {
+    value.get("method").is_some()
+}
+
+/// The message's `id` if present and non-null. A null/absent id marks a
+/// notification; a non-null id marks a request (with `method`) or a response
+/// (without `method`).
+fn non_null_id(value: &Value) -> Option<&Value> {
+    match value.get("id") {
+        Some(id) if !id.is_null() => Some(id),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +801,12 @@ mod tests {
         let (tx, rx) = mpsc::channel::<String>(8);
         clients.lock().insert(id.to_string(), tx);
         rx
+    }
+
+    // Build a last-active-client slot for route_response, optionally pre-set to a
+    // specific client (the heuristic target for server-initiated requests).
+    fn last_active(client_id: Option<&str>) -> Arc<Mutex<Option<String>>> {
+        Arc::new(Mutex::new(client_id.map(str::to_string)))
     }
 
     // The core multiplexing fix: two clients that independently used the same
@@ -715,12 +828,14 @@ mod tests {
         let mut rx_a = channel_client(&clients, "clientA");
         let mut rx_b = channel_client(&clients, "clientB");
         let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
 
         route_response(
             r#"{"jsonrpc":"2.0","id":1,"result":"A"}"#,
             &clients,
             &request_map,
             &counter,
+            &last_active,
         )
         .await;
         route_response(
@@ -728,6 +843,7 @@ mod tests {
             &clients,
             &request_map,
             &counter,
+            &last_active,
         )
         .await;
 
@@ -745,36 +861,61 @@ mod tests {
         assert!(rx_b.try_recv().is_err());
     }
 
-    // Ids we never issued (server-initiated requests) and id-less notifications
-    // fan out to every client.
+    // A server-initiated request (method + an id the pool never issued) must
+    // route to exactly ONE client — the heuristic last-active client — not
+    // broadcast. Broadcasting would make every client answer the same request,
+    // sending duplicate/conflicting responses upstream. The server's id is
+    // preserved verbatim so the client's response id matches.
     #[tokio::test]
-    async fn route_response_broadcasts_unmatched_and_notifications() {
+    async fn route_response_routes_server_request_to_single_client() {
         let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
         let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let mut rx_a = channel_client(&clients, "clientA");
         let mut rx_b = channel_client(&clients, "clientB");
         let counter = Arc::new(AtomicU32::new(0));
+        // clientA is the most-recently-active client → the heuristic target.
+        let last_active = last_active(Some("clientA"));
 
         route_response(
-            r#"{"jsonrpc":"2.0","id":999,"method":"ping"}"#,
+            r#"{"jsonrpc":"2.0","id":42,"method":"sampling/createMessage"}"#,
             &clients,
             &request_map,
             &counter,
+            &last_active,
         )
         .await;
-        assert!(rx_a.try_recv().is_ok());
-        assert!(rx_b.try_recv().is_ok());
+
+        let received: Value =
+            serde_json::from_str(&rx_a.try_recv().expect("clientA receives server request"))
+                .expect("valid json");
+        assert_eq!(received["id"], json!(42), "server id preserved verbatim");
+        assert_eq!(received["method"], json!("sampling/createMessage"));
+        // Exactly one client answers: no broadcast.
+        assert!(rx_b.try_recv().is_err(), "server request not broadcast");
+    }
+
+    // A pure notification (method, no id) fans out to every client.
+    #[tokio::test]
+    async fn route_response_broadcasts_notifications() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let mut rx_b = channel_client(&clients, "clientB");
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
 
         route_response(
             r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
             &clients,
             &request_map,
             &counter,
+            &last_active,
         )
         .await;
-        assert!(rx_a.try_recv().is_ok());
-        assert!(rx_b.try_recv().is_ok());
+        assert!(rx_a.try_recv().is_ok(), "notification fans out to clientA");
+        assert!(rx_b.try_recv().is_ok(), "notification fans out to clientB");
     }
 
     // A response whose originating client has disconnected is dropped, never
@@ -789,15 +930,38 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new()));
         let mut rx_other = channel_client(&clients, "other");
         let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
 
         route_response(
             r#"{"jsonrpc":"2.0","id":5,"result":"X"}"#,
             &clients,
             &request_map,
             &counter,
+            &last_active,
         )
         .await;
 
         assert!(rx_other.try_recv().is_err(), "orphan response not broadcast");
+    }
+
+    // The classifier helpers distinguish the three JSON-RPC message kinds by the
+    // presence of `method` and a non-null `id`.
+    #[test]
+    fn classifier_helpers_distinguish_message_kinds() {
+        let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        assert!(message_has_method(&request));
+        assert_eq!(non_null_id(&request), Some(&json!(1)));
+
+        let notification = json!({"jsonrpc":"2.0","method":"notifications/progress"});
+        assert!(message_has_method(&notification));
+        assert_eq!(non_null_id(&notification), None);
+
+        let response = json!({"jsonrpc":"2.0","id":7,"result":"ok"});
+        assert!(!message_has_method(&response));
+        assert_eq!(non_null_id(&response), Some(&json!(7)));
+
+        // A null id is treated as absent (notification semantics).
+        let null_id = json!({"jsonrpc":"2.0","id":null,"method":"x"});
+        assert_eq!(non_null_id(&null_id), None);
     }
 }

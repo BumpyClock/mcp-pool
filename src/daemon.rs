@@ -28,15 +28,12 @@ pub async fn serve() -> anyhow::Result<()> {
     let discovered = pool.discover_existing_sockets();
     diagnostics::log(format!("daemon starting; discovered {discovered} existing socket(s)"));
 
-    // Bind control socket. Stale file cleanup on unix is done in transport::bind,
-    // but we also clear a pre-existing path defensively in case bind skipped it.
+    // Bind the control socket. Do NOT pre-remove a stale unix socket file here:
+    // transport::bind() now distinguishes a live daemon (AddrInUse + a successful
+    // connect probe means we lose and exit) from a stale leftover (probe fails, so
+    // bind removes and rebinds). Unlinking first would reopen the cold-start
+    // split-brain race where two daemons each unlink then bind separate listeners.
     let control_path = control_socket_path();
-    #[cfg(unix)]
-    {
-        if control_path.exists() {
-            let _ = std::fs::remove_file(&control_path);
-        }
-    }
 
     let listener = transport::bind(&control_path)?;
     diagnostics::log(format!("control socket bound at {}", control_path.display()));

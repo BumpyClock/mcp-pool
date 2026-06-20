@@ -531,9 +531,7 @@ fn configure_detached(command: &mut std::process::Command) {
 fn configure_detached(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     // New process group so the daemon survives the CLI's controlling terminal.
-    unsafe {
-        command.process_group(0);
-    }
+    command.process_group(0);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::null());
     command.stderr(std::process::Stdio::null());

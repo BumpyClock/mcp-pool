@@ -44,8 +44,31 @@ pub fn config_path() -> io::Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
+/// Stable short hash of the effective home identity, used to namespace Windows
+/// named pipes. Unix socket paths live under `state_dir()` (which already honors
+/// `MCP_POOL_HOME`), but Windows pipe names are a machine-global namespace, so a
+/// fixed name would let distinct homes — parallel test pools, or two users —
+/// collide on the same pipe and even attach to the wrong daemon. The daemon and
+/// CLI are the same binary reading the same environment, so both derive the same
+/// value. FNV-1a (rather than DefaultHasher) keeps the result explicit and stable
+/// across processes regardless of std internals.
+#[cfg(windows)]
+fn home_scope_hash() -> String {
+    let seed = std::env::var(ENV_HOME)
+        .ok()
+        .or_else(|| dirs::home_dir().map(|path| path.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in seed.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", hash as u32)
+}
+
 /// Control socket path. Unix: a socket file in the state dir.
-/// Windows: a named-pipe name expressed as a path.
+/// Windows: a named-pipe name, namespaced by the home hash so isolated homes do
+/// not share one global control pipe.
 pub fn control_socket_path() -> PathBuf {
     #[cfg(unix)]
     {
@@ -55,7 +78,8 @@ pub fn control_socket_path() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        PathBuf::from(r"\\.\pipe\mcp-pool-control")
+        let scope = home_scope_hash();
+        PathBuf::from(format!(r"\\.\pipe\mcp-pool-{scope}-control"))
     }
 }
 
@@ -70,7 +94,8 @@ pub fn server_socket_path(name: &str) -> PathBuf {
     }
     #[cfg(windows)]
     {
-        PathBuf::from(format!(r"\\.\pipe\mcp-pool-{safe}"))
+        let scope = home_scope_hash();
+        PathBuf::from(format!(r"\\.\pipe\mcp-pool-{scope}-{safe}"))
     }
 }
 

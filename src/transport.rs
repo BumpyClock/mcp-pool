@@ -27,7 +27,10 @@ pub struct LocalListener {
 }
 
 /// Bind a listening endpoint at `path`.
-/// - Unix: a Unix domain socket file (parent dir created, stale file removed).
+/// - Unix: a Unix domain socket file. The parent dir is created, then bind is
+///   attempted directly; an `AddrInUse` error is resolved by probing for a live
+///   listener so a live owner wins (the caller exits) while only a genuinely
+///   stale file is removed and rebound.
 /// - Windows: eagerly creates the first pipe instance with
 ///   `first_pipe_instance(true)`, claiming the name exclusively so a second
 ///   process binding the same name fails. Later accepts create more instances.
@@ -37,11 +40,27 @@ pub fn bind(path: &Path) -> io::Result<LocalListener> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        if path.exists() {
-            let _ = std::fs::remove_file(path);
+        // Singleton semantics: do NOT unconditionally unlink before bind. Two
+        // cold-start daemons could otherwise both unlink and then bind separate
+        // listeners on the same path (split brain). Instead bind first and only
+        // on AddrInUse distinguish a live owner from a stale leftover file.
+        match tokio::net::UnixListener::bind(path) {
+            Ok(inner) => Ok(LocalListener { inner }),
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                // A successful connect means a live daemon already owns this
+                // path, so this losing daemon must surface AddrInUse and exit.
+                if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                    return Err(error);
+                }
+                // No listener answered: the socket file is a stale leftover from
+                // a daemon that crashed without cleaning up. Best-effort remove
+                // (it may already be gone) then retry the bind exactly once.
+                let _ = std::fs::remove_file(path);
+                let inner = tokio::net::UnixListener::bind(path)?;
+                Ok(LocalListener { inner })
+            }
+            Err(error) => Err(error),
         }
-        let inner = tokio::net::UnixListener::bind(path)?;
-        Ok(LocalListener { inner })
     }
 
     #[cfg(windows)]
