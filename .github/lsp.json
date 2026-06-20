@@ -1,0 +1,11 @@
+{
+  "lspServers": {
+    "rust-analyzer": {
+      "command": "rust-analyzer",
+      "args": ["--stdio"],
+      "fileExtensions": {
+        ".rs": "rust"
+      }
+    }
+  }
+}

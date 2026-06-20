@@ -12,6 +12,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
 
 use crate::diagnostics;
+use crate::jsonrpc::{self, IdAllocator};
 use crate::transport::{LocalListener, LocalStream};
 use crate::types::ServerStatus;
 use crate::upstream::{UpstreamHandle, UpstreamSpec};
@@ -21,6 +22,12 @@ const REQUEST_TTL_SECS: u64 = 300;
 const CLEANUP_INTERVAL: u32 = 100;
 
 type ClientSender = mpsc::Sender<String>;
+
+/// A request awaiting its response: the client that issued it, the client's
+/// original JSON-RPC id (restored on the matching response), and when it was
+/// registered (for TTL cleanup). Keyed in the request map by the pool-unique id.
+type PendingRequest = (String, Value, Instant);
+type RequestMap = Arc<Mutex<HashMap<String, PendingRequest>>>;
 
 /// One pooled MCP: a single upstream multiplexed across many agent clients.
 /// Clients connect over the bound local socket; requests forward via
@@ -37,10 +44,18 @@ pub struct SocketProxy {
     request_tx: Arc<Mutex<Option<mpsc::Sender<String>>>>,
     listener: Mutex<Option<Arc<LocalListener>>>,
     clients: Arc<Mutex<HashMap<String, ClientSender>>>,
-    request_map: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    request_map: RequestMap,
+    // Per-upstream id translation: client request ids are rewritten to pool-unique
+    // ids before forwarding, so concurrent clients (which independently reuse
+    // 1, 2, 3, ...) never collide on the shared upstream connection.
+    id_allocator: Arc<IdAllocator>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     ready_notify: Arc<Notify>,
+    // Fires when the upstream request sender is published (or when the upstream
+    // stops), so a client that connects mid-startup waits for the sender instead
+    // of dropping its first request.
+    upstream_ready: Arc<Notify>,
     started_at: Mutex<Option<Instant>>,
     total_connections: Arc<AtomicU32>,
     cleanup_counter: Arc<AtomicU32>,
@@ -58,9 +73,11 @@ impl SocketProxy {
             listener: Mutex::new(None),
             clients: Arc::new(Mutex::new(HashMap::new())),
             request_map: Arc::new(Mutex::new(HashMap::new())),
+            id_allocator: Arc::new(IdAllocator::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(Notify::new()),
             ready_notify: Arc::new(Notify::new()),
+            upstream_ready: Arc::new(Notify::new()),
             started_at: Mutex::new(None),
             total_connections: Arc::new(AtomicU32::new(0)),
             cleanup_counter: Arc::new(AtomicU32::new(0)),
@@ -171,6 +188,7 @@ impl SocketProxy {
         let shutdown = self.shutdown.clone();
         let shutdown_notify = self.shutdown_notify.clone();
         let ready_notify = self.ready_notify.clone();
+        let upstream_ready = self.upstream_ready.clone();
         let clients = self.clients.clone();
         let request_map = self.request_map.clone();
         let cleanup_counter = self.cleanup_counter.clone();
@@ -186,6 +204,9 @@ impl SocketProxy {
                 shutdown.store(true, Ordering::SeqCst);
                 shutdown_notify.notify_waiters();
                 ready_notify.notify_waiters();
+                // Wake any client waiting for the upstream sender so it re-checks,
+                // sees shutdown, and stops waiting instead of blocking the timeout.
+                upstream_ready.notify_waiters();
                 if let Some(tx) = exit_complete_tx.lock().take() {
                     let _ = tx.send(());
                 }
@@ -201,9 +222,13 @@ impl SocketProxy {
             };
 
             *request_tx_slot.lock() = Some(handle.request_tx.clone());
+            // Publish readiness: clients parked in acquire_request_sender wake and
+            // forward their queued first request now that the sender exists.
+            upstream_ready.notify_waiters();
 
             // Response router: each upstream message is one JSON-RPC object (no
             // trailing newline). Route by id, broadcast id-less.
+            let mut processed: u64 = 0;
             while !shutdown.load(Ordering::SeqCst) {
                 let message = tokio::select! {
                     msg = response_rx.recv() => match msg {
@@ -213,6 +238,18 @@ impl SocketProxy {
                     _ = shutdown_notify.notified() => break,
                 };
                 route_response(&message, &clients, &request_map, &cleanup_counter).await;
+                processed += 1;
+                // Periodic gauge so a backed-up router is visible without
+                // per-message spam. A climbing pending_requests count means
+                // responses are not draining as fast as requests arrive.
+                if processed % 500 == 0 {
+                    let pending = request_map.lock().len();
+                    let live = clients.lock().len();
+                    diagnostics::log(format!(
+                        "pool_router_gauge processed={} pending_requests={} clients={}",
+                        processed, pending, live
+                    ));
+                }
             }
 
             diagnostics::log(format!("pool_upstream_exited name={}", name));
@@ -224,6 +261,8 @@ impl SocketProxy {
         let clients = self.clients.clone();
         let request_map = self.request_map.clone();
         let request_tx = self.request_tx.clone();
+        let id_allocator = self.id_allocator.clone();
+        let upstream_ready = self.upstream_ready.clone();
         let shutdown = self.shutdown.clone();
         let shutdown_notify = self.shutdown_notify.clone();
         let name = self.name.clone();
@@ -249,6 +288,8 @@ impl SocketProxy {
                         let clients_for_drop = clients.clone();
                         let request_map_for_drop = request_map.clone();
                         let request_tx_for_client = request_tx.clone();
+                        let id_allocator_for_client = id_allocator.clone();
+                        let upstream_ready_for_client = upstream_ready.clone();
                         let shutdown_for_client = shutdown.clone();
                         let shutdown_notify_for_client = shutdown_notify.clone();
                         let cleanup_counter_for_client = cleanup_counter.clone();
@@ -259,6 +300,8 @@ impl SocketProxy {
                                 stream,
                                 client_id_clone,
                                 request_tx_for_client,
+                                upstream_ready_for_client,
+                                id_allocator_for_client,
                                 request_map_for_drop,
                                 clients_for_drop,
                                 shutdown_for_client,
@@ -331,15 +374,18 @@ impl SocketProxy {
 }
 
 /// Pump one client connection: read newline-delimited JSON-RPC requests from the
-/// client, forward to the upstream, and write routed responses back as they
-/// arrive on `rx`. Records the (client_id, time) for each request so responses
-/// can be routed back by JSON-RPC id.
+/// client, translate each request id to a pool-unique id, forward to the
+/// upstream, and write routed responses back as they arrive on `rx`. The
+/// (client_id, original_id) mapping is recorded under the pool id so responses
+/// route back to the right client with the id that client expects.
 #[allow(clippy::too_many_arguments)]
 async fn handle_client(
     stream: LocalStream,
     client_id: String,
     request_tx: Arc<Mutex<Option<mpsc::Sender<String>>>>,
-    request_map: Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    upstream_ready: Arc<Notify>,
+    id_allocator: Arc<IdAllocator>,
+    request_map: RequestMap,
     clients: Arc<Mutex<HashMap<String, ClientSender>>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
@@ -372,21 +418,56 @@ async fn handle_client(
                     if line.is_empty() {
                         continue;
                     }
-                    if let Ok(value) = serde_json::from_str::<Value>(&line) {
-                        if let Some(id) = value.get("id").and_then(id_key) {
-                            request_map.lock().insert(id, (client_id.clone(), Instant::now()));
+                    // Rewrite the client's request id to a pool-unique id so
+                    // concurrent clients never collide on the shared upstream; the
+                    // original is restored on the matching response. Notifications
+                    // (no id) and unparseable lines forward verbatim.
+                    let forward_line = match serde_json::from_str::<Value>(&line) {
+                        Ok(Value::Object(object)) => {
+                            // Clone the original id (ending the borrow) before moving
+                            // the object into `with_id`.
+                            let original_id = match object.get("id") {
+                                Some(id) if !id.is_null() => Some(id.clone()),
+                                _ => None,
+                            };
+                            match original_id {
+                                Some(original_id) => {
+                                    let pool_id = id_allocator.allocate();
+                                    request_map.lock().insert(
+                                        pool_id.to_string(),
+                                        (client_id.clone(), original_id, Instant::now()),
+                                    );
+                                    jsonrpc::with_id(object, Value::from(pool_id))
+                                }
+                                None => line.clone(),
+                            }
                         }
-                    } else if parse_failures < 3 {
-                        // Throttle log spam from a chatty malformed sender.
-                        parse_failures += 1;
-                        diagnostics::log(format!(
-                            "pool_request_parse_failed client_id={} bytes={}",
-                            client_id, line.len()
-                        ));
-                    }
-                    let sender = request_tx.lock().clone();
+                        Ok(_) => line.clone(),
+                        Err(_) => {
+                            if parse_failures < 3 {
+                                // Throttle log spam from a chatty malformed sender.
+                                parse_failures += 1;
+                                diagnostics::log(format!(
+                                    "pool_request_parse_failed client_id={} bytes={}",
+                                    client_id, line.len()
+                                ));
+                            }
+                            line.clone()
+                        }
+                    };
+
+                    // Wait for the upstream sender if it is still starting rather
+                    // than dropping this request: the first initialize/tools-list
+                    // must survive cold start for tools to appear promptly.
+                    let sender = acquire_request_sender(
+                        &request_tx,
+                        &upstream_ready,
+                        &shutdown,
+                        &client_id,
+                    )
+                    .await;
                     if let Some(sender) = sender {
-                        if sender.send(line.clone()).await.is_err() {
+                        if sender.send(forward_line).await.is_err() {
                             diagnostics::log(format!(
                                 "pool_request_forward_failed client_id={} reason=upstream_closed",
                                 client_id
@@ -398,7 +479,10 @@ async fn handle_client(
                             client_id, line.len()
                         ));
                     } else {
-                        diagnostics::log(format!("pool_upstream_missing client_id={}", client_id));
+                        diagnostics::log(format!(
+                            "pool_request_dropped client_id={} reason=upstream_unavailable",
+                            client_id
+                        ));
                     }
                 }
                 Err(err) => {
@@ -436,59 +520,142 @@ async fn handle_client(
 
     // Drop this client's in-flight requests so responses are not routed to a
     // (now closed) sender, then remove it from the client table.
-    request_map.lock().retain(|_, (cid, _)| cid != &client_id);
+    request_map.lock().retain(|_, (cid, _, _)| cid != &client_id);
     clients.lock().remove(&client_id);
     cleanup_stale_requests(&request_map, &cleanup_counter);
 }
 
+const UPSTREAM_READY_TIMEOUT_SECS: u64 = 30;
+
+/// Obtain the upstream request sender, waiting if the upstream is still starting.
+/// Returns `None` only if the upstream stops or never publishes a sender within
+/// the timeout, so a client's first request is queued through cold start instead
+/// of being silently dropped.
+async fn acquire_request_sender(
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    upstream_ready: &Arc<Notify>,
+    shutdown: &Arc<AtomicBool>,
+    client_id: &str,
+) -> Option<mpsc::Sender<String>> {
+    if let Some(sender) = request_tx.lock().clone() {
+        return Some(sender);
+    }
+    diagnostics::log(format!("pool_upstream_wait client_id={}", client_id));
+    let deadline = Instant::now() + Duration::from_secs(UPSTREAM_READY_TIMEOUT_SECS);
+    loop {
+        // Arm the waiter before re-checking the slot so a notify firing between
+        // the check and the await is not lost (lost-wakeup safe).
+        let ready = upstream_ready.notified();
+        tokio::pin!(ready);
+        ready.as_mut().enable();
+
+        if let Some(sender) = request_tx.lock().clone() {
+            return Some(sender);
+        }
+        if shutdown.load(Ordering::SeqCst) {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return request_tx.lock().clone();
+        }
+        if tokio::time::timeout(remaining, ready).await.is_err() {
+            return request_tx.lock().clone();
+        }
+    }
+}
+
 /// Route one upstream response (single JSON-RPC object, no trailing newline) to
-/// the client that issued the matching request, or broadcast to all when it has
-/// no id or the originating client is gone.
+/// the client that issued the matching request, restoring that client's original
+/// id. Id-less notifications and ids we never issued (e.g. server-initiated
+/// requests) broadcast to all clients; a response whose client has disconnected
+/// is dropped.
 async fn route_response(
     line: &str,
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
-    request_map: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
+    request_map: &RequestMap,
     cleanup_counter: &Arc<AtomicU32>,
 ) {
     cleanup_stale_requests(request_map, cleanup_counter);
 
-    let mut target = None;
-    match serde_json::from_str::<Value>(line) {
-        Ok(value) => {
-            if let Some(id) = value.get("id").and_then(id_key) {
-                target = request_map.lock().remove(&id).map(|(cid, _)| cid);
+    // Look up the pool id, restore the client's original id, and target that
+    // client. Anything without a matching pending request broadcasts.
+    let routed: Option<(String, String)> = match serde_json::from_str::<Value>(line) {
+        Ok(Value::Object(object)) => {
+            // Compute the lookup key (ending the borrow) before moving the object
+            // into `with_id`.
+            let key = match object.get("id") {
+                Some(id) if !id.is_null() => Some(jsonrpc::id_key(id)),
+                _ => None,
+            };
+            match key {
+                Some(key) => match request_map.lock().remove(&key) {
+                    Some((client_id, original_id, _)) => {
+                        Some((client_id, jsonrpc::with_id(object, original_id)))
+                    }
+                    None => None,
+                },
+                None => None,
             }
         }
+        Ok(_) => None,
         Err(_) => {
             diagnostics::log(format!("pool_response_parse_failed bytes={}", line.len()));
+            None
         }
-    }
+    };
 
-    if let Some(client_id) = target {
-        let sender = clients.lock().get(&client_id).cloned();
-        if let Some(sender) = sender {
-            if sender.send(line.to_string()).await.is_ok() {
+    let Some((client_id, payload)) = routed else {
+        broadcast_to_all(line, clients).await;
+        return;
+    };
+
+    let sender = clients.lock().get(&client_id).cloned();
+    let Some(sender) = sender else {
+        // The originating client is gone. Dropping is correct here: rebroadcasting
+        // a response bearing that client's original id could collide with another
+        // client's in-flight id.
+        diagnostics::log(format!("pool_response_orphaned client_id={}", client_id));
+        return;
+    };
+
+    let byte_len = payload.len();
+    // The response router is a single task shared by every client. When a client
+    // drains its bounded channel slower than responses arrive, `send().await`
+    // parks the *whole* router here — head-of-line blocking that stalls every
+    // other client. try_send first so the stall is recorded (and timed) instead
+    // of happening silently.
+    match sender.try_send(payload) {
+        Ok(()) => diagnostics::log(format!(
+            "pool_response_routed client_id={} bytes={}",
+            client_id, byte_len
+        )),
+        Err(mpsc::error::TrySendError::Full(payload)) => {
+            let blocked_since = Instant::now();
+            diagnostics::log(format!(
+                "pool_router_blocked client_id={} reason=client_channel_full",
+                client_id
+            ));
+            if sender.send(payload).await.is_ok() {
                 diagnostics::log(format!(
-                    "pool_response_routed client_id={} bytes={}",
-                    client_id, line.len()
+                    "pool_response_routed client_id={} bytes={} blocked_ms={}",
+                    client_id,
+                    byte_len,
+                    blocked_since.elapsed().as_millis()
                 ));
             } else {
                 diagnostics::log(format!("pool_response_send_failed client_id={}", client_id));
             }
-        } else {
-            broadcast_to_all(line, clients).await;
         }
-    } else {
-        broadcast_to_all(line, clients).await;
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            diagnostics::log(format!("pool_response_send_failed client_id={}", client_id));
+        }
     }
 }
 
 /// Every CLEANUP_INTERVAL-th call, drop request-map entries older than
 /// REQUEST_TTL_SECS. Throttled via a counter so the router hot path stays cheap.
-fn cleanup_stale_requests(
-    request_map: &Arc<Mutex<HashMap<String, (String, Instant)>>>,
-    cleanup_counter: &Arc<AtomicU32>,
-) {
+fn cleanup_stale_requests(request_map: &RequestMap, cleanup_counter: &Arc<AtomicU32>) {
     let count = cleanup_counter.fetch_add(1, Ordering::Relaxed);
     if count % CLEANUP_INTERVAL != 0 {
         return;
@@ -496,7 +663,7 @@ fn cleanup_stale_requests(
 
     let now = Instant::now();
     let before = request_map.lock().len();
-    request_map.lock().retain(|_, (_, inserted_at)| {
+    request_map.lock().retain(|_, (_, _, inserted_at)| {
         now.duration_since(*inserted_at).as_secs() <= REQUEST_TTL_SECS
     });
     let after = request_map.lock().len();
@@ -515,15 +682,122 @@ async fn broadcast_to_all(line: &str, clients: &Arc<Mutex<HashMap<String, Client
     diagnostics::log(format!("pool_response_broadcast bytes={} clients={}", line.len(), senders.len()));
 }
 
-/// Normalize a JSON-RPC id into a stable string key, prefixed by variant so
-/// numeric `1` and string `"1"` never collide. Null/absent ids -> None
-/// (treated as broadcast-worthy notifications).
-fn id_key(value: &Value) -> Option<String> {
-    match value {
-        Value::String(value) => Some(format!("s:{}", value)),
-        Value::Number(value) => Some(format!("n:{}", value)),
-        Value::Bool(value) => Some(format!("b:{}", value)),
-        Value::Null => None,
-        _ => Some(value.to_string()),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn channel_client(
+        clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+        id: &str,
+    ) -> mpsc::Receiver<String> {
+        let (tx, rx) = mpsc::channel::<String>(8);
+        clients.lock().insert(id.to_string(), tx);
+        rx
+    }
+
+    // The core multiplexing fix: two clients that independently used the same
+    // raw id (1) are tracked under distinct pool ids, so their responses route
+    // back to the right client with each client's original id restored — no
+    // cross-wiring, no broadcast.
+    #[tokio::test]
+    async fn route_response_restores_ids_without_cross_wiring() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map
+            .lock()
+            .insert("1".into(), ("clientA".into(), json!(1), Instant::now()));
+        request_map
+            .lock()
+            .insert("2".into(), ("clientB".into(), json!(1), Instant::now()));
+
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let mut rx_b = channel_client(&clients, "clientB");
+        let counter = Arc::new(AtomicU32::new(0));
+
+        route_response(
+            r#"{"jsonrpc":"2.0","id":1,"result":"A"}"#,
+            &clients,
+            &request_map,
+            &counter,
+        )
+        .await;
+        route_response(
+            r#"{"jsonrpc":"2.0","id":2,"result":"B"}"#,
+            &clients,
+            &request_map,
+            &counter,
+        )
+        .await;
+
+        let a: Value = serde_json::from_str(&rx_a.try_recv().expect("clientA response"))
+            .expect("valid json");
+        let b: Value = serde_json::from_str(&rx_b.try_recv().expect("clientB response"))
+            .expect("valid json");
+        assert_eq!(a["id"], json!(1), "clientA original id restored");
+        assert_eq!(a["result"], json!("A"));
+        assert_eq!(b["id"], json!(1), "clientB original id restored");
+        assert_eq!(b["result"], json!("B"));
+
+        // Each client received exactly one message: no cross-wiring.
+        assert!(rx_a.try_recv().is_err());
+        assert!(rx_b.try_recv().is_err());
+    }
+
+    // Ids we never issued (server-initiated requests) and id-less notifications
+    // fan out to every client.
+    #[tokio::test]
+    async fn route_response_broadcasts_unmatched_and_notifications() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let mut rx_b = channel_client(&clients, "clientB");
+        let counter = Arc::new(AtomicU32::new(0));
+
+        route_response(
+            r#"{"jsonrpc":"2.0","id":999,"method":"ping"}"#,
+            &clients,
+            &request_map,
+            &counter,
+        )
+        .await;
+        assert!(rx_a.try_recv().is_ok());
+        assert!(rx_b.try_recv().is_ok());
+
+        route_response(
+            r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
+            &clients,
+            &request_map,
+            &counter,
+        )
+        .await;
+        assert!(rx_a.try_recv().is_ok());
+        assert!(rx_b.try_recv().is_ok());
+    }
+
+    // A response whose originating client has disconnected is dropped, never
+    // rebroadcast (its restored id could collide with a live client's in-flight id).
+    #[tokio::test]
+    async fn route_response_drops_when_origin_client_gone() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map
+            .lock()
+            .insert("5".into(), ("ghost".into(), json!(1), Instant::now()));
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_other = channel_client(&clients, "other");
+        let counter = Arc::new(AtomicU32::new(0));
+
+        route_response(
+            r#"{"jsonrpc":"2.0","id":5,"result":"X"}"#,
+            &clients,
+            &request_map,
+            &counter,
+        )
+        .await;
+
+        assert!(rx_other.try_recv().is_err(), "orphan response not broadcast");
     }
 }

@@ -40,9 +40,15 @@ impl Pool {
     }
 
     pub fn start(&self, name: &str, spec: UpstreamSpec) -> std::io::Result<()> {
-        // Idempotent: if already tracked and live, no-op.
-        if self.is_running(name) {
-            return Ok(());
+        // Hold the write lock across the whole check-bind-insert so concurrent
+        // auto-starts (every proxy now self-starts) cannot both pass the liveness
+        // check and race to bind the same socket. parking_lot is not reentrant, so
+        // the liveness check is inlined here rather than calling is_running().
+        let mut proxies = self.proxies.write();
+        if let Some(existing) = proxies.get(name) {
+            if existing.status() == ServerStatus::Running && socket_alive(&existing.socket_path()) {
+                return Ok(());
+            }
         }
 
         let socket_path = crate::config::server_socket_path(name);
@@ -54,9 +60,7 @@ impl Pool {
         ));
         proxy.start()?;
 
-        self.proxies
-            .write()
-            .insert(name.to_string(), proxy);
+        proxies.insert(name.to_string(), proxy);
         Ok(())
     }
 

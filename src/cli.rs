@@ -329,7 +329,39 @@ async fn control_round_trip(
     mode: OutputMode,
     color: bool,
 ) -> anyhow::Result<()> {
-    let mut request_line = serde_json::to_string(&request)?;
+    let response = send_control(&request).await?;
+
+    if !response.ok {
+        let message = response.error.unwrap_or_else(|| "unknown error".to_string());
+        eprintln!("mcp-pool: {message}");
+        std::process::exit(1);
+    }
+
+    print_response_data(&request, response.data, mode, color);
+    Ok(())
+}
+
+/// Ensure a named server's upstream is started, auto-launching the daemon if
+/// needed. Idempotent (a no-op when already running) and writes nothing to
+/// stdout, so the `proxy` bridge can call it without corrupting its byte stream.
+pub(crate) async fn ensure_started(name: &str) -> anyhow::Result<()> {
+    let response = send_control(&ControlRequest::Start {
+        name: name.to_string(),
+    })
+    .await?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            response.error.unwrap_or_else(|| "unknown error".to_string())
+        ))
+    }
+}
+
+/// Serialize a control request, send it (retrying once on an empty teardown
+/// response), and parse the daemon's reply.
+async fn send_control(request: &ControlRequest) -> anyhow::Result<ControlResponse> {
+    let mut request_line = serde_json::to_string(request)?;
     request_line.push('\n');
 
     // The control socket can briefly hand a connection to a tearing-down daemon
@@ -347,17 +379,8 @@ async fn control_round_trip(
         }
     };
 
-    let response: ControlResponse = serde_json::from_str(response_line.trim())
-        .map_err(|error| anyhow::anyhow!("parse control response: {error}"))?;
-
-    if !response.ok {
-        let message = response.error.unwrap_or_else(|| "unknown error".to_string());
-        eprintln!("mcp-pool: {message}");
-        std::process::exit(1);
-    }
-
-    print_response_data(&request, response.data, mode, color);
-    Ok(())
+    serde_json::from_str(response_line.trim())
+        .map_err(|error| anyhow::anyhow!("parse control response: {error}"))
 }
 
 /// Send one framed request line and read one response line. Returns `None` when

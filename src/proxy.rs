@@ -8,6 +8,11 @@ use crate::{config, diagnostics, transport};
 /// Bridge the caller's stdio to a pooled MCP's socket. This is the per-agent
 /// thin client: an agent's MCP config points at `mcp-pool proxy <name>`, and this
 /// pumps stdin -> socket and socket -> stdout verbatim.
+///
+/// Self-starting: if the pool socket is already live the upstream is shared as-is
+/// ("if it's started, proxy through"); otherwise the upstream is auto-started via
+/// the daemon ("if not started, auto-start") before bridging. The agent's MCP
+/// config needs no separate `start` step.
 pub async fn run(name: &str) -> anyhow::Result<()> {
     let endpoint = config::server_socket_path(name);
     diagnostics::log(format!(
@@ -16,15 +21,28 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
         endpoint.display()
     ));
 
-    let stream = match connect_with_retry(&endpoint).await {
-        Ok(stream) => stream,
-        Err(error) => {
-            eprintln!(
-                "mcp-pool: could not connect to pool socket for '{name}' ({}). \
-                 Is the server started? Run: mcp-pool start {name}",
-                error
-            );
-            std::process::exit(1);
+    let stream = match transport::connect(&endpoint).await {
+        Ok(stream) => {
+            diagnostics::log(format!("proxy_attached_existing name={}", name));
+            stream
+        }
+        Err(_) => {
+            // Socket not live: ask the daemon to start the upstream (idempotent,
+            // auto-launches the daemon), then connect to the freshly bound socket.
+            diagnostics::log(format!("proxy_autostart name={}", name));
+            if let Err(error) = crate::cli::ensure_started(name).await {
+                eprintln!("mcp-pool: could not start pool server '{name}': {error}");
+                std::process::exit(1);
+            }
+            match connect_with_retry(&endpoint).await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    eprintln!(
+                        "mcp-pool: started '{name}' but could not connect to its pool socket ({error})"
+                    );
+                    std::process::exit(1);
+                }
+            }
         }
     };
 

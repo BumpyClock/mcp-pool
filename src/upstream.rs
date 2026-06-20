@@ -172,6 +172,7 @@ fn spawn_stdout_reader(stdout: tokio::process::ChildStdout, response_tx: mpsc::S
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         let mut buffer = String::new();
+        let mut forwarded: u64 = 0;
         loop {
             buffer.clear();
             match reader.read_line(&mut buffer).await {
@@ -181,8 +182,37 @@ fn spawn_stdout_reader(stdout: tokio::process::ChildStdout, response_tx: mpsc::S
                     if line.is_empty() {
                         continue;
                     }
-                    if response_tx.send(line.to_string()).await.is_err() {
-                        break;
+                    let payload = line.to_string();
+                    // try_send first: if the pool's response channel is full the
+                    // router is not draining, and blocking here back-pressures
+                    // onto the child's stdout pipe. Record that stall explicitly
+                    // so an upstream-side backlog is distinguishable from a slow
+                    // child.
+                    match response_tx.try_send(payload) {
+                        Ok(()) => {}
+                        Err(mpsc::error::TrySendError::Full(payload)) => {
+                            let blocked_since = std::time::Instant::now();
+                            diagnostics::log(format!(
+                                "upstream_stdout_backpressure response_channel_full available={}",
+                                response_tx.capacity()
+                            ));
+                            if response_tx.send(payload).await.is_err() {
+                                break;
+                            }
+                            diagnostics::log(format!(
+                                "upstream_stdout_unblocked blocked_ms={}",
+                                blocked_since.elapsed().as_millis()
+                            ));
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    }
+                    forwarded += 1;
+                    if forwarded % 1000 == 0 {
+                        diagnostics::log(format!(
+                            "upstream_stdout_gauge forwarded={} channel_available={}",
+                            forwarded,
+                            response_tx.capacity()
+                        ));
                     }
                 }
                 Err(error) => {

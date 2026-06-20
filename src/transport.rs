@@ -17,11 +17,20 @@ pub struct LocalListener {
     inner: tokio::net::UnixListener,
     #[cfg(windows)]
     pipe_name: String,
+    // Holds the exclusive first pipe instance created eagerly in bind(). The
+    // first accept() consumes it; interior mutability is required because
+    // accept() takes &self. A parking_lot Mutex keeps this sync-only so the
+    // guard is never held across an .await.
+    #[cfg(windows)]
+    first_instance:
+        parking_lot::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
 }
 
 /// Bind a listening endpoint at `path`.
 /// - Unix: a Unix domain socket file (parent dir created, stale file removed).
-/// - Windows: records the pipe name; a fresh pipe instance is created per accept.
+/// - Windows: eagerly creates the first pipe instance with
+///   `first_pipe_instance(true)`, claiming the name exclusively so a second
+///   process binding the same name fails. Later accepts create more instances.
 pub fn bind(path: &Path) -> io::Result<LocalListener> {
     #[cfg(unix)]
     {
@@ -37,8 +46,18 @@ pub fn bind(path: &Path) -> io::Result<LocalListener> {
 
     #[cfg(windows)]
     {
+        let pipe_name = path.to_string_lossy().to_string();
+        // first_pipe_instance(true) gives Windows named pipes the singleton
+        // semantics UnixListener::bind already provides: if another process
+        // owns an instance of this name the OS rejects creation with
+        // ERROR_ACCESS_DENIED, so the losing daemon's bind() errors and that
+        // process exits, leaving exactly one pool owner.
+        let first_instance = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(true)
+            .create(&pipe_name)?;
         Ok(LocalListener {
-            pipe_name: path.to_string_lossy().to_string(),
+            pipe_name,
+            first_instance: parking_lot::Mutex::new(Some(first_instance)),
         })
     }
 }
@@ -61,6 +80,10 @@ pub async fn connect(path: &Path) -> io::Result<LocalStream> {
 
 impl LocalListener {
     /// Accept one client connection and return a unified stream.
+    ///
+    /// On Windows the first accept reuses the exclusive instance created in
+    /// bind(); every later accept creates a fresh instance, which must NOT set
+    /// first_pipe_instance (only the first instance of a name may claim it).
     pub async fn accept(&self) -> io::Result<LocalStream> {
         #[cfg(unix)]
         {
@@ -70,8 +93,14 @@ impl LocalListener {
 
         #[cfg(windows)]
         {
-            let server = tokio::net::windows::named_pipe::ServerOptions::new()
-                .create(&self.pipe_name)?;
+            // Release the lock before connect().await so the sync guard never
+            // spans a suspension point.
+            let pre_created = self.first_instance.lock().take();
+            let server = match pre_created {
+                Some(server) => server,
+                None => tokio::net::windows::named_pipe::ServerOptions::new()
+                    .create(&self.pipe_name)?,
+            };
             server.connect().await?;
             Ok(Box::new(server))
         }

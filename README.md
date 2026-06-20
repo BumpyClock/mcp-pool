@@ -39,7 +39,7 @@ mcp-pool add echo -- npx -y @modelcontextprotocol/server-everything stdio
 mcp-pool add remote --url https://example.com/mcp --transport http
 
 # Lifecycle (drives a long-lived daemon over a control socket)
-mcp-pool start echo        # start the pooled upstream
+mcp-pool start echo        # pre-warm the pooled upstream (optional)
 mcp-pool status            # show all pools
 mcp-pool restart echo
 mcp-pool stop echo
@@ -51,6 +51,9 @@ mcp-pool serve
 
 # Bridge an agent's stdio to a pool socket. Put this in the agent's MCP config:
 #   command = "mcp-pool", args = ["proxy", "echo"]
+# proxy is self-starting: if the upstream is already running it just attaches
+# (shared), otherwise it auto-starts the upstream (and the daemon) first. No
+# separate `start` step is required — `start` is only for pre-warming.
 mcp-pool proxy echo
 ```
 
@@ -61,8 +64,9 @@ Set `MCP_POOL_DEBUG=1` to enable diagnostic logging to the state dir.
 - `transport.rs` — unified local transport (Unix domain sockets / Windows named pipes)
 - `config.rs` — server definitions + paths (XDG-aware)
 - `upstream.rs` — single-upstream backend (stdio child or HTTP/SSE client)
+- `jsonrpc.rs` — JSON-RPC id translation (per-client ids rewritten to pool-unique ids)
 - `socket_proxy.rs` — multiplexer: N agent clients share one upstream, routed by JSON-RPC `id`
 - `pool.rs` — registry of pooled servers + socket discovery for daemon reattach
 - `control.rs` / `daemon.rs` — control protocol + long-lived daemon
-- `proxy.rs` — per-agent stdio bridge to a pool socket
+- `proxy.rs` — per-agent stdio bridge to a pool socket (self-starts the upstream)
 - `cli.rs` / `main.rs` — subcommand dispatch

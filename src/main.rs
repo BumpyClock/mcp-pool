@@ -6,6 +6,7 @@ mod config;
 mod control;
 mod daemon;
 mod diagnostics;
+mod jsonrpc;
 mod pool;
 mod proxy;
 mod socket_proxy;
