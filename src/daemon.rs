@@ -46,24 +46,30 @@ pub async fn serve() -> anyhow::Result<()> {
     let listener = transport::bind(&control_path)?;
     diagnostics::log(format!("control socket bound at {}", control_path.display()));
 
-    // Warm the whole pool on boot: start every configured server now so their
-    // upstreams boot concurrently (each in its own background task) instead of
-    // lazily, one at a time, as proxy clients connect. Placed after the control
-    // bind so only the singleton daemon that won the bind warms the pool.
-    match pool.start_all() {
-        Ok(results) => {
-            let started = results.iter().filter(|(_, error)| error.is_none()).count();
-            diagnostics::log(format!(
-                "warmed pool: {started}/{} configured server(s) starting",
-                results.len()
-            ));
-            for (name, error) in &results {
-                if let Some(error) = error {
-                    diagnostics::log(format!("warm start failed name={name} error={error}"));
+    // Warm the whole pool on boot: start every configured server so their upstreams
+    // boot concurrently (each in its own background task) instead of lazily, one at
+    // a time, as proxy clients connect. Run it in a spawned task so the control
+    // accept loop below starts IMMEDIATELY — doing this inline delays the first
+    // accept and breaks the first control connection on a cold-launched daemon.
+    {
+        let warm_pool = Arc::clone(&pool);
+        tokio::spawn(async move {
+            match warm_pool.start_all() {
+                Ok(results) => {
+                    let started = results.iter().filter(|(_, error)| error.is_none()).count();
+                    diagnostics::log(format!(
+                        "warmed pool: {started}/{} configured server(s) starting",
+                        results.len()
+                    ));
+                    for (name, error) in &results {
+                        if let Some(error) = error {
+                            diagnostics::log(format!("warm start failed name={name} error={error}"));
+                        }
+                    }
                 }
+                Err(error) => diagnostics::log(format!("warm pool: config load failed: {error}")),
             }
-        }
-        Err(error) => diagnostics::log(format!("warm pool: config load failed: {error}")),
+        });
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));

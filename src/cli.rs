@@ -550,9 +550,14 @@ fn spawn_daemon_detached() -> anyhow::Result<()> {
 #[allow(clippy::disallowed_methods)]
 fn configure_detached(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
-    // CREATE_NO_WINDOW (0x08000000): the daemon runs headless on Windows.
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
+    // DETACHED_PROCESS (0x8): the daemon must NOT attach to the launching shell's
+    // console. CREATE_NO_WINDOW only hides the window — the child stays attached to
+    // the parent console, so the shell (and any pipe) waits for the long-lived
+    // daemon (and its upstream children, e.g. agency mid-auth) to exit, which it
+    // never does. DETACHED_PROCESS gives the daemon no console at all, so the
+    // launching command returns as soon as the short-lived CLI exits.
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    command.creation_flags(DETACHED_PROCESS);
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::null());
     command.stderr(std::process::Stdio::null());

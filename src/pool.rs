@@ -30,7 +30,12 @@ impl Pool {
         // that would need to re-acquire the lock.
         let mut proxies = self.proxies.write();
         if let Some(existing) = proxies.get(name)
-            && existing.status() == ServerStatus::Running && socket_alive(&existing.socket_path()) {
+            && existing.status() == ServerStatus::Running {
+                // Trust the status for an owned proxy: its upstream task flips the
+                // status to Stopped on exit. Do NOT probe with socket_alive here —
+                // that is a blocking pipe connect held under the write lock, which
+                // can stall the whole pool when a server is busy (e.g. mid-auth),
+                // and it spawns a phantom client connection on every re-start.
                 return Ok(());
             }
 
