@@ -1,0 +1,13 @@
+allow-private-module-inception = true
+avoid-breaking-exported-api = false
+ignore-interior-mutability = []
+disallowed-methods = [
+  { path = "std::process::Command::spawn", reason = "spawning `std::process::Command` can block the async daemon for an unknown duration", replacement = "tokio::process::Command::spawn" },
+  { path = "std::process::Command::output", reason = "spawning `std::process::Command` can block the async daemon for an unknown duration", replacement = "tokio::process::Command::output" },
+  { path = "std::process::Command::status", reason = "spawning `std::process::Command` can block the async daemon for an unknown duration", replacement = "tokio::process::Command::status" },
+  { path = "std::process::Command::stdin", reason = "`tokio::process::Command` should own stdio configuration in async process code", replacement = "tokio::process::Command::stdin" },
+  { path = "std::process::Command::stdout", reason = "`tokio::process::Command` should own stdio configuration in async process code", replacement = "tokio::process::Command::stdout" },
+  { path = "std::process::Command::stderr", reason = "`tokio::process::Command` should own stdio configuration in async process code", replacement = "tokio::process::Command::stderr" },
+  { path = "serde_json::from_reader", reason = "parsing from a buffer is slower than first reading into bytes; see serde-rs/json#160", replacement = "serde_json::from_slice" },
+]
+disallowed-types = []

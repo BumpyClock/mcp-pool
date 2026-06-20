@@ -1,13 +1,13 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use std::collections::HashMap;
 
 use crate::config::ServerDef;
 use crate::socket_proxy::SocketProxy;
-use crate::types::PoolStatusResponse;
+use crate::types::{PoolStatusResponse, ServerStatus};
 use crate::upstream::UpstreamSpec;
 
 /// Registry of pooled MCP servers. Each entry owns one `SocketProxy` (one
@@ -24,45 +24,195 @@ impl Pool {
     }
 
     pub fn is_running(&self, name: &str) -> bool {
-        let _ = name;
+        let proxies = self.proxies.read();
+        if let Some(proxy) = proxies.get(name) {
+            if proxy.status() == ServerStatus::Running {
+                return socket_alive(&proxy.socket_path());
+            }
+        }
         false
     }
 
+    #[allow(dead_code)]
     pub fn socket_path(&self, name: &str) -> Option<PathBuf> {
-        let _ = name;
-        None
+        let proxies = self.proxies.read();
+        proxies.get(name).map(|proxy| proxy.socket_path())
     }
 
     pub fn start(&self, name: &str, spec: UpstreamSpec) -> std::io::Result<()> {
-        let _ = (name, spec);
-        todo!("build SocketProxy, bind socket, start; skip if already present")
+        // Idempotent: if already tracked and live, no-op.
+        if self.is_running(name) {
+            return Ok(());
+        }
+
+        let socket_path = crate::config::server_socket_path(name);
+        let proxy = Arc::new(SocketProxy::new(
+            name.to_string(),
+            socket_path,
+            spec,
+            true,
+        ));
+        proxy.start()?;
+
+        self.proxies
+            .write()
+            .insert(name.to_string(), proxy);
+        Ok(())
     }
 
     pub fn stop_server(&self, name: &str) -> std::io::Result<bool> {
-        let _ = name;
-        todo!()
+        let proxy = {
+            let proxies = self.proxies.read();
+            proxies.get(name).cloned()
+        };
+
+        if let Some(proxy) = proxy {
+            proxy.stop()?;
+            // Remove so a subsequent start() can rebind the same socket path.
+            self.proxies.write().remove(name);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub async fn restart(&self, name: &str) -> std::io::Result<bool> {
-        let _ = name;
-        todo!()
+        let proxy = {
+            let proxies = self.proxies.read();
+            match proxies.get(name).cloned() {
+                Some(proxy) => proxy,
+                None => return Ok(false),
+            }
+        };
+
+        // External (non-owned) sockets cannot be restarted by the pool.
+        if !proxy.is_owned() {
+            return Ok(false);
+        }
+
+        proxy.restart().await
     }
 
     pub fn shutdown(&self) {
-        todo!("stop all proxies, clear registry")
+        let mut proxies = self.proxies.write();
+        for proxy in proxies.values() {
+            // Stopping is best-effort during shutdown; keep going regardless.
+            if let Err(error) = proxy.stop() {
+                eprintln!("pool shutdown stop failed: {error}");
+            }
+        }
+        proxies.clear();
     }
 
+    #[allow(dead_code)]
     pub async fn wait_for_socket(&self, name: &str, timeout: Duration) -> bool {
-        let _ = (name, timeout);
-        false
+        if self.is_running(name) {
+            return true;
+        }
+
+        // Grab the notifier under a short-lived read lock; without a proxy there
+        // is nothing to wait on.
+        let notify = {
+            let proxies = self.proxies.read();
+            match proxies.get(name) {
+                Some(proxy) => proxy.ready_notifier(),
+                None => return false,
+            }
+        };
+
+        match tokio::time::timeout(timeout, notify.notified()).await {
+            Ok(()) => self.is_running(name),
+            Err(_) => false,
+        }
     }
 
+    /// On Windows named pipes are not filesystem entries to enumerate, so there
+    /// is nothing to discover. On Unix we scan the run dir for live sockets we
+    /// did not start ourselves.
     pub fn discover_existing_sockets(&self) -> usize {
-        0
+        if cfg!(windows) {
+            return 0;
+        }
+
+        let run_dir = match crate::config::run_dir() {
+            Ok(dir) => dir,
+            Err(_) => return 0,
+        };
+
+        let entries = match std::fs::read_dir(&run_dir) {
+            Ok(entries) => entries,
+            Err(_) => return 0,
+        };
+
+        let mut discovered = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = socket_name_from_path(&path) else {
+                continue;
+            };
+
+            // Skip anything already known to us; it is either running or slated.
+            if self.proxies.read().contains_key(&name) {
+                continue;
+            }
+
+            if !socket_alive(&path) {
+                continue;
+            }
+
+            // Placeholder spec: discovered sockets are external processes we
+            // attach to. transport() derives from the spec, so stdio is a safe
+            // neutral choice that yields a consistent status entry.
+            let placeholder = UpstreamSpec::Stdio {
+                command: String::new(),
+                args: Vec::new(),
+                env: BTreeMap::new(),
+            };
+            let proxy = Arc::new(SocketProxy::new(
+                name.clone(),
+                path.clone(),
+                placeholder,
+                false,
+            ));
+            // start() on a non-owned proxy just marks it Running without
+            // spawning an upstream.
+            if let Err(error) = proxy.start() {
+                eprintln!("pool discover start failed for {name}: {error}");
+                continue;
+            }
+
+            self.proxies.write().insert(name, proxy);
+            discovered += 1;
+        }
+
+        discovered
     }
 
     pub fn get_status(&self) -> PoolStatusResponse {
-        PoolStatusResponse::default()
+        let proxies = self.proxies.read();
+        let servers: Vec<_> = proxies
+            .iter()
+            .map(|(name, proxy)| crate::types::McpServerStatus {
+                name: name.clone(),
+                status: status_string(proxy.status()),
+                socket_path: proxy.socket_path().display().to_string(),
+                uptime_seconds: proxy.uptime_seconds(),
+                connection_count: proxy.connection_count(),
+                owned: proxy.is_owned(),
+                transport: proxy.transport().to_string(),
+            })
+            .collect();
+
+        PoolStatusResponse {
+            server_count: servers.len(),
+            servers,
+        }
+    }
+}
+
+impl Default for Pool {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -94,4 +244,30 @@ pub fn socket_alive(path: &Path) -> bool {
             .open(path.to_string_lossy().as_ref())
             .is_ok()
     }
+}
+
+/// Inverse of `crate::config::server_socket_path`: turn a run-dir entry named
+/// `mcp-pool-<name>.sock` back into `<name>`. Returns None for anything that is
+/// not one of our socket files.
+pub fn socket_name_from_path(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_string_lossy().into_owned();
+    const PREFIX: &str = "mcp-pool-";
+    const SUFFIX: &str = ".sock";
+    if !file_name.starts_with(PREFIX) || !file_name.ends_with(SUFFIX) {
+        return None;
+    }
+    let trimmed = &file_name[PREFIX.len()..file_name.len() - SUFFIX.len()];
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn status_string(status: ServerStatus) -> String {
+    match status {
+        ServerStatus::Stopped => "stopped",
+        ServerStatus::Starting => "starting",
+        ServerStatus::Running => "running",
+    }
+    .to_string()
 }

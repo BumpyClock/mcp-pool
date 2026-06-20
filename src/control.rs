@@ -48,3 +48,39 @@ impl ControlResponse {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_is_tagged_with_op() {
+        let serialized = serde_json::to_string(&ControlRequest::Start { name: "echo".into() }).unwrap();
+        assert!(serialized.contains("\"op\":\"start\""), "{serialized}");
+        assert!(serialized.contains("\"name\":\"echo\""), "{serialized}");
+        let back: ControlRequest = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(back, ControlRequest::Start { name } if name == "echo"));
+    }
+
+    #[test]
+    fn all_request_variants_round_trip() {
+        let serializations = [
+            serde_json::to_string(&ControlRequest::Stop { name: "a".into() }).unwrap(),
+            serde_json::to_string(&ControlRequest::Restart { name: "a".into() }).unwrap(),
+            serde_json::to_string(&ControlRequest::Status { name: None }).unwrap(),
+            serde_json::to_string(&ControlRequest::Status { name: Some("a".into()) }).unwrap(),
+            serde_json::to_string(&ControlRequest::List).unwrap(),
+            serde_json::to_string(&ControlRequest::Shutdown).unwrap(),
+        ];
+        for serialized in serializations {
+            let _: ControlRequest = serde_json::from_str(&serialized).unwrap();
+        }
+    }
+
+    #[test]
+    fn response_helpers() {
+        assert!(ControlResponse::ok().ok);
+        assert!(!ControlResponse::err("boom").ok);
+        assert_eq!(ControlResponse::err("boom").error.as_deref(), Some("boom"));
+        assert!(ControlResponse::data(serde_json::json!({ "x": 1 })).data.is_some());
+    }
+}

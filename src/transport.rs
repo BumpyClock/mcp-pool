@@ -77,3 +77,40 @@ impl LocalListener {
         }
     }
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    fn unique_endpoint() -> std::path::PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::SeqCst);
+        let name = format!("test-{}-{n}", std::process::id());
+        // Reuse the production path helper so the endpoint matches the real
+        // socket/pipe scheme on every platform (and avoids a backslash literal).
+        crate::config::server_socket_path(&name)
+    }
+
+    #[tokio::test]
+    async fn bind_accept_connect_round_trip() {
+        let path = unique_endpoint();
+        let listener = bind(&path).expect("bind failed");
+        let server = tokio::spawn(async move {
+            listener.accept().await.expect("accept failed");
+        });
+        // On Windows the listener creates its pipe instance lazily inside
+        // accept(), so the client may need to retry until it rendezvouses.
+        let mut connected = false;
+        for _ in 0..50 {
+            if connect(&path).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(connected, "client could not connect to bound endpoint");
+        server.await.unwrap();
+    }
+}

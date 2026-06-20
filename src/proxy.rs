@@ -35,12 +35,20 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
     let stdout = tokio::io::stdout();
 
     let name_stdin = name.to_string();
+    let name_stdout = name.to_string();
     let stdin_task = tokio::spawn(async move {
         pump(stdin, writer, "stdin->socket", &name_stdin).await;
     });
+    let stdout_task = tokio::spawn(async move {
+        pump(reader, stdout, "socket->stdout", &name_stdout).await;
+    });
 
-    pump(reader, stdout, "socket->stdout", name).await;
+    // The owning agent normally terminates this process on exit. When the agent
+    // closes stdin, drain any in-flight response for a brief grace window before
+    // tearing down, so piped/manual use exits promptly instead of blocking on an
+    // idle socket read.
     let _ = stdin_task.await;
+    let _ = tokio::time::timeout(Duration::from_millis(800), stdout_task).await;
     Ok(())
 }
 

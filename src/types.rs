@@ -24,3 +24,14 @@ pub struct PoolStatusResponse {
     pub server_count: usize,
     pub servers: Vec<McpServerStatus>,
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&ServerStatus::Running).unwrap(), "\"running\"");
+        assert_eq!(serde_json::to_string(&ServerStatus::Starting).unwrap(), "\"starting\"");
+        assert_eq!(serde_json::to_string(&ServerStatus::Stopped).unwrap(), "\"stopped\"");
+    }
+}

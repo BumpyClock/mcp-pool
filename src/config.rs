@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 /// Override the entire mcp-pool home (config + state) for tests/isolation.
 const ENV_HOME: &str = "MCP_POOL_HOME";
 
+#[allow(dead_code)]
 pub fn home_dir() -> io::Result<PathBuf> {
     if let Ok(custom) = std::env::var(ENV_HOME) {
         return Ok(PathBuf::from(custom));
@@ -174,5 +175,35 @@ impl PoolConfig {
 
     pub fn remove(&mut self, name: &str) -> bool {
         self.server.remove(name).is_some()
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_def_transport_kind() {
+        let stdio = ServerDef { command: "npx".into(), ..Default::default() };
+        assert_eq!(stdio.transport_kind(), "stdio");
+        let http = ServerDef { url: "http://x".into(), ..Default::default() };
+        assert_eq!(http.transport_kind(), "http");
+        let sse = ServerDef { url: "http://x".into(), transport: "sse".into(), ..Default::default() };
+        assert_eq!(sse.transport_kind(), "sse");
+    }
+
+    #[test]
+    fn pool_config_toml_round_trip() {
+        let mut cfg = PoolConfig::default();
+        cfg.upsert(
+            "echo",
+            ServerDef { command: "npx".into(), args: vec!["-y".into()], ..Default::default() },
+        );
+        let serialized = toml::to_string(&cfg).unwrap();
+        let mut back: PoolConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(back.server.len(), 1);
+        assert_eq!(back.server["echo"].command, "npx");
+        assert_eq!(back.server["echo"].args, vec!["-y".to_string()]);
+        assert!(back.remove("echo"));
+        assert!(!back.remove("echo"));
     }
 }

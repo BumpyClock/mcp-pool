@@ -17,6 +17,18 @@ cargo build --release
 # binary at target/release/mcp-pool
 ```
 
+## Development
+
+```sh
+cargo test
+cargo clippy --all-targets
+bacon --job run
+bacon --job clippy
+```
+
+On Windows, `.\dev.ps1` starts the `bacon --job run` watcher. On macOS/Linux,
+use `./dev.sh`.
+
 ## Usage
 
 ```sh
