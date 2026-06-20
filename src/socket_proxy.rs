@@ -984,7 +984,12 @@ async fn route_response(
     recovery_tx: &mpsc::Sender<RecoveryReason>,
     recovery_requested: &Arc<AtomicBool>,
 ) {
-    cleanup_stale_requests(request_map, cleanup_counter);
+    let stale_requests = cleanup_stale_requests(request_map, cleanup_counter);
+    for (client_id, payload) in
+        cleanup_tools_list_after_stale_requests(handshake_cache, &stale_requests)
+    {
+        send_to_client(&client_id, payload, clients).await;
+    }
     for (client_id, payload) in cleanup_stale_tools_list_waiters(handshake_cache) {
         send_to_client(&client_id, payload, clients).await;
     }
@@ -1186,6 +1191,38 @@ fn cleanup_stale_tools_list_waiters(cache: &HandshakeCacheRef) -> Vec<(String, S
     }
     cache.tools_list.waiters = kept;
     stale
+}
+
+fn cleanup_tools_list_after_stale_requests(
+    cache: &HandshakeCacheRef,
+    stale_requests: &[PendingRequestInfo],
+) -> Vec<(String, String)> {
+    if !stale_requests
+        .iter()
+        .any(|pending| pending.method.as_deref() == Some("tools/list"))
+    {
+        return Vec::new();
+    }
+
+    let mut cache = cache.lock();
+    cache.tools_list.in_flight = false;
+    let waiters: Vec<PendingWaiter> = cache.tools_list.waiters.drain(..).collect();
+    if !waiters.is_empty() {
+        diagnostics::log(format!(
+            "pool_tools_list_stale_leader_cleaned waiters={}",
+            waiters.len()
+        ));
+    }
+
+    waiters
+        .into_iter()
+        .map(|waiter| {
+            (
+                waiter.client_id,
+                build_error_response(waiter.original_id, -32001, "tools/list discovery timed out"),
+            )
+        })
+        .collect()
 }
 
 fn request_recovery_if_session_not_found(
@@ -1436,26 +1473,46 @@ async fn send_to_client(
 
 /// Every CLEANUP_INTERVAL-th call, drop request-map entries older than
 /// REQUEST_TTL_SECS. Throttled via a counter so the router hot path stays cheap.
-fn cleanup_stale_requests(request_map: &RequestMap, cleanup_counter: &Arc<AtomicU32>) {
+fn cleanup_stale_requests(
+    request_map: &RequestMap,
+    cleanup_counter: &Arc<AtomicU32>,
+) -> Vec<PendingRequestInfo> {
     let count = cleanup_counter.fetch_add(1, Ordering::Relaxed);
     if !count.is_multiple_of(CLEANUP_INTERVAL) {
-        return;
+        return Vec::new();
     }
 
     let now = Instant::now();
-    let before = request_map.lock().len();
-    request_map
-        .lock()
-        .retain(|_, pending| now.duration_since(pending.inserted_at).as_secs() <= REQUEST_TTL_SECS);
-    let after = request_map.lock().len();
-    // saturating_sub guards against theoretical underflow rather than panicking.
-    let removed = before.saturating_sub(after);
+    let mut pending = request_map.lock();
+    let before = pending.len();
+    let stale_keys: Vec<String> = pending
+        .iter()
+        .filter_map(|(key, pending)| {
+            if now.duration_since(pending.inserted_at).as_secs() > REQUEST_TTL_SECS {
+                Some(key.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut removed_pending = Vec::with_capacity(stale_keys.len());
+    for key in stale_keys {
+        if let Some(request) = pending.remove(&key) {
+            removed_pending.push(request);
+        }
+    }
+    let after = pending.len();
+    let removed = removed_pending.len();
     if removed > 0 {
         diagnostics::log(format!(
             "pool_stale_requests_cleaned removed={} remaining={}",
             removed, after
         ));
     }
+    if before == after {
+        return Vec::new();
+    }
+    removed_pending
 }
 
 async fn broadcast_to_all(line: &str, clients: &Arc<Mutex<HashMap<String, ClientSender>>>) {
@@ -1522,6 +1579,19 @@ mod tests {
             original_id,
             method: method.map(str::to_string),
             inserted_at: Instant::now(),
+        }
+    }
+
+    fn stale_pending_request(
+        client_id: &str,
+        original_id: Value,
+        method: Option<&str>,
+    ) -> PendingRequestInfo {
+        PendingRequestInfo {
+            client_id: client_id.to_string(),
+            original_id,
+            method: method.map(str::to_string),
+            inserted_at: Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1),
         }
     }
 
@@ -2296,6 +2366,53 @@ mod tests {
         assert_eq!(
             guard.tools_list.last_good_result,
             Some(json!({"tools":["t1"]}))
+        );
+    }
+
+    #[test]
+    fn stale_tools_list_leader_clears_in_flight_and_drains_waiters() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map.lock().insert(
+            "10".to_string(),
+            stale_pending_request("leader", json!(1), Some("tools/list")),
+        );
+        let cleanup_counter = Arc::new(AtomicU32::new(0));
+        let cache = empty_cache();
+        cache.lock().tools_list.in_flight = true;
+        cache.lock().tools_list.waiters.push(PendingWaiter {
+            client_id: "waiter".to_string(),
+            original_id: json!(2),
+            inserted_at: Instant::now(),
+        });
+
+        let stale_requests = cleanup_stale_requests(&request_map, &cleanup_counter);
+        let responses = cleanup_tools_list_after_stale_requests(&cache, &stale_requests);
+
+        assert!(request_map.lock().is_empty(), "stale leader removed");
+        assert_eq!(responses.len(), 1, "waiter receives timeout error");
+        let timeout: Value = serde_json::from_str(&responses[0].1).expect("valid json");
+        assert_eq!(responses[0].0, "waiter");
+        assert_eq!(timeout["id"], json!(2));
+        assert_eq!(timeout["error"]["code"], json!(-32001));
+        assert_eq!(
+            timeout["error"]["message"],
+            json!("tools/list discovery timed out")
+        );
+        assert!(!cache.lock().tools_list.in_flight, "in-flight cleared");
+        assert!(
+            cache.lock().tools_list.waiters.is_empty(),
+            "waiters drained"
+        );
+
+        let next = prepare_tools_list_request(&cache, "next", json!(3));
+
+        assert!(
+            matches!(next, ToolsListAction::Leader),
+            "future miss can elect a new leader"
+        );
+        assert!(
+            cache.lock().tools_list.in_flight,
+            "new leader owns discovery"
         );
     }
 
