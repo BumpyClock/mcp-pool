@@ -47,6 +47,22 @@ impl Pool {
         Ok(())
     }
 
+    /// Start every configured server. Each call to `start()` returns as soon as the
+    /// socket is bound and the upstream task is spawned, so the child processes boot
+    /// concurrently in their own background tasks rather than one-at-a-time. Returns
+    /// one (name, optional error string) per configured server, preserving the
+    /// outcome of each so a single bad entry does not abort the rest.
+    pub fn start_all(&self) -> std::io::Result<Vec<(String, Option<String>)>> {
+        let config = crate::config::PoolConfig::load()?;
+        let mut results = Vec::with_capacity(config.server.len());
+        for (name, definition) in &config.server {
+            let spec = upstream_spec_from_def(definition);
+            let error = self.start(name, spec).err().map(|error| error.to_string());
+            results.push((name.clone(), error));
+        }
+        Ok(results)
+    }
+
     pub fn stop_server(&self, name: &str) -> std::io::Result<bool> {
         let proxy = {
             let proxies = self.proxies.read();

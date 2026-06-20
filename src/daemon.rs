@@ -17,6 +17,14 @@ use crate::transport;
 pub async fn serve() -> anyhow::Result<()> {
     diagnostics::init_from_env();
 
+    // The daemon runs in the foreground here (whether launched directly via
+    // `mcp-pool serve --debug` or auto-spawned). When debug logging is on, mirror
+    // it to stderr so a terminal-run daemon shows logs live; an auto-spawned
+    // daemon has stderr redirected to null, so this is harmless there.
+    if diagnostics::is_enabled() {
+        diagnostics::set_stderr_mirror(true);
+    }
+
     // Validate config up front so a malformed file is surfaced immediately, but
     // keep running either way: dispatch reloads it on Start so a fixed
     // config becomes effective without restarting the daemon.
@@ -37,6 +45,26 @@ pub async fn serve() -> anyhow::Result<()> {
 
     let listener = transport::bind(&control_path)?;
     diagnostics::log(format!("control socket bound at {}", control_path.display()));
+
+    // Warm the whole pool on boot: start every configured server now so their
+    // upstreams boot concurrently (each in its own background task) instead of
+    // lazily, one at a time, as proxy clients connect. Placed after the control
+    // bind so only the singleton daemon that won the bind warms the pool.
+    match pool.start_all() {
+        Ok(results) => {
+            let started = results.iter().filter(|(_, error)| error.is_none()).count();
+            diagnostics::log(format!(
+                "warmed pool: {started}/{} configured server(s) starting",
+                results.len()
+            ));
+            for (name, error) in &results {
+                if let Some(error) = error {
+                    diagnostics::log(format!("warm start failed name={name} error={error}"));
+                }
+            }
+        }
+        Err(error) => diagnostics::log(format!("warm pool: config load failed: {error}")),
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -165,6 +193,19 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
                 Err(error) => ControlResponse::err(error.to_string()),
             }
         }
+        ControlRequest::StartAll => match pool.start_all() {
+            Ok(results) => {
+                let servers: Vec<serde_json::Value> = results
+                    .into_iter()
+                    .map(|(name, error)| match error {
+                        Some(error) => serde_json::json!({ "name": name, "ok": false, "error": error }),
+                        None => serde_json::json!({ "name": name, "ok": true }),
+                    })
+                    .collect();
+                ControlResponse::data(serde_json::json!({ "servers": servers }))
+            }
+            Err(error) => ControlResponse::err(error.to_string()),
+        },
         ControlRequest::Stop { name } => match pool.stop_server(name) {
             Ok(_stopped) => ControlResponse::ok(),
             Err(error) => ControlResponse::err(error.to_string()),

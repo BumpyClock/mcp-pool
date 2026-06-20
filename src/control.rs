@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum ControlRequest {
     Start { name: String },
+    StartAll,
     Stop { name: String },
     Restart { name: String },
     Status { name: Option<String> },
@@ -64,6 +65,7 @@ mod tests {
     fn all_request_variants_round_trip() {
         let serializations = [
             serde_json::to_string(&ControlRequest::Stop { name: "a".into() }).unwrap(),
+            serde_json::to_string(&ControlRequest::StartAll).unwrap(),
             serde_json::to_string(&ControlRequest::Restart { name: "a".into() }).unwrap(),
             serde_json::to_string(&ControlRequest::Status { name: None }).unwrap(),
             serde_json::to_string(&ControlRequest::Status { name: Some("a".into()) }).unwrap(),

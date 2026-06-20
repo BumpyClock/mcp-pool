@@ -62,7 +62,6 @@ pub struct SocketProxy {
     // of dropping its first request.
     upstream_ready: Arc<Notify>,
     started_at: Mutex<Option<Instant>>,
-    total_connections: Arc<AtomicU32>,
     cleanup_counter: Arc<AtomicU32>,
     // Fired when the upstream task exits, so `restart` can await a clean stop.
     exit_complete_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -84,7 +83,6 @@ impl SocketProxy {
             shutdown_notify: Arc::new(Notify::new()),
             upstream_ready: Arc::new(Notify::new()),
             started_at: Mutex::new(None),
-            total_connections: Arc::new(AtomicU32::new(0)),
             cleanup_counter: Arc::new(AtomicU32::new(0)),
             exit_complete_tx: Arc::new(Mutex::new(None)),
             exit_complete_rx: Mutex::new(None),
@@ -121,7 +119,11 @@ impl SocketProxy {
     }
 
     pub fn connection_count(&self) -> u32 {
-        self.total_connections.load(Ordering::SeqCst)
+        // Current active clients, not a cumulative total: a counter that only ever
+        // increments reports phantom connections (every past client plus each
+        // liveness probe from `socket_alive`). The `clients` map is the live set —
+        // entries are inserted on accept and removed when the client disconnects.
+        self.clients.lock().len() as u32
     }
 
     pub fn take_exit_receiver(&self) -> Option<oneshot::Receiver<()>> {
@@ -264,7 +266,6 @@ impl SocketProxy {
         let shutdown = self.shutdown.clone();
         let shutdown_notify = self.shutdown_notify.clone();
         let name = self.name.clone();
-        let total_connections = self.total_connections.clone();
         let cleanup_counter = self.cleanup_counter.clone();
 
         tokio::spawn(async move {
@@ -277,7 +278,6 @@ impl SocketProxy {
                     Ok(stream) => {
                         let client_id = format!("{}-client-{}", name, counter);
                         counter += 1;
-                        total_connections.fetch_add(1, Ordering::SeqCst);
 
                         let (tx, rx) = mpsc::channel::<String>(128);
                         clients.lock().insert(client_id.clone(), tx);

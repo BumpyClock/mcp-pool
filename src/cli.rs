@@ -41,8 +41,9 @@ pub enum Cmd {
     /// Run the pool daemon in the foreground (auto-launched by other commands if absent).
     Serve,
 
-    /// Start a pooled MCP server by name (reads config, drives the daemon).
-    Start { name: String },
+    /// Start pooled MCP server(s): a single one by name, or all configured
+    /// servers (started concurrently) when no name is given.
+    Start { name: Option<String> },
 
     /// Stop a pooled MCP server.
     Stop { name: String },
@@ -119,7 +120,11 @@ pub async fn run() -> anyhow::Result<()> {
         Cmd::Remove { name, yes } => remove_server(&name, yes),
         Cmd::List => list_servers(mode),
         Cmd::Start { name } => {
-            control_round_trip(ControlRequest::Start { name }, mode, color).await
+            let request = match name {
+                Some(name) => ControlRequest::Start { name },
+                None => ControlRequest::StartAll,
+            };
+            control_round_trip(request, mode, color).await
         }
         Cmd::Stop { name } => {
             control_round_trip(ControlRequest::Stop { name }, mode, color).await
@@ -409,10 +414,37 @@ fn print_response_data(
 
     match request {
         ControlRequest::Start { name } => println!("{green}started{reset} {name}"),
+        ControlRequest::StartAll => print_start_all(data.as_ref(), color),
         ControlRequest::Stop { name } => println!("{yellow}stopped{reset} {name}"),
         ControlRequest::Restart { name } => println!("{green}restarted{reset} {name}"),
         ControlRequest::Shutdown => println!("{yellow}daemon shutting down{reset}"),
         ControlRequest::Status { name } => print_status_table(data.as_ref(), name.as_deref(), color),
+    }
+}
+
+/// Render the result of a "start all" request: one line per configured server.
+fn print_start_all(data: Option<&serde_json::Value>, color: bool) {
+    let (green, _yellow, red, reset) = colors(color);
+    let servers = data
+        .and_then(|value| value.get("servers"))
+        .and_then(|value| value.as_array())
+        .map(|array| array.as_slice())
+        .unwrap_or(&[]);
+
+    if servers.is_empty() {
+        println!("no servers configured");
+        return;
+    }
+
+    for server in servers {
+        let name = str_field(server, "name");
+        let ok = server.get("ok").and_then(|value| value.as_bool()).unwrap_or(false);
+        if ok {
+            println!("{green}started{reset} {name}");
+        } else {
+            let error = server.get("error").and_then(|value| value.as_str()).unwrap_or("error");
+            println!("{red}failed{reset} {name}: {error}");
+        }
     }
 }
 
