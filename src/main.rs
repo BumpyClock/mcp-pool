@@ -7,6 +7,7 @@ mod control;
 mod daemon;
 mod diagnostics;
 mod jsonrpc;
+mod mcp_session;
 mod pool;
 mod proxy;
 mod socket_proxy;

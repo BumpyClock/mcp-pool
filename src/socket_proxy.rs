@@ -13,6 +13,11 @@ use tokio::time::{Duration, sleep};
 
 use crate::diagnostics;
 use crate::jsonrpc::{self, IdAllocator};
+use crate::mcp_session::{
+    ClientCapabilities, HandshakeCache, PendingRequestInfo, PendingWaiter, RecoveryReason,
+    build_error_response, build_success_response, cacheable_method, is_empty_id_error,
+    is_session_not_found_error, parse_client_capabilities, should_swallow_initialized,
+};
 use crate::transport::{LocalListener, LocalStream};
 use crate::types::ServerStatus;
 use crate::upstream::{UpstreamHandle, UpstreamSpec};
@@ -23,69 +28,12 @@ const CLEANUP_INTERVAL: u32 = 100;
 
 type ClientSender = mpsc::Sender<String>;
 
-/// A request awaiting its response: the client that issued it, the client's
-/// original JSON-RPC id (restored on the matching response), the method name
-/// when it is a cacheable handshake method (so `route_response` knows whether to
-/// cache the success response), and when it was registered (for TTL cleanup).
-/// Keyed in the request map by the pool-unique id.
-type PendingRequest = (String, Value, Option<String>, Instant);
-type RequestMap = Arc<Mutex<HashMap<String, PendingRequest>>>;
-
-/// Per-upstream cache of successful handshake/discovery responses. mcpproxy-go
-/// owns upstream discovery in the proxy; here we serve repeat `initialize` and
-/// `tools/list` requests from proxy-side state so each new downstream client does
-/// not re-trigger an upstream round-trip (which, for auth'd upstreams, would
-/// re-acquire tokens and risk 429 retries). The cached value is the response
-/// `result` payload; it is re-id'd per client when served. The cache is per
-/// SocketProxy/upstream, never global across servers.
-#[derive(Default)]
-struct HandshakeCache {
-    initialize: Option<Value>,
-    tools_list: Option<Value>,
-}
-
-impl HandshakeCache {
-    /// Cached `result` for a method, if present. Only the two handshake methods
-    /// are ever cached.
-    fn get(&self, method: &str) -> Option<Value> {
-        match method {
-            "initialize" => self.initialize.clone(),
-            "tools/list" => self.tools_list.clone(),
-            _ => None,
-        }
-    }
-
-    /// Store a successful `result` for a cacheable method. No-op for others.
-    fn store(&mut self, method: &str, result: Value) {
-        match method {
-            "initialize" => self.initialize = Some(result),
-            "tools/list" => self.tools_list = Some(result),
-            _ => {}
-        }
-    }
-
-    /// Drop only the tools/list entry (initialize stays valid) on an upstream
-    /// `notifications/tools/list_changed`.
-    fn invalidate_tools_list(&mut self) {
-        self.tools_list = None;
-    }
-}
-
+type RequestMap = Arc<Mutex<HashMap<String, PendingRequestInfo>>>;
 type HandshakeCacheRef = Arc<Mutex<HandshakeCache>>;
 
 /// True for the handshake/discovery methods whose success responses are cached.
 fn is_cacheable_method(method: &str) -> bool {
-    method == "initialize" || method == "tools/list"
-}
-
-/// Build a JSON-RPC success response line for a cached `result`, stamped with the
-/// requesting client's original id. Panic-free string construction.
-fn build_cached_response(original_id: Value, result: Value) -> String {
-    let mut object = serde_json::Map::new();
-    object.insert("jsonrpc".to_string(), Value::from("2.0"));
-    object.insert("id".to_string(), original_id);
-    object.insert("result".to_string(), result);
-    Value::Object(object).to_string()
+    cacheable_method(method).is_some()
 }
 
 /// Cache an upstream response for a cacheable method, but ONLY when it is a
@@ -106,11 +54,43 @@ fn maybe_cache_response(value: &Value, method: &str, cache: &HandshakeCacheRef) 
     diagnostics::log(format!("pool_cache_stored method={}", method));
 }
 
+fn prepare_tools_list_request(
+    cache: &HandshakeCacheRef,
+    client_id: &str,
+    original_id: Value,
+) -> ToolsListAction {
+    let mut cache = cache.lock();
+    if let Some(result) = cache.tools_list.cached_result.clone() {
+        return ToolsListAction::Cached(build_success_response(original_id, result));
+    }
+    if cache.tools_list.in_flight {
+        cache.tools_list.waiters.push(PendingWaiter {
+            client_id: client_id.to_string(),
+            original_id,
+            inserted_at: Instant::now(),
+        });
+        return ToolsListAction::Coalesced;
+    }
+    cache.tools_list.in_flight = true;
+    ToolsListAction::Leader
+}
+
 /// What to do with a parsed client line: forward it upstream, or reply directly
 /// from cache without an upstream round-trip.
 enum ClientAction {
-    Forward(String),
+    Forward {
+        line: String,
+        method: Option<String>,
+        pool_id: Option<u64>,
+    },
     Cached(String),
+    Drop,
+}
+
+enum ToolsListAction {
+    Cached(String),
+    Coalesced,
+    Leader,
 }
 
 /// One pooled MCP: a single upstream multiplexed across many agent clients.
@@ -133,6 +113,7 @@ pub struct SocketProxy {
     // a new client served from proxy-side state never re-triggers upstream
     // discovery (and the auth/429 churn that follows).
     handshake_cache: HandshakeCacheRef,
+    client_capabilities: Arc<Mutex<HashMap<String, ClientCapabilities>>>,
     // Most-recently-active client: the last client to send a REQUEST. Used as a
     // HEURISTIC to route server-initiated requests (e.g. sampling/createMessage,
     // roots/list) back to a single client, since broadcasting a request that
@@ -145,6 +126,9 @@ pub struct SocketProxy {
     id_allocator: Arc<IdAllocator>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
+    recovery_requested: Arc<AtomicBool>,
+    recovery_tx: mpsc::Sender<RecoveryReason>,
+    recovery_rx: Mutex<Option<mpsc::Receiver<RecoveryReason>>>,
     // Fires when the upstream request sender is published (or when the upstream
     // stops), so a client that connects mid-startup waits for the sender instead
     // of dropping its first request.
@@ -158,18 +142,26 @@ pub struct SocketProxy {
 
 impl SocketProxy {
     pub fn new(name: String, socket_path: PathBuf, spec: UpstreamSpec, owned: bool) -> Self {
+        let (recovery_tx, recovery_rx) = mpsc::channel::<RecoveryReason>(8);
         Self {
-            name, socket_path, spec, owned,
+            name,
+            socket_path,
+            spec,
+            owned,
             status: Arc::new(Mutex::new(ServerStatus::Stopped)),
             request_tx: Arc::new(Mutex::new(None)),
             listener: Mutex::new(None),
             clients: Arc::new(Mutex::new(HashMap::new())),
             request_map: Arc::new(Mutex::new(HashMap::new())),
             handshake_cache: Arc::new(Mutex::new(HandshakeCache::default())),
+            client_capabilities: Arc::new(Mutex::new(HashMap::new())),
             last_active_client: Arc::new(Mutex::new(None)),
             id_allocator: Arc::new(IdAllocator::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
             shutdown_notify: Arc::new(Notify::new()),
+            recovery_requested: Arc::new(AtomicBool::new(false)),
+            recovery_tx,
+            recovery_rx: Mutex::new(Some(recovery_rx)),
             upstream_ready: Arc::new(Notify::new()),
             started_at: Mutex::new(None),
             cleanup_counter: Arc::new(AtomicU32::new(0)),
@@ -219,7 +211,7 @@ impl SocketProxy {
         self.exit_complete_rx.lock().take()
     }
 
-    pub fn start(&self) -> io::Result<()> {
+    pub fn start(self: &Arc<Self>) -> io::Result<()> {
         if self.status() == ServerStatus::Running {
             return Ok(());
         }
@@ -235,7 +227,11 @@ impl SocketProxy {
         *self.status.lock() = ServerStatus::Starting;
         self.shutdown.store(false, Ordering::SeqCst);
 
-        diagnostics::log(format!("pool_proxy_starting name={} transport={}", self.name, self.transport()));
+        diagnostics::log(format!(
+            "pool_proxy_starting name={} transport={}",
+            self.name,
+            self.transport()
+        ));
 
         let (exit_tx, exit_rx) = oneshot::channel::<()>();
         *self.exit_complete_tx.lock() = Some(exit_tx);
@@ -253,13 +249,18 @@ impl SocketProxy {
 
         self.spawn_upstream_and_router(response_tx, response_rx);
         self.spawn_accept_loop(listener);
+        self.spawn_recovery_loop();
 
         // Optimistically Running: the upstream task flips us to Stopped on spawn
         // failure or exit, overriding this. Bind success + tasks spawned == ready.
         *self.status.lock() = ServerStatus::Running;
         *self.started_at.lock() = Some(Instant::now());
 
-        diagnostics::log(format!("pool_proxy_started name={} socket={}", self.name, self.socket_path.display()));
+        diagnostics::log(format!(
+            "pool_proxy_started name={} socket={}",
+            self.name,
+            self.socket_path.display()
+        ));
         Ok(())
     }
 
@@ -279,9 +280,13 @@ impl SocketProxy {
         let upstream_ready = self.upstream_ready.clone();
         let clients = self.clients.clone();
         let request_map = self.request_map.clone();
+        let request_tx = self.request_tx.clone();
         let handshake_cache = self.handshake_cache.clone();
+        let client_capabilities = self.client_capabilities.clone();
         let last_active_client = self.last_active_client.clone();
         let cleanup_counter = self.cleanup_counter.clone();
+        let recovery_tx = self.recovery_tx.clone();
+        let recovery_requested = self.recovery_requested.clone();
         let exit_complete_tx = self.exit_complete_tx.clone();
         let name = self.name.clone();
 
@@ -304,7 +309,10 @@ impl SocketProxy {
             let handle = match UpstreamHandle::spawn(spec, response_tx).await {
                 Ok(handle) => handle,
                 Err(error) => {
-                    diagnostics::log(format!("pool_upstream_spawn_failed name={} error={}", name, error));
+                    diagnostics::log(format!(
+                        "pool_upstream_spawn_failed name={} error={}",
+                        name, error
+                    ));
                     mark_stopped();
                     return;
                 }
@@ -326,7 +334,19 @@ impl SocketProxy {
                     },
                     _ = shutdown_notify.notified() => break,
                 };
-                route_response(&message, &clients, &request_map, &handshake_cache, &cleanup_counter, &last_active_client).await;
+                route_response(
+                    &message,
+                    &clients,
+                    &request_map,
+                    &handshake_cache,
+                    &cleanup_counter,
+                    &last_active_client,
+                    &client_capabilities,
+                    &request_tx,
+                    &recovery_tx,
+                    &recovery_requested,
+                )
+                .await;
                 processed += 1;
                 // Periodic gauge so a backed-up router is visible without
                 // per-message spam. A climbing pending_requests count means
@@ -350,6 +370,7 @@ impl SocketProxy {
         let clients = self.clients.clone();
         let request_map = self.request_map.clone();
         let handshake_cache = self.handshake_cache.clone();
+        let client_capabilities = self.client_capabilities.clone();
         let last_active_client = self.last_active_client.clone();
         let request_tx = self.request_tx.clone();
         let id_allocator = self.id_allocator.clone();
@@ -372,11 +393,15 @@ impl SocketProxy {
 
                         let (tx, rx) = mpsc::channel::<String>(128);
                         clients.lock().insert(client_id.clone(), tx);
-                        diagnostics::log(format!("pool_client_connected name={} client_id={}", name, client_id));
+                        diagnostics::log(format!(
+                            "pool_client_connected name={} client_id={}",
+                            name, client_id
+                        ));
 
                         let clients_for_drop = clients.clone();
                         let request_map_for_drop = request_map.clone();
                         let handshake_cache_for_client = handshake_cache.clone();
+                        let client_capabilities_for_client = client_capabilities.clone();
                         let last_active_for_client = last_active_client.clone();
                         let request_tx_for_client = request_tx.clone();
                         let id_allocator_for_client = id_allocator.clone();
@@ -395,6 +420,7 @@ impl SocketProxy {
                                 id_allocator_for_client,
                                 request_map_for_drop,
                                 handshake_cache_for_client,
+                                client_capabilities_for_client,
                                 last_active_for_client,
                                 clients_for_drop,
                                 shutdown_for_client,
@@ -451,7 +477,7 @@ impl SocketProxy {
         Ok(())
     }
 
-    pub async fn restart(&self) -> io::Result<bool> {
+    pub async fn restart(self: &Arc<Self>) -> io::Result<bool> {
         let was_owned_running = self.owned && self.status() == ServerStatus::Running;
         self.stop()?;
         if was_owned_running {
@@ -464,8 +490,57 @@ impl SocketProxy {
         }
         // Reset shutdown so start()'s accept loop and router can run again.
         self.shutdown.store(false, Ordering::SeqCst);
-        self.start()?;
-        Ok(true)
+        let mut last_error = None;
+        for attempt in 1..=5 {
+            match self.start() {
+                Ok(()) => return Ok(true),
+                Err(error) => {
+                    diagnostics::log(format!(
+                        "pool_restart_start_retry name={} attempt={} error={}",
+                        self.name, attempt, error
+                    ));
+                    last_error = Some(error);
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        *self.status.lock() = ServerStatus::Stopped;
+        match last_error {
+            Some(error) => Err(error),
+            None => Err(io::Error::other("restart failed without error")),
+        }
+    }
+
+    fn spawn_recovery_loop(self: &Arc<Self>) {
+        let Some(mut recovery_rx) = self.recovery_rx.lock().take() else {
+            return;
+        };
+        let proxy = self.clone();
+        tokio::spawn(async move {
+            while let Some(reason) = recovery_rx.recv().await {
+                if proxy.recovery_requested.swap(true, Ordering::SeqCst) {
+                    continue;
+                }
+                diagnostics::log(format!(
+                    "pool_recovery_start name={} reason={}",
+                    proxy.name,
+                    recovery_reason_label(reason)
+                ));
+                let result = proxy.restart().await;
+                match result {
+                    Ok(true) => diagnostics::log(format!("pool_recovery_done name={}", proxy.name)),
+                    Ok(false) => diagnostics::log(format!(
+                        "pool_recovery_failed name={} reason=not_owned_or_not_running",
+                        proxy.name
+                    )),
+                    Err(error) => diagnostics::log(format!(
+                        "pool_recovery_failed name={} error={}",
+                        proxy.name, error
+                    )),
+                }
+                proxy.recovery_requested.store(false, Ordering::SeqCst);
+            }
+        });
     }
 }
 
@@ -483,6 +558,7 @@ async fn handle_client(
     id_allocator: Arc<IdAllocator>,
     request_map: RequestMap,
     handshake_cache: HandshakeCacheRef,
+    client_capabilities: Arc<Mutex<HashMap<String, ClientCapabilities>>>,
     last_active_client: Arc<Mutex<Option<String>>>,
     clients: Arc<Mutex<HashMap<String, ClientSender>>>,
     shutdown: Arc<AtomicBool>,
@@ -499,6 +575,7 @@ async fn handle_client(
     let mut reader = BufReader::new(read_half);
     let mut buffer = String::new();
     let mut parse_failures = 0u32;
+    let mut locally_initialized = false;
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -537,30 +614,115 @@ async fn handle_client(
                                         .get("method")
                                         .and_then(Value::as_str)
                                         .map(str::to_string);
-                                    // Serve cacheable handshake methods from the
-                                    // proxy-side cache so a new client does not
-                                    // re-trigger upstream discovery/auth.
-                                    let cached = method.as_deref().and_then(|m| {
-                                        if is_cacheable_method(m) {
-                                            handshake_cache.lock().get(m).map(|r| (m.to_string(), r))
-                                        } else {
-                                            None
+                                    diagnostics::log(format!(
+                                        "pool_request_received client_id={} method={} has_id=true bytes={}",
+                                        client_id,
+                                        method.as_deref().unwrap_or("?"),
+                                        line.len()
+                                    ));
+                                    if method.as_deref() == Some("initialize") {
+                                        client_capabilities.lock().insert(
+                                            client_id.clone(),
+                                            parse_client_capabilities(&value),
+                                        );
+                                    }
+                                    match method.as_deref() {
+                                        Some("initialize") => {
+                                            let cached = handshake_cache.lock().get("initialize");
+                                            if let Some(result) = cached {
+                                                diagnostics::log(format!(
+                                                    "pool_cache_hit method=initialize client_id={}",
+                                                    client_id
+                                                ));
+                                                locally_initialized = true;
+                                                ClientAction::Cached(build_success_response(original_id, result))
+                                            } else {
+                                                diagnostics::log(format!(
+                                                    "pool_cache_miss method=initialize client_id={}",
+                                                    client_id
+                                                ));
+                                                let pool_id = id_allocator.allocate();
+                                                request_map.lock().insert(
+                                                    jsonrpc::id_key(&Value::from(pool_id)),
+                                                    PendingRequestInfo {
+                                                        client_id: client_id.clone(),
+                                                        original_id,
+                                                        method: Some("initialize".to_string()),
+                                                        inserted_at: Instant::now(),
+                                                    },
+                                                );
+                                                *last_active_client.lock() = Some(client_id.clone());
+                                                match value.clone() {
+                                                    Value::Object(object) => ClientAction::Forward {
+                                                        line: jsonrpc::with_id(object, Value::from(pool_id)),
+                                                        method: Some("initialize".to_string()),
+                                                        pool_id: Some(pool_id),
+                                                    },
+                                                    _ => ClientAction::Forward {
+                                                        line: line.clone(),
+                                                        method: Some("initialize".to_string()),
+                                                        pool_id: Some(pool_id),
+                                                    },
+                                                }
+                                            }
                                         }
-                                    });
-                                    if let Some((method, result)) = cached {
-                                        diagnostics::log(format!(
-                                            "pool_cache_hit method={} client_id={}",
-                                            method, client_id
-                                        ));
-                                        ClientAction::Cached(build_cached_response(
-                                            original_id,
-                                            result,
-                                        ))
-                                    } else {
+                                        Some("tools/list") => {
+                                            match prepare_tools_list_request(
+                                                &handshake_cache,
+                                                &client_id,
+                                                original_id.clone(),
+                                            ) {
+                                                ToolsListAction::Cached(response) => {
+                                                    diagnostics::log(format!(
+                                                        "pool_cache_hit method=tools/list client_id={}",
+                                                        client_id
+                                                    ));
+                                                    ClientAction::Cached(response)
+                                                }
+                                                ToolsListAction::Coalesced => {
+                                                    diagnostics::log(format!(
+                                                        "pool_tools_list_coalesced client_id={}",
+                                                        client_id
+                                                    ));
+                                                    ClientAction::Drop
+                                                }
+                                                ToolsListAction::Leader => {
+                                                diagnostics::log(format!(
+                                                    "pool_cache_miss method=tools/list client_id={}",
+                                                    client_id
+                                                ));
+                                                let pool_id = id_allocator.allocate();
+                                                request_map.lock().insert(
+                                                    jsonrpc::id_key(&Value::from(pool_id)),
+                                                    PendingRequestInfo {
+                                                        client_id: client_id.clone(),
+                                                        original_id,
+                                                        method: Some("tools/list".to_string()),
+                                                        inserted_at: Instant::now(),
+                                                    },
+                                                );
+                                                *last_active_client.lock() = Some(client_id.clone());
+                                                match value.clone() {
+                                                    Value::Object(object) => ClientAction::Forward {
+                                                        line: jsonrpc::with_id(object, Value::from(pool_id)),
+                                                        method: Some("tools/list".to_string()),
+                                                        pool_id: Some(pool_id),
+                                                    },
+                                                    _ => ClientAction::Forward {
+                                                        line: line.clone(),
+                                                        method: Some("tools/list".to_string()),
+                                                        pool_id: Some(pool_id),
+                                                    },
+                                                }
+                                                }
+                                            }
+                                        }
+                                        _ => {
                                         let pool_id = id_allocator.allocate();
                                         // Remember the method only for cacheable
                                         // ones, so route_response can cache the
                                         // matching success response.
+                                        let forward_method = method.clone();
                                         let cacheable = method
                                             .filter(|m| is_cacheable_method(m));
                                         // Key the pending request through the same
@@ -570,34 +732,69 @@ async fn handle_client(
                                         // string).
                                         request_map.lock().insert(
                                             jsonrpc::id_key(&Value::from(pool_id)),
-                                            (
-                                                client_id.clone(),
+                                            PendingRequestInfo {
+                                                client_id: client_id.clone(),
                                                 original_id,
-                                                cacheable,
-                                                Instant::now(),
-                                            ),
+                                                method: cacheable,
+                                                inserted_at: Instant::now(),
+                                            },
                                         );
                                         // Record this client as most-recently-active
                                         // so a server-initiated callback can route
                                         // back to it (see route_server_request).
                                         *last_active_client.lock() = Some(client_id.clone());
-                                        match value {
-                                            Value::Object(object) => ClientAction::Forward(
-                                                jsonrpc::with_id(object, Value::from(pool_id)),
-                                            ),
+                                        match value.clone() {
+                                            Value::Object(object) => ClientAction::Forward {
+                                                line: jsonrpc::with_id(object, Value::from(pool_id)),
+                                                method: forward_method,
+                                                pool_id: Some(pool_id),
+                                            },
                                             // Unreachable: guarded by is_object
                                             // above, but match instead of unwrap to
                                             // stay panic-free.
-                                            _ => ClientAction::Forward(line.clone()),
+                                            _ => ClientAction::Forward {
+                                                line: line.clone(),
+                                                method: forward_method,
+                                                pool_id: Some(pool_id),
+                                            },
+                                        }
                                         }
                                     }
                                 }
                                 // NOTIFICATION (method, no id) or RESPONSE
                                 // (no method): forward verbatim, never store.
-                                _ => ClientAction::Forward(line.clone()),
+                                _ => {
+                                    if should_swallow_initialized(locally_initialized, &value) {
+                                        diagnostics::log(format!(
+                                            "pool_cached_initialized_swallowed client_id={}",
+                                            client_id
+                                        ));
+                                        ClientAction::Drop
+                                    } else {
+                                        let method = value
+                                            .get("method")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string);
+                                        diagnostics::log(format!(
+                                            "pool_request_received client_id={} method={} has_id=false bytes={}",
+                                            client_id,
+                                            method.as_deref().unwrap_or("?"),
+                                            line.len()
+                                        ));
+                                        ClientAction::Forward {
+                                            line: line.clone(),
+                                            method,
+                                            pool_id: None,
+                                        }
+                                    }
+                                }
                             }
                         }
-                        Ok(_) => ClientAction::Forward(line.clone()),
+                        Ok(_) => ClientAction::Forward {
+                            line: line.clone(),
+                            method: None,
+                            pool_id: None,
+                        },
                         Err(_) => {
                             if parse_failures < 3 {
                                 // Throttle log spam from a chatty malformed sender.
@@ -607,11 +804,15 @@ async fn handle_client(
                                     client_id, line.len()
                                 ));
                             }
-                            ClientAction::Forward(line.clone())
+                            ClientAction::Forward {
+                                line: line.clone(),
+                                method: None,
+                                pool_id: None,
+                            }
                         }
                     };
 
-                    let forward_line = match action {
+                    let (forward_line, forward_method, forward_pool_id) = match action {
                         // Cache hit: reply directly to this client. handle_client
                         // owns write_half and the select! arms never run
                         // concurrently, so writing here is not re-entrant.
@@ -634,7 +835,12 @@ async fn handle_client(
                             }
                             continue;
                         }
-                        ClientAction::Forward(forward_line) => forward_line,
+                        ClientAction::Drop => continue,
+                        ClientAction::Forward {
+                            line,
+                            method,
+                            pool_id,
+                        } => (line, method, pool_id),
                     };
 
                     // Wait for the upstream sender if it is still starting rather
@@ -656,8 +862,13 @@ async fn handle_client(
                             break;
                         }
                         diagnostics::log(format!(
-                            "pool_request_forwarded client_id={} bytes={}",
-                            client_id, line.len()
+                            "pool_request_forwarded client_id={} method={} pool_id={} bytes={}",
+                            client_id,
+                            forward_method.as_deref().unwrap_or("?"),
+                            forward_pool_id
+                                .map(|pool_id| pool_id.to_string())
+                                .unwrap_or_else(|| "?".to_string()),
+                            line.len()
                         ));
                     } else {
                         diagnostics::log(format!(
@@ -701,8 +912,11 @@ async fn handle_client(
 
     // Drop this client's in-flight requests so responses are not routed to a
     // (now closed) sender, then remove it from the client table.
-    request_map.lock().retain(|_, (cid, _, _, _)| cid != &client_id);
+    request_map
+        .lock()
+        .retain(|_, pending| pending.client_id != client_id);
     clients.lock().remove(&client_id);
+    client_capabilities.lock().remove(&client_id);
     cleanup_stale_requests(&request_map, &cleanup_counter);
 }
 
@@ -757,6 +971,7 @@ async fn acquire_request_sender(
 ///   request, producing duplicate/conflicting responses upstream).
 /// - NOTIFICATION (`method`, no id): broadcast to every client.
 /// - unparseable / non-object: broadcast (avoid silently dropping data).
+#[allow(clippy::too_many_arguments)]
 async fn route_response(
     line: &str,
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
@@ -764,51 +979,99 @@ async fn route_response(
     handshake_cache: &HandshakeCacheRef,
     cleanup_counter: &Arc<AtomicU32>,
     last_active_client: &Arc<Mutex<Option<String>>>,
+    client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    recovery_tx: &mpsc::Sender<RecoveryReason>,
+    recovery_requested: &Arc<AtomicBool>,
 ) {
     cleanup_stale_requests(request_map, cleanup_counter);
+    for (client_id, payload) in cleanup_stale_tools_list_waiters(handshake_cache) {
+        send_to_client(&client_id, payload, clients).await;
+    }
 
     match serde_json::from_str::<Value>(line) {
         Ok(value) if value.is_object() => {
+            request_recovery_if_session_not_found(
+                &value,
+                handshake_cache,
+                recovery_tx,
+                recovery_requested,
+            );
             // Clone the id (ending the borrow) before potentially moving the
             // object into `with_id`.
             let id = non_null_id(&value).cloned();
             match (message_has_method(&value), id) {
                 // SERVER-INITIATED REQUEST: method + id. Route to one client.
                 (true, Some(_)) => {
-                    route_server_request(line, clients, last_active_client).await;
+                    route_server_request(
+                        line,
+                        &value,
+                        clients,
+                        last_active_client,
+                        client_capabilities,
+                        request_tx,
+                    )
+                    .await;
                 }
                 // RESPONSE: no method, has id. Restore the client's original id.
                 (false, Some(id)) => {
                     let key = jsonrpc::id_key(&id);
                     let restored = match request_map.lock().remove(&key) {
-                        Some((client_id, original_id, method, _)) => {
-                            // Cache successful handshake/discovery responses
-                            // (result, no error) so later clients are served from
-                            // proxy-side state. Errors are never cached.
-                            if let Some(method) = method.as_deref() {
-                                maybe_cache_response(&value, method, handshake_cache);
-                            }
-                            match value {
-                                Value::Object(object) => {
-                                    Some((client_id, jsonrpc::with_id(object, original_id)))
+                        Some(pending) => {
+                            if pending.method.as_deref() == Some("tools/list") {
+                                complete_tools_list_response(&value, pending, handshake_cache)
+                            } else {
+                                diagnostics::log(format!(
+                                    "pool_response_routed client_id={} method={} elapsed_ms={} outcome={}",
+                                    pending.client_id,
+                                    pending.method.as_deref().unwrap_or("?"),
+                                    pending.inserted_at.elapsed().as_millis(),
+                                    response_outcome(&value)
+                                ));
+                                // Cache successful handshake/discovery responses
+                                // (result, no error) so later clients are served from
+                                // proxy-side state. Errors are never cached.
+                                if let Some(method) = pending.method.as_deref() {
+                                    maybe_cache_response(&value, method, handshake_cache);
                                 }
-                                // Unreachable: guarded by is_object above.
-                                _ => None,
+                                match value.clone() {
+                                    Value::Object(object) => {
+                                        vec![(
+                                            pending.client_id,
+                                            jsonrpc::with_id(object, pending.original_id),
+                                        )]
+                                    }
+                                    // Unreachable: guarded by is_object above.
+                                    _ => Vec::new(),
+                                }
                             }
                         }
-                        None => None,
+                        None => Vec::new(),
                     };
-                    match restored {
-                        Some((client_id, payload)) => {
+                    if restored.is_empty() {
+                        if let Some((client_id, payload, method)) =
+                            restore_empty_id_error_to_oldest_pending(&value, request_map)
+                        {
+                            let (error_code, error_message) = error_summary(&value);
+                            diagnostics::log(format!(
+                                "pool_response_empty_id_error_routed client_id={} method={} error_code={} error_message={}",
+                                client_id,
+                                method.as_deref().unwrap_or("?"),
+                                error_code,
+                                error_message
+                            ));
                             send_to_client(&client_id, payload, clients).await;
-                        }
-                        None => {
+                        } else {
                             // Orphan/late response: the request is gone (TTL
                             // cleanup or client disconnect). Drop, never broadcast.
                             diagnostics::log(format!(
                                 "pool_response_orphaned id={} reason=no_pending_request",
                                 key
                             ));
+                        }
+                    } else {
+                        for (client_id, payload) in restored {
+                            send_to_client(&client_id, payload, clients).await;
                         }
                     }
                 }
@@ -835,6 +1098,147 @@ async fn route_response(
     }
 }
 
+/// Some upstream bridges (notably Agency's HTTP/SSE bridge when a remote MCP
+/// session expires) return an error response with `id:""` instead of echoing the
+/// JSON-RPC request id. If we drop that as an orphan, the downstream client waits
+/// until its own timeout and the tool appears to hang. Route only these empty-id
+/// *errors* to the oldest pending request for this server so the client receives
+/// a concrete MCP error. Successful or non-empty-id responses still require exact
+/// id matching.
+fn restore_empty_id_error_to_oldest_pending(
+    value: &Value,
+    request_map: &RequestMap,
+) -> Option<(String, String, Option<String>)> {
+    if !is_empty_id_error(value) {
+        return None;
+    }
+
+    let mut pending = request_map.lock();
+    let key = pending
+        .iter()
+        .min_by(|(_, left), (_, right)| left.inserted_at.cmp(&right.inserted_at))
+        .map(|(key, _)| key.clone())?;
+    let request = pending.remove(&key)?;
+    match value.clone() {
+        Value::Object(object) => Some((
+            request.client_id,
+            jsonrpc::with_id(object, request.original_id),
+            request.method,
+        )),
+        _ => None,
+    }
+}
+
+fn complete_tools_list_response(
+    value: &Value,
+    leader: PendingRequestInfo,
+    cache: &HandshakeCacheRef,
+) -> Vec<(String, String)> {
+    let mut cache = cache.lock();
+    cache.tools_list.in_flight = false;
+    let waiters: Vec<PendingWaiter> = cache.tools_list.waiters.drain(..).collect();
+
+    if value.get("error").is_none()
+        && let Some(result) = value.get("result").cloned()
+    {
+        cache.tools_list.cached_result = Some(result.clone());
+        cache.tools_list.last_good_result = Some(result);
+        diagnostics::log("pool_cache_stored method=tools/list");
+    }
+
+    let mut responses = Vec::with_capacity(waiters.len() + 1);
+    if let Value::Object(object) = value.clone() {
+        diagnostics::log(format!(
+            "pool_response_routed client_id={} method=tools/list elapsed_ms={} outcome={} waiters={}",
+            leader.client_id,
+            leader.inserted_at.elapsed().as_millis(),
+            response_outcome(value),
+            waiters.len()
+        ));
+        responses.push((
+            leader.client_id,
+            jsonrpc::with_id(object.clone(), leader.original_id),
+        ));
+        responses.extend(waiters.into_iter().map(|waiter| {
+            (
+                waiter.client_id,
+                jsonrpc::with_id(object.clone(), waiter.original_id),
+            )
+        }));
+    }
+    responses
+}
+
+fn cleanup_stale_tools_list_waiters(cache: &HandshakeCacheRef) -> Vec<(String, String)> {
+    let now = Instant::now();
+    let mut cache = cache.lock();
+    let mut stale = Vec::new();
+    let mut kept = Vec::with_capacity(cache.tools_list.waiters.len());
+    for waiter in cache.tools_list.waiters.drain(..) {
+        if now.duration_since(waiter.inserted_at).as_secs() > REQUEST_TTL_SECS {
+            stale.push((
+                waiter.client_id,
+                build_error_response(waiter.original_id, -32001, "tools/list discovery timed out"),
+            ));
+        } else {
+            kept.push(waiter);
+        }
+    }
+    cache.tools_list.waiters = kept;
+    stale
+}
+
+fn request_recovery_if_session_not_found(
+    value: &Value,
+    cache: &HandshakeCacheRef,
+    recovery_tx: &mpsc::Sender<RecoveryReason>,
+    recovery_requested: &Arc<AtomicBool>,
+) {
+    if !is_session_not_found_error(value) {
+        return;
+    }
+    cache.lock().clear_all();
+    if recovery_requested.load(Ordering::SeqCst) {
+        return;
+    }
+    if recovery_tx
+        .try_send(RecoveryReason::SessionNotFound)
+        .is_err()
+    {
+        diagnostics::log("pool_recovery_signal_failed reason=channel_unavailable");
+    }
+}
+
+fn response_outcome(value: &Value) -> &'static str {
+    if value.get("error").is_some() {
+        "error"
+    } else {
+        "result"
+    }
+}
+
+fn error_summary(value: &Value) -> (String, String) {
+    let Some(error) = value.get("error") else {
+        return ("?".to_string(), "?".to_string());
+    };
+    let code = error
+        .get("code")
+        .map(Value::to_string)
+        .unwrap_or_else(|| "?".to_string());
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    (code, message)
+}
+
+fn recovery_reason_label(reason: RecoveryReason) -> &'static str {
+    match reason {
+        RecoveryReason::SessionNotFound => "session_not_found",
+    }
+}
+
 /// Route a server-initiated request to a SINGLE client.
 ///
 /// HEURISTIC: target the most-recently-active client — the one currently driving
@@ -846,9 +1250,41 @@ async fn route_response(
 /// server's id is preserved and the client's response id matches.
 async fn route_server_request(
     line: &str,
+    value: &Value,
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
     last_active_client: &Arc<Mutex<Option<String>>>,
+    client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
 ) {
+    let method = value.get("method").and_then(Value::as_str).unwrap_or("?");
+    if let Some(required) = required_capability(method) {
+        let target = capable_client(clients, client_capabilities, last_active_client, required);
+        if let Some(client_id) = target {
+            diagnostics::log(format!(
+                "pool_server_request_routed client_id={} method={}",
+                client_id, method
+            ));
+            send_to_client(&client_id, line.to_string(), clients).await;
+            return;
+        }
+
+        let Some(server_id) = non_null_id(value).cloned() else {
+            diagnostics::log(format!(
+                "pool_server_request_dropped method={} reason=no_capable_client",
+                method
+            ));
+            return;
+        };
+        let response = build_error_response(
+            server_id,
+            -32001,
+            &format!("no capable downstream client connected for {method}"),
+        );
+        send_to_upstream(response, request_tx, method).await;
+        return;
+    }
+
+    diagnostics::log(format!("pool_server_request_fallback method={}", method));
     // Snapshot last-active (releasing its lock) before locking clients, so the
     // two parking_lot mutexes are never held nested.
     let last_active = last_active_client.lock().clone();
@@ -868,8 +1304,88 @@ async fn route_server_request(
         ));
         return;
     };
-    diagnostics::log(format!("pool_server_request_routed client_id={}", client_id));
+    diagnostics::log(format!(
+        "pool_server_request_routed client_id={}",
+        client_id
+    ));
     send_to_client(&client_id, line.to_string(), clients).await;
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RequiredCapability {
+    Sampling,
+    Roots,
+}
+
+fn required_capability(method: &str) -> Option<RequiredCapability> {
+    if method.starts_with("sampling/") {
+        Some(RequiredCapability::Sampling)
+    } else if method.starts_with("roots/") {
+        Some(RequiredCapability::Roots)
+    } else {
+        None
+    }
+}
+
+fn capable_client(
+    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+    client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
+    last_active_client: &Arc<Mutex<Option<String>>>,
+    required: RequiredCapability,
+) -> Option<String> {
+    let last_active = last_active_client.lock().clone();
+    let clients_guard = clients.lock();
+    let capabilities_guard = client_capabilities.lock();
+    if let Some(client_id) = last_active
+        && clients_guard.contains_key(&client_id)
+        && capabilities_guard
+            .get(&client_id)
+            .is_some_and(|capabilities| has_required_capability(capabilities, required))
+    {
+        return Some(client_id);
+    }
+    capabilities_guard
+        .iter()
+        .find_map(|(client_id, capabilities)| {
+            if clients_guard.contains_key(client_id)
+                && has_required_capability(capabilities, required)
+            {
+                Some(client_id.clone())
+            } else {
+                None
+            }
+        })
+}
+
+fn has_required_capability(
+    capabilities: &ClientCapabilities,
+    required: RequiredCapability,
+) -> bool {
+    match required {
+        RequiredCapability::Sampling => capabilities.sampling,
+        RequiredCapability::Roots => capabilities.roots,
+    }
+}
+
+async fn send_to_upstream(
+    payload: String,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    method: &str,
+) {
+    let sender = request_tx.lock().clone();
+    let Some(sender) = sender else {
+        diagnostics::log(format!(
+            "pool_server_request_error_send_failed method={} reason=upstream_unavailable",
+            method
+        ));
+        return;
+    };
+    if sender.send(payload).await.is_err() {
+        diagnostics::log(format!(
+            "pool_server_request_error_send_failed method={} reason=upstream_closed",
+            method
+        ));
+    }
 }
 
 /// Deliver one already-serialized payload to a single client. Preserves the
@@ -928,14 +1444,17 @@ fn cleanup_stale_requests(request_map: &RequestMap, cleanup_counter: &Arc<Atomic
 
     let now = Instant::now();
     let before = request_map.lock().len();
-    request_map.lock().retain(|_, (_, _, _, inserted_at)| {
-        now.duration_since(*inserted_at).as_secs() <= REQUEST_TTL_SECS
-    });
+    request_map
+        .lock()
+        .retain(|_, pending| now.duration_since(pending.inserted_at).as_secs() <= REQUEST_TTL_SECS);
     let after = request_map.lock().len();
     // saturating_sub guards against theoretical underflow rather than panicking.
     let removed = before.saturating_sub(after);
     if removed > 0 {
-        diagnostics::log(format!("pool_stale_requests_cleaned removed={} remaining={}", removed, after));
+        diagnostics::log(format!(
+            "pool_stale_requests_cleaned removed={} remaining={}",
+            removed, after
+        ));
     }
 }
 
@@ -944,7 +1463,11 @@ async fn broadcast_to_all(line: &str, clients: &Arc<Mutex<HashMap<String, Client
     for sender in &senders {
         let _ = sender.send(line.to_string()).await;
     }
-    diagnostics::log(format!("pool_response_broadcast bytes={} clients={}", line.len(), senders.len()));
+    diagnostics::log(format!(
+        "pool_response_broadcast bytes={} clients={}",
+        line.len(),
+        senders.len()
+    ));
 }
 
 /// True if the message carries a `method` field. JSON-RPC requests and
@@ -989,6 +1512,83 @@ mod tests {
         Arc::new(Mutex::new(HandshakeCache::default()))
     }
 
+    fn pending_request(
+        client_id: &str,
+        original_id: Value,
+        method: Option<&str>,
+    ) -> PendingRequestInfo {
+        PendingRequestInfo {
+            client_id: client_id.to_string(),
+            original_id,
+            method: method.map(str::to_string),
+            inserted_at: Instant::now(),
+        }
+    }
+
+    async fn route_response(
+        line: &str,
+        clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+        request_map: &RequestMap,
+        handshake_cache: &HandshakeCacheRef,
+        cleanup_counter: &Arc<AtomicU32>,
+        last_active_client: &Arc<Mutex<Option<String>>>,
+    ) -> mpsc::Receiver<RecoveryReason> {
+        let (recovery_tx, recovery_rx) = mpsc::channel::<RecoveryReason>(8);
+        let recovery_requested = Arc::new(AtomicBool::new(false));
+        let client_capabilities = Arc::new(Mutex::new(HashMap::new()));
+        if let Some(client_id) = last_active_client.lock().clone() {
+            client_capabilities.lock().insert(
+                client_id,
+                ClientCapabilities {
+                    sampling: true,
+                    roots: true,
+                },
+            );
+        }
+        let request_tx = Arc::new(Mutex::new(None));
+        super::route_response(
+            line,
+            clients,
+            request_map,
+            handshake_cache,
+            cleanup_counter,
+            last_active_client,
+            &client_capabilities,
+            &request_tx,
+            &recovery_tx,
+            &recovery_requested,
+        )
+        .await;
+        recovery_rx
+    }
+
+    async fn route_response_with_capabilities(
+        line: &str,
+        clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+        client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
+        request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    ) {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        let cache = empty_cache();
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(Some("clientA"));
+        let (recovery_tx, _recovery_rx) = mpsc::channel::<RecoveryReason>(8);
+        let recovery_requested = Arc::new(AtomicBool::new(false));
+        super::route_response(
+            line,
+            clients,
+            &request_map,
+            &cache,
+            &counter,
+            &last_active,
+            client_capabilities,
+            request_tx,
+            &recovery_tx,
+            &recovery_requested,
+        )
+        .await;
+    }
+
     // The core multiplexing fix: two clients that independently used the same
     // raw id (1) are tracked under distinct pool ids, so their responses route
     // back to the right client with each client's original id restored — no
@@ -998,10 +1598,10 @@ mod tests {
         let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
         request_map
             .lock()
-            .insert("1".into(), ("clientA".into(), json!(1), None, Instant::now()));
+            .insert("1".into(), pending_request("clientA", json!(1), None));
         request_map
             .lock()
-            .insert("2".into(), ("clientB".into(), json!(1), None, Instant::now()));
+            .insert("2".into(), pending_request("clientB", json!(1), None));
 
         let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -1030,10 +1630,10 @@ mod tests {
         )
         .await;
 
-        let a: Value = serde_json::from_str(&rx_a.try_recv().expect("clientA response"))
-            .expect("valid json");
-        let b: Value = serde_json::from_str(&rx_b.try_recv().expect("clientB response"))
-            .expect("valid json");
+        let a: Value =
+            serde_json::from_str(&rx_a.try_recv().expect("clientA response")).expect("valid json");
+        let b: Value =
+            serde_json::from_str(&rx_b.try_recv().expect("clientB response")).expect("valid json");
         assert_eq!(a["id"], json!(1), "clientA original id restored");
         assert_eq!(a["result"], json!("A"));
         assert_eq!(b["id"], json!(1), "clientB original id restored");
@@ -1079,6 +1679,122 @@ mod tests {
         assert!(rx_b.try_recv().is_err(), "server request not broadcast");
     }
 
+    #[tokio::test]
+    async fn sampling_server_request_routes_to_sampling_capable_client() {
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let mut rx_b = channel_client(&clients, "clientB");
+        let capabilities = Arc::new(Mutex::new(HashMap::new()));
+        capabilities.lock().insert(
+            "clientA".to_string(),
+            ClientCapabilities {
+                sampling: false,
+                roots: false,
+            },
+        );
+        capabilities.lock().insert(
+            "clientB".to_string(),
+            ClientCapabilities {
+                sampling: true,
+                roots: false,
+            },
+        );
+        let request_tx = Arc::new(Mutex::new(None));
+
+        route_response_with_capabilities(
+            r#"{"jsonrpc":"2.0","id":42,"method":"sampling/createMessage"}"#,
+            &clients,
+            &capabilities,
+            &request_tx,
+        )
+        .await;
+
+        assert!(rx_a.try_recv().is_err(), "incapable last-active not used");
+        let received: Value =
+            serde_json::from_str(&rx_b.try_recv().expect("sampling client receives request"))
+                .expect("valid json");
+        assert_eq!(received["method"], json!("sampling/createMessage"));
+    }
+
+    #[tokio::test]
+    async fn roots_server_request_routes_to_roots_capable_client() {
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let mut rx_b = channel_client(&clients, "clientB");
+        let capabilities = Arc::new(Mutex::new(HashMap::new()));
+        capabilities.lock().insert(
+            "clientA".to_string(),
+            ClientCapabilities {
+                sampling: true,
+                roots: false,
+            },
+        );
+        capabilities.lock().insert(
+            "clientB".to_string(),
+            ClientCapabilities {
+                sampling: false,
+                roots: true,
+            },
+        );
+        let request_tx = Arc::new(Mutex::new(None));
+
+        route_response_with_capabilities(
+            r#"{"jsonrpc":"2.0","id":43,"method":"roots/list"}"#,
+            &clients,
+            &capabilities,
+            &request_tx,
+        )
+        .await;
+
+        assert!(rx_a.try_recv().is_err(), "roots-incapable client not used");
+        let received: Value =
+            serde_json::from_str(&rx_b.try_recv().expect("roots client receives request"))
+                .expect("valid json");
+        assert_eq!(received["method"], json!("roots/list"));
+    }
+
+    #[tokio::test]
+    async fn no_capable_client_sends_error_response_upstream() {
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let capabilities = Arc::new(Mutex::new(HashMap::new()));
+        capabilities.lock().insert(
+            "clientA".to_string(),
+            ClientCapabilities {
+                sampling: false,
+                roots: false,
+            },
+        );
+        let (upstream_tx, mut upstream_rx) = mpsc::channel::<String>(8);
+        let request_tx = Arc::new(Mutex::new(Some(upstream_tx)));
+
+        route_response_with_capabilities(
+            r#"{"jsonrpc":"2.0","id":44,"method":"sampling/createMessage"}"#,
+            &clients,
+            &capabilities,
+            &request_tx,
+        )
+        .await;
+
+        assert!(
+            rx_a.try_recv().is_err(),
+            "request not sent to incapable client"
+        );
+        let response: Value =
+            serde_json::from_str(&upstream_rx.try_recv().expect("upstream receives error"))
+                .expect("valid json");
+        assert_eq!(response["id"], json!(44));
+        assert_eq!(response["error"]["code"], json!(-32001));
+        assert_eq!(
+            response["error"]["message"],
+            json!("no capable downstream client connected for sampling/createMessage")
+        );
+        assert!(upstream_rx.try_recv().is_err(), "single upstream error");
+    }
+
     // A pure notification (method, no id) fans out to every client.
     #[tokio::test]
     async fn route_response_broadcasts_notifications() {
@@ -1110,7 +1826,7 @@ mod tests {
         let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
         request_map
             .lock()
-            .insert("5".into(), ("ghost".into(), json!(1), None, Instant::now()));
+            .insert("5".into(), pending_request("ghost", json!(1), None));
         let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let mut rx_other = channel_client(&clients, "other");
@@ -1127,7 +1843,190 @@ mod tests {
         )
         .await;
 
-        assert!(rx_other.try_recv().is_err(), "orphan response not broadcast");
+        assert!(
+            rx_other.try_recv().is_err(),
+            "orphan response not broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_id_error_routes_to_oldest_pending_request() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map.lock().insert(
+            "10".into(),
+            pending_request("clientA", json!(99), Some("tools/call")),
+        );
+
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let mut rx_b = channel_client(&clients, "clientB");
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
+
+        route_response(
+            r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
+            &clients,
+            &request_map,
+            &empty_cache(),
+            &counter,
+            &last_active,
+        )
+        .await;
+
+        let routed: Value = serde_json::from_str(&rx_a.try_recv().expect("clientA receives error"))
+            .expect("valid json");
+        assert_eq!(routed["id"], json!(99), "original id restored");
+        assert_eq!(routed["error"]["code"], json!(-32001));
+        assert!(rx_b.try_recv().is_err(), "malformed error not broadcast");
+        assert!(request_map.lock().is_empty(), "pending entry removed");
+    }
+
+    #[tokio::test]
+    async fn empty_id_success_is_dropped_as_orphan() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map.lock().insert(
+            "10".into(),
+            pending_request("clientA", json!(99), Some("tools/call")),
+        );
+
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
+
+        route_response(
+            r#"{"jsonrpc":"2.0","id":"","result":{"ok":true}}"#,
+            &clients,
+            &request_map,
+            &empty_cache(),
+            &counter,
+            &last_active,
+        )
+        .await;
+
+        assert!(
+            rx_a.try_recv().is_err(),
+            "empty-id success not fallback routed"
+        );
+        assert_eq!(request_map.lock().len(), 1, "pending request kept");
+    }
+
+    #[tokio::test]
+    async fn empty_id_error_without_pending_request_is_orphaned() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
+
+        route_response(
+            r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
+            &clients,
+            &request_map,
+            &empty_cache(),
+            &counter,
+            &last_active,
+        )
+        .await;
+
+        assert!(rx_a.try_recv().is_err(), "malformed error not broadcast");
+    }
+
+    #[tokio::test]
+    async fn session_not_found_empty_id_error_clears_caches_and_signals_recovery() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map.lock().insert(
+            "10".into(),
+            pending_request("clientA", json!(99), Some("tools/call")),
+        );
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let _rx_a = channel_client(&clients, "clientA");
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
+        let cache = empty_cache();
+        cache
+            .lock()
+            .store("initialize", json!({"capabilities": {}}));
+        cache.lock().store("tools/list", json!({"tools":["t1"]}));
+
+        let mut recovery_rx = route_response(
+            r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
+            &clients,
+            &request_map,
+            &cache,
+            &counter,
+            &last_active,
+        )
+        .await;
+
+        assert_eq!(cache.lock().initialize, None);
+        assert_eq!(cache.lock().tools_list.cached_result, None);
+        assert_eq!(recovery_rx.try_recv(), Ok(RecoveryReason::SessionNotFound));
+    }
+
+    #[tokio::test]
+    async fn non_session_error_does_not_signal_recovery() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map.lock().insert(
+            "10".into(),
+            pending_request("clientA", json!(99), Some("tools/call")),
+        );
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let _rx_a = channel_client(&clients, "clientA");
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
+        let cache = empty_cache();
+        cache
+            .lock()
+            .store("initialize", json!({"capabilities": {}}));
+
+        let mut recovery_rx = route_response(
+            r#"{"jsonrpc":"2.0","id":10,"error":{"code":-32001,"message":"rate limited"}}"#,
+            &clients,
+            &request_map,
+            &cache,
+            &counter,
+            &last_active,
+        )
+        .await;
+
+        assert_eq!(cache.lock().initialize, Some(json!({"capabilities": {}})));
+        assert!(recovery_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_call_session_not_found_is_returned_to_client() {
+        let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
+        request_map.lock().insert(
+            "10".into(),
+            pending_request("clientA", json!(77), Some("tools/call")),
+        );
+        let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut rx_a = channel_client(&clients, "clientA");
+        let counter = Arc::new(AtomicU32::new(0));
+        let last_active = last_active(None);
+
+        let _recovery_rx = route_response(
+            r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
+            &clients,
+            &request_map,
+            &empty_cache(),
+            &counter,
+            &last_active,
+        )
+        .await;
+
+        let routed: Value =
+            serde_json::from_str(&rx_a.try_recv().expect("clientA receives concrete error"))
+                .expect("valid json");
+        assert_eq!(routed["id"], json!(77));
+        assert_eq!(routed["error"]["message"], json!("Session not found"));
     }
 
     // The classifier helpers distinguish the three JSON-RPC message kinds by the
@@ -1161,15 +2060,15 @@ mod tests {
         // tools/list (id 12) that comes back as an error.
         request_map.lock().insert(
             "10".into(),
-            ("clientA".into(), json!(1), Some("tools/list".into()), Instant::now()),
+            pending_request("clientA", json!(1), Some("tools/list")),
         );
         request_map.lock().insert(
             "11".into(),
-            ("clientA".into(), json!(2), Some("initialize".into()), Instant::now()),
+            pending_request("clientA", json!(2), Some("initialize")),
         );
         request_map.lock().insert(
             "12".into(),
-            ("clientA".into(), json!(3), Some("tools/list".into()), Instant::now()),
+            pending_request("clientA", json!(3), Some("tools/list")),
         );
 
         let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
@@ -1234,7 +2133,7 @@ mod tests {
         let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
         request_map.lock().insert(
             "20".into(),
-            ("clientA".into(), json!(1), Some("tools/list".into()), Instant::now()),
+            pending_request("clientA", json!(1), Some("tools/list")),
         );
         let clients: Arc<Mutex<HashMap<String, ClientSender>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -1281,7 +2180,11 @@ mod tests {
         )
         .await;
 
-        assert_eq!(cache.lock().get("tools/list"), None, "tools/list invalidated");
+        assert_eq!(
+            cache.lock().get("tools/list"),
+            None,
+            "tools/list invalidated"
+        );
         assert_eq!(
             cache.lock().get("initialize"),
             Some(json!({"capabilities":{}})),
@@ -1297,14 +2200,13 @@ mod tests {
     #[test]
     fn cached_response_restored_with_new_client_id() {
         let cache = Arc::new(Mutex::new(HandshakeCache::default()));
-        cache.lock().store("tools/list", json!({"tools":["t1","t2"]}));
+        cache
+            .lock()
+            .store("tools/list", json!({"tools":["t1","t2"]}));
 
         // Simulate a new client whose original request id is 99.
-        let result = cache
-            .lock()
-            .get("tools/list")
-            .expect("tools/list cached");
-        let line = build_cached_response(json!(99), result);
+        let result = cache.lock().get("tools/list").expect("tools/list cached");
+        let line = build_success_response(json!(99), result);
         let parsed: Value = serde_json::from_str(&line).expect("valid json");
 
         assert_eq!(parsed["jsonrpc"], json!("2.0"));
@@ -1344,6 +2246,114 @@ mod tests {
             cache.lock().get("tools/list"),
             Some(json!({"tools":[]})),
             "error left prior success untouched"
+        );
+    }
+
+    #[test]
+    fn concurrent_tools_list_misses_create_one_leader_and_one_waiter() {
+        let cache = empty_cache();
+
+        let first = prepare_tools_list_request(&cache, "clientA", json!(1));
+        let second = prepare_tools_list_request(&cache, "clientB", json!(2));
+
+        assert!(matches!(first, ToolsListAction::Leader));
+        assert!(matches!(second, ToolsListAction::Coalesced));
+        let guard = cache.lock();
+        assert!(guard.tools_list.in_flight, "leader owns upstream discovery");
+        assert_eq!(guard.tools_list.waiters.len(), 1, "follower waits");
+        assert_eq!(guard.tools_list.waiters[0].client_id, "clientB");
+    }
+
+    #[test]
+    fn successful_tools_list_leader_fans_out_and_populates_cache() {
+        let cache = empty_cache();
+        cache.lock().tools_list.in_flight = true;
+        cache.lock().tools_list.waiters.push(PendingWaiter {
+            client_id: "clientB".to_string(),
+            original_id: json!(2),
+            inserted_at: Instant::now(),
+        });
+        let leader = pending_request("clientA", json!(1), Some("tools/list"));
+
+        let responses = complete_tools_list_response(
+            &json!({"jsonrpc":"2.0","id":10,"result":{"tools":["t1"]}}),
+            leader,
+            &cache,
+        );
+
+        assert_eq!(responses.len(), 2, "leader and waiter both answered");
+        let leader_response: Value = serde_json::from_str(&responses[0].1).expect("valid json");
+        let waiter_response: Value = serde_json::from_str(&responses[1].1).expect("valid json");
+        assert_eq!(leader_response["id"], json!(1));
+        assert_eq!(waiter_response["id"], json!(2));
+        let guard = cache.lock();
+        assert!(!guard.tools_list.in_flight);
+        assert!(guard.tools_list.waiters.is_empty());
+        assert_eq!(
+            guard.tools_list.cached_result,
+            Some(json!({"tools":["t1"]}))
+        );
+        assert_eq!(
+            guard.tools_list.last_good_result,
+            Some(json!({"tools":["t1"]}))
+        );
+    }
+
+    #[test]
+    fn failed_tools_list_leader_fans_out_without_caching_error() {
+        let cache = empty_cache();
+        cache.lock().tools_list.in_flight = true;
+        cache.lock().tools_list.last_good_result = Some(json!({"tools":["old"]}));
+        cache.lock().tools_list.waiters.push(PendingWaiter {
+            client_id: "clientB".to_string(),
+            original_id: json!(2),
+            inserted_at: Instant::now(),
+        });
+        let leader = pending_request("clientA", json!(1), Some("tools/list"));
+
+        let responses = complete_tools_list_response(
+            &json!({"jsonrpc":"2.0","id":10,"error":{"code":429,"message":"too many"}}),
+            leader,
+            &cache,
+        );
+
+        assert_eq!(responses.len(), 2);
+        let leader_response: Value = serde_json::from_str(&responses[0].1).expect("valid json");
+        let waiter_response: Value = serde_json::from_str(&responses[1].1).expect("valid json");
+        assert_eq!(leader_response["id"], json!(1));
+        assert_eq!(waiter_response["id"], json!(2));
+        assert_eq!(leader_response["error"]["code"], json!(429));
+        let guard = cache.lock();
+        assert_eq!(guard.tools_list.cached_result, None, "error not cached");
+        assert_eq!(
+            guard.tools_list.last_good_result,
+            Some(json!({"tools":["old"]})),
+            "last-good snapshot kept"
+        );
+    }
+
+    #[test]
+    fn later_success_repopulates_tools_list_cache_after_failure() {
+        let cache = empty_cache();
+        cache.lock().tools_list.in_flight = true;
+        let failed_leader = pending_request("clientA", json!(1), Some("tools/list"));
+        let _responses = complete_tools_list_response(
+            &json!({"jsonrpc":"2.0","id":10,"error":{"code":429,"message":"too many"}}),
+            failed_leader,
+            &cache,
+        );
+        cache.lock().tools_list.in_flight = true;
+
+        let successful_leader = pending_request("clientA", json!(3), Some("tools/list"));
+        let _responses = complete_tools_list_response(
+            &json!({"jsonrpc":"2.0","id":11,"result":{"tools":["new"]}}),
+            successful_leader,
+            &cache,
+        );
+
+        assert_eq!(
+            cache.lock().tools_list.cached_result,
+            Some(json!({"tools":["new"]}))
         );
     }
 }
