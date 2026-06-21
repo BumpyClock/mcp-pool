@@ -111,6 +111,7 @@ fn maybe_cache_response(value: &Value, method: &str, cache: &HandshakeCacheRef) 
 enum ClientAction {
     Forward(String),
     Cached(String),
+    Drop,
 }
 
 /// One pooled MCP: a single upstream multiplexed across many agent clients.
@@ -499,6 +500,7 @@ async fn handle_client(
     let mut reader = BufReader::new(read_half);
     let mut buffer = String::new();
     let mut parse_failures = 0u32;
+    let mut locally_initialized = false;
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
@@ -552,6 +554,9 @@ async fn handle_client(
                                             "pool_cache_hit method={} client_id={}",
                                             method, client_id
                                         ));
+                                        if method == "initialize" {
+                                            locally_initialized = true;
+                                        }
                                         ClientAction::Cached(build_cached_response(
                                             original_id,
                                             result,
@@ -581,7 +586,7 @@ async fn handle_client(
                                         // so a server-initiated callback can route
                                         // back to it (see route_server_request).
                                         *last_active_client.lock() = Some(client_id.clone());
-                                        match value {
+                                        match value.clone() {
                                             Value::Object(object) => ClientAction::Forward(
                                                 jsonrpc::with_id(object, Value::from(pool_id)),
                                             ),
@@ -594,7 +599,20 @@ async fn handle_client(
                                 }
                                 // NOTIFICATION (method, no id) or RESPONSE
                                 // (no method): forward verbatim, never store.
-                                _ => ClientAction::Forward(line.clone()),
+                                _ => {
+                                    if locally_initialized
+                                        && value.get("method").and_then(Value::as_str)
+                                            == Some("notifications/initialized")
+                                    {
+                                        diagnostics::log(format!(
+                                            "pool_cached_initialized_swallowed client_id={}",
+                                            client_id
+                                        ));
+                                        ClientAction::Drop
+                                    } else {
+                                        ClientAction::Forward(line.clone())
+                                    }
+                                }
                             }
                         }
                         Ok(_) => ClientAction::Forward(line.clone()),
@@ -634,6 +652,7 @@ async fn handle_client(
                             }
                             continue;
                         }
+                        ClientAction::Drop => continue,
                         ClientAction::Forward(forward_line) => forward_line,
                     };
 
@@ -803,12 +822,22 @@ async fn route_response(
                             send_to_client(&client_id, payload, clients).await;
                         }
                         None => {
-                            // Orphan/late response: the request is gone (TTL
-                            // cleanup or client disconnect). Drop, never broadcast.
-                            diagnostics::log(format!(
-                                "pool_response_orphaned id={} reason=no_pending_request",
-                                key
-                            ));
+                            if let Some((client_id, payload)) =
+                                restore_empty_id_error_to_oldest_pending(&value, request_map)
+                            {
+                                diagnostics::log(format!(
+                                    "pool_response_empty_id_error_routed client_id={}",
+                                    client_id
+                                ));
+                                send_to_client(&client_id, payload, clients).await;
+                            } else {
+                                // Orphan/late response: the request is gone (TTL
+                                // cleanup or client disconnect). Drop, never broadcast.
+                                diagnostics::log(format!(
+                                    "pool_response_orphaned id={} reason=no_pending_request",
+                                    key
+                                ));
+                            }
                         }
                     }
                 }
@@ -832,6 +861,37 @@ async fn route_response(
             diagnostics::log(format!("pool_response_parse_failed bytes={}", line.len()));
             broadcast_to_all(line, clients).await;
         }
+    }
+}
+
+/// Some upstream bridges (notably Agency's HTTP/SSE bridge when a remote MCP
+/// session expires) return an error response with `id:""` instead of echoing the
+/// JSON-RPC request id. If we drop that as an orphan, the downstream client waits
+/// until its own timeout and the tool appears to hang. Route only these empty-id
+/// *errors* to the oldest pending request for this server so the client receives
+/// a concrete MCP error. Successful or non-empty-id responses still require exact
+/// id matching.
+fn restore_empty_id_error_to_oldest_pending(
+    value: &Value,
+    request_map: &RequestMap,
+) -> Option<(String, String)> {
+    if value.get("error").is_none() {
+        return None;
+    }
+    let is_empty_id = matches!(value.get("id"), Some(Value::String(id)) if id.is_empty());
+    if !is_empty_id {
+        return None;
+    }
+
+    let mut pending = request_map.lock();
+    let key = pending
+        .iter()
+        .min_by(|(_, (_, _, _, left)), (_, (_, _, _, right))| left.cmp(right))
+        .map(|(key, _)| key.clone())?;
+    let (client_id, original_id, _, _) = pending.remove(&key)?;
+    match value.clone() {
+        Value::Object(object) => Some((client_id, jsonrpc::with_id(object, original_id))),
+        _ => None,
     }
 }
 
