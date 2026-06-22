@@ -227,7 +227,13 @@ fn spawn_stdout_reader(stdout: tokio::process::ChildStdout, response_tx: mpsc::S
 
 /// Capture child stderr into the diagnostics log so launches that fail after
 /// spawn (missing binary, bad args) leave a trail without polluting stdout.
+/// Long lines (e.g. multi-hundred-KB upstream JSON payloads echoed to stderr)
+/// are summarized so they cannot flood the terminal/log. Set
+/// `MCP_POOL_RAW_UPSTREAM_STDERR=1` to log full upstream stderr verbatim.
 fn spawn_stderr_logger(stderr: tokio::process::ChildStderr) {
+    let raw = std::env::var("MCP_POOL_RAW_UPSTREAM_STDERR")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))
+        .unwrap_or(false);
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
         let mut buffer = String::new();
@@ -238,7 +244,12 @@ fn spawn_stderr_logger(stderr: tokio::process::ChildStderr) {
                 Ok(_) => {
                     let trimmed = buffer.trim_end_matches(['\r', '\n']);
                     if !trimmed.is_empty() {
-                        diagnostics::log(format!("upstream_stderr {trimmed}"));
+                        let line = if raw {
+                            trimmed.to_string()
+                        } else {
+                            diagnostics::summarize_log_line(trimmed)
+                        };
+                        diagnostics::log(format!("upstream_stderr {line}"));
                     }
                 }
                 Err(error) => {

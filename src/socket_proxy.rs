@@ -16,7 +16,7 @@ use crate::jsonrpc::{self, IdAllocator};
 use crate::mcp_session::{
     ClientCapabilities, HandshakeCache, PendingRequestInfo, PendingWaiter, RecoveryReason,
     build_error_response, build_success_response, cacheable_method, is_empty_id_error,
-    is_session_not_found_error, parse_client_capabilities, should_swallow_initialized,
+    is_session_not_found_error, parse_client_capabilities, should_swallow_initialized, tool_name,
 };
 use crate::transport::{LocalListener, LocalStream};
 use crate::types::ServerStatus;
@@ -81,6 +81,7 @@ enum ClientAction {
     Forward {
         line: String,
         method: Option<String>,
+        tool: Option<String>,
         pool_id: Option<u64>,
     },
     Cached(String),
@@ -614,10 +615,20 @@ async fn handle_client(
                                         .get("method")
                                         .and_then(Value::as_str)
                                         .map(str::to_string);
+                                    // Tool name only for tools/call, for log
+                                    // enrichment; never the call arguments.
+                                    let tool = if method.as_deref() == Some("tools/call") {
+                                        tool_name(&value)
+                                    } else {
+                                        None
+                                    };
                                     diagnostics::log(format!(
-                                        "pool_request_received client_id={} method={} has_id=true bytes={}",
+                                        "pool_request_received client_id={} method={}{} has_id=true bytes={}",
                                         client_id,
                                         method.as_deref().unwrap_or("?"),
+                                        tool.as_deref()
+                                            .map(|t| format!(" tool={t}"))
+                                            .unwrap_or_default(),
                                         line.len()
                                     ));
                                     if method.as_deref() == Some("initialize") {
@@ -648,6 +659,7 @@ async fn handle_client(
                                                         client_id: client_id.clone(),
                                                         original_id,
                                                         method: Some("initialize".to_string()),
+                                                        tool: None,
                                                         inserted_at: Instant::now(),
                                                     },
                                                 );
@@ -656,11 +668,13 @@ async fn handle_client(
                                                     Value::Object(object) => ClientAction::Forward {
                                                         line: jsonrpc::with_id(object, Value::from(pool_id)),
                                                         method: Some("initialize".to_string()),
+                                                        tool: None,
                                                         pool_id: Some(pool_id),
                                                     },
                                                     _ => ClientAction::Forward {
                                                         line: line.clone(),
                                                         method: Some("initialize".to_string()),
+                                                        tool: None,
                                                         pool_id: Some(pool_id),
                                                     },
                                                 }
@@ -698,6 +712,7 @@ async fn handle_client(
                                                         client_id: client_id.clone(),
                                                         original_id,
                                                         method: Some("tools/list".to_string()),
+                                                        tool: None,
                                                         inserted_at: Instant::now(),
                                                     },
                                                 );
@@ -706,11 +721,13 @@ async fn handle_client(
                                                     Value::Object(object) => ClientAction::Forward {
                                                         line: jsonrpc::with_id(object, Value::from(pool_id)),
                                                         method: Some("tools/list".to_string()),
+                                                        tool: None,
                                                         pool_id: Some(pool_id),
                                                     },
                                                     _ => ClientAction::Forward {
                                                         line: line.clone(),
                                                         method: Some("tools/list".to_string()),
+                                                        tool: None,
                                                         pool_id: Some(pool_id),
                                                     },
                                                 }
@@ -719,12 +736,15 @@ async fn handle_client(
                                         }
                                         _ => {
                                         let pool_id = id_allocator.allocate();
-                                        // Remember the method only for cacheable
-                                        // ones, so route_response can cache the
-                                        // matching success response.
                                         let forward_method = method.clone();
-                                        let cacheable = method
-                                            .filter(|m| is_cacheable_method(m));
+                                        // Store the real method so the response
+                                        // route log reports the actual method
+                                        // (e.g. tools/call) rather than `?`.
+                                        // Caching stays gated on cacheable
+                                        // method names downstream, so retaining
+                                        // a non-cacheable method here never
+                                        // caches an extra response.
+                                        let pending_method = method.clone();
                                         // Key the pending request through the same
                                         // canonical helper route_response uses to
                                         // look it up, so the insert and lookup keys
@@ -735,7 +755,8 @@ async fn handle_client(
                                             PendingRequestInfo {
                                                 client_id: client_id.clone(),
                                                 original_id,
-                                                method: cacheable,
+                                                method: pending_method,
+                                                tool: tool.clone(),
                                                 inserted_at: Instant::now(),
                                             },
                                         );
@@ -747,6 +768,7 @@ async fn handle_client(
                                             Value::Object(object) => ClientAction::Forward {
                                                 line: jsonrpc::with_id(object, Value::from(pool_id)),
                                                 method: forward_method,
+                                                tool: tool.clone(),
                                                 pool_id: Some(pool_id),
                                             },
                                             // Unreachable: guarded by is_object
@@ -755,6 +777,7 @@ async fn handle_client(
                                             _ => ClientAction::Forward {
                                                 line: line.clone(),
                                                 method: forward_method,
+                                                tool: tool.clone(),
                                                 pool_id: Some(pool_id),
                                             },
                                         }
@@ -784,6 +807,7 @@ async fn handle_client(
                                         ClientAction::Forward {
                                             line: line.clone(),
                                             method,
+                                            tool: None,
                                             pool_id: None,
                                         }
                                     }
@@ -793,6 +817,7 @@ async fn handle_client(
                         Ok(_) => ClientAction::Forward {
                             line: line.clone(),
                             method: None,
+                            tool: None,
                             pool_id: None,
                         },
                         Err(_) => {
@@ -807,12 +832,13 @@ async fn handle_client(
                             ClientAction::Forward {
                                 line: line.clone(),
                                 method: None,
+                                tool: None,
                                 pool_id: None,
                             }
                         }
                     };
 
-                    let (forward_line, forward_method, forward_pool_id) = match action {
+                    let (forward_line, forward_method, forward_tool, forward_pool_id) = match action {
                         // Cache hit: reply directly to this client. handle_client
                         // owns write_half and the select! arms never run
                         // concurrently, so writing here is not re-entrant.
@@ -839,8 +865,9 @@ async fn handle_client(
                         ClientAction::Forward {
                             line,
                             method,
+                            tool,
                             pool_id,
-                        } => (line, method, pool_id),
+                        } => (line, method, tool, pool_id),
                     };
 
                     // Wait for the upstream sender if it is still starting rather
@@ -862,9 +889,13 @@ async fn handle_client(
                             break;
                         }
                         diagnostics::log(format!(
-                            "pool_request_forwarded client_id={} method={} pool_id={} bytes={}",
+                            "pool_request_forwarded client_id={} method={}{} pool_id={} bytes={}",
                             client_id,
                             forward_method.as_deref().unwrap_or("?"),
+                            forward_tool
+                                .as_deref()
+                                .map(|t| format!(" tool={t}"))
+                                .unwrap_or_default(),
                             forward_pool_id
                                 .map(|pool_id| pool_id.to_string())
                                 .unwrap_or_else(|| "?".to_string()),
@@ -1027,11 +1058,17 @@ async fn route_response(
                                 complete_tools_list_response(&value, pending, handshake_cache)
                             } else {
                                 diagnostics::log(format!(
-                                    "pool_response_routed client_id={} method={} elapsed_ms={} outcome={}",
+                                    "pool_response_routed client_id={} method={}{} elapsed_ms={} outcome={} bytes={}",
                                     pending.client_id,
                                     pending.method.as_deref().unwrap_or("?"),
+                                    pending
+                                        .tool
+                                        .as_deref()
+                                        .map(|t| format!(" tool={t}"))
+                                        .unwrap_or_default(),
                                     pending.inserted_at.elapsed().as_millis(),
-                                    response_outcome(&value)
+                                    response_outcome(&value),
+                                    line.len()
                                 ));
                                 // Cache successful handshake/discovery responses
                                 // (result, no error) so later clients are served from
@@ -1578,6 +1615,7 @@ mod tests {
             client_id: client_id.to_string(),
             original_id,
             method: method.map(str::to_string),
+            tool: None,
             inserted_at: Instant::now(),
         }
     }
@@ -1591,6 +1629,7 @@ mod tests {
             client_id: client_id.to_string(),
             original_id,
             method: method.map(str::to_string),
+            tool: None,
             inserted_at: Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1),
         }
     }

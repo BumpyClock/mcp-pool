@@ -19,6 +19,9 @@ pub struct PendingRequestInfo {
     pub client_id: String,
     pub original_id: Value,
     pub method: Option<String>,
+    /// Tool name for `tools/call` requests (`params.name`), used to enrich the
+    /// response route log. None for every other method. Never carries args.
+    pub tool: Option<String>,
     pub inserted_at: Instant,
 }
 
@@ -74,6 +77,17 @@ pub fn build_error_response(original_id: Value, code: i64, message: &str) -> Str
     object.insert("id".to_string(), original_id);
     object.insert("error".to_string(), Value::Object(error));
     Value::Object(object).to_string()
+}
+
+/// Extract the tool name from a `tools/call` request's `params.name`. Returns
+/// None when absent or not a string. Used for observability only; the helper
+/// never reads or exposes tool arguments.
+pub fn tool_name(value: &Value) -> Option<String> {
+    value
+        .get("params")
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 pub fn parse_client_capabilities(initialize_request: &Value) -> ClientCapabilities {
@@ -151,6 +165,25 @@ impl HandshakeCache {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tool_name_reads_params_name_for_tools_call() {
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": "ListCalendarView", "arguments": {"secret": "x"}}
+        });
+        assert_eq!(tool_name(&request).as_deref(), Some("ListCalendarView"));
+    }
+
+    #[test]
+    fn tool_name_is_none_without_params_name() {
+        let no_name = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}});
+        let no_params = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+        assert_eq!(tool_name(&no_name), None);
+        assert_eq!(tool_name(&no_params), None);
+    }
 
     #[test]
     fn cacheable_method_recognizes_handshake_methods_only() {
