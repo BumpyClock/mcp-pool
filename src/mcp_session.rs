@@ -144,12 +144,6 @@ pub fn is_session_not_found_error(value: &Value) -> bool {
     code_matches && message_matches
 }
 
-pub fn is_empty_id_error(value: &Value) -> bool {
-    value.get("method").is_none()
-        && value.get("error").is_some()
-        && matches!(value.get("id"), Some(Value::String(id)) if id.is_empty())
-}
-
 impl HandshakeCache {
     pub fn get(&self, method: &str) -> Option<Value> {
         match cacheable_method(method) {
@@ -312,24 +306,6 @@ mod tests {
         assert!(is_session_not_found_error(&error));
         assert!(!is_session_not_found_error(&wrong_code));
         assert!(!is_session_not_found_error(&wrong_message));
-    }
-
-    #[test]
-    fn empty_id_error_requires_error_and_empty_string_id() {
-        assert!(is_empty_id_error(&json!({
-            "jsonrpc": "2.0",
-            "id": "",
-            "error": {"code": -32001, "message": "Session not found"}
-        })));
-        assert!(!is_empty_id_error(&json!({
-            "jsonrpc": "2.0",
-            "id": "",
-            "result": {}
-        })));
-        assert!(!is_empty_id_error(&json!({
-            "jsonrpc": "2.0",
-            "error": {"code": -32001, "message": "Session not found"}
-        })));
     }
 
     #[test]

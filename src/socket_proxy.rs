@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use parking_lot::Mutex;
@@ -18,7 +20,7 @@ use crate::mcp_session::cacheable_method;
 use crate::mcp_session::{
     CacheableMethod, ClientCapabilities, HandshakeCache, Initialization, PendingRequestInfo,
     PendingWaiter, RecoveryReason, build_error_response, build_success_response, cacheable_request,
-    is_empty_id_error, is_session_not_found_error, parse_client_capabilities, tool_name,
+    is_session_not_found_error, parse_client_capabilities, tool_name,
 };
 use crate::transport::{LocalListener, LocalStream};
 use crate::types::{ServerReadiness, ServerStatus};
@@ -45,7 +47,6 @@ use router::route_response;
 use wait::acquire_request_sender;
 
 const REQUEST_TTL_SECS: u64 = 300;
-const CLEANUP_INTERVAL: u32 = 100;
 type ClientSender = mpsc::Sender<String>;
 type RequestMap = Arc<Mutex<HashMap<String, PendingRequestInfo>>>;
 type HandshakeCacheRef = Arc<Mutex<HandshakeCache>>;

@@ -195,7 +195,6 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
         },
     );
     *previous.last_active_client.lock() = Some("old".to_string());
-    previous.cleanup_counter.store(99, Ordering::SeqCst);
     let Backend {
         setup: next_setup,
         handle: next_handle,
@@ -229,7 +228,6 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
     assert!(current.request_map.lock().is_empty());
     assert!(current.client_capabilities.lock().is_empty());
     assert!(current.last_active_client.lock().is_none());
-    assert_eq!(current.cleanup_counter.load(Ordering::SeqCst), 0);
     let stop = {
         let proxy = proxy.clone();
         tokio::spawn(async move { proxy.stop().await })

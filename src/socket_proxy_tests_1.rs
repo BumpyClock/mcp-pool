@@ -41,7 +41,6 @@ async fn route_response(
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
     request_map: &RequestMap,
     handshake_cache: &HandshakeCacheRef,
-    cleanup_counter: &Arc<AtomicU32>,
     last_active_client: &Arc<Mutex<Option<String>>>,
 ) -> mpsc::Receiver<RecoveryReason> {
     let (recovery_tx, recovery_rx) = mpsc::channel::<RecoveryReason>(8);
@@ -62,7 +61,6 @@ async fn route_response(
         clients,
         request_map,
         handshake_cache,
-        cleanup_counter,
         last_active_client,
         &client_capabilities,
         &request_tx,
@@ -81,7 +79,6 @@ async fn route_response_with_capabilities(
 ) {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     let cache = empty_cache();
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(Some("clientA"));
     let (recovery_tx, _recovery_rx) = mpsc::channel::<RecoveryReason>(8);
     let recovery_requested = Arc::new(AtomicBool::new(false));
@@ -90,7 +87,6 @@ async fn route_response_with_capabilities(
         clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
         client_capabilities,
         request_tx,
@@ -117,7 +113,6 @@ async fn route_response_restores_ids_without_cross_wiring() {
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
     let mut rx_b = channel_client(&clients, "clientB");
-    let counter = Arc::new(AtomicU32::new(0));
     let cache = empty_cache();
     let last_active = last_active(None);
 
@@ -126,7 +121,6 @@ async fn route_response_restores_ids_without_cross_wiring() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -135,7 +129,6 @@ async fn route_response_restores_ids_without_cross_wiring() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -165,7 +158,6 @@ async fn route_response_routes_server_request_to_single_client() {
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
     let mut rx_b = channel_client(&clients, "clientB");
-    let counter = Arc::new(AtomicU32::new(0));
     // clientA is the most-recently-active client → the heuristic target.
     let last_active = last_active(Some("clientA"));
 
@@ -174,7 +166,6 @@ async fn route_response_routes_server_request_to_single_client() {
         &clients,
         &request_map,
         &empty_cache(),
-        &counter,
         &last_active,
     )
     .await;
@@ -308,7 +299,6 @@ async fn route_response_broadcasts_notifications() {
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
     let mut rx_b = channel_client(&clients, "clientB");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
 
     route_response(
@@ -316,7 +306,6 @@ async fn route_response_broadcasts_notifications() {
         &clients,
         &request_map,
         &empty_cache(),
-        &counter,
         &last_active,
     )
     .await;
@@ -334,7 +323,6 @@ async fn route_response_drops_when_origin_client_gone() {
         .insert("5".into(), pending_request("ghost", json!(1), None));
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_other = channel_client(&clients, "other");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
 
     route_response(
@@ -342,7 +330,6 @@ async fn route_response_drops_when_origin_client_gone() {
         &clients,
         &request_map,
         &empty_cache(),
-        &counter,
         &last_active,
     )
     .await;
@@ -354,7 +341,7 @@ async fn route_response_drops_when_origin_client_gone() {
 }
 
 #[tokio::test]
-async fn empty_id_error_routes_to_oldest_pending_request() {
+async fn uncorrelated_errors_do_not_consume_pending_requests() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     request_map.lock().insert(
         "10".into(),
@@ -364,25 +351,19 @@ async fn empty_id_error_routes_to_oldest_pending_request() {
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
     let mut rx_b = channel_client(&clients, "clientB");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
 
-    route_response(
+    for line in [
         r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
-        &clients,
-        &request_map,
-        &empty_cache(),
-        &counter,
-        &last_active,
-    )
-    .await;
+        r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Session not found"}}"#,
+        r#"{"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"}}"#,
+    ] {
+        route_response(line, &clients, &request_map, &empty_cache(), &last_active).await;
+    }
 
-    let routed: Value = serde_json::from_str(&rx_a.try_recv().expect("clientA receives error"))
-        .expect("valid json");
-    assert_eq!(routed["id"], json!(99), "original id restored");
-    assert_eq!(routed["error"]["code"], json!(-32001));
+    assert!(rx_a.try_recv().is_err(), "uncorrelated error not guessed");
     assert!(rx_b.try_recv().is_err(), "malformed error not broadcast");
-    assert!(request_map.lock().is_empty(), "pending entry removed");
+    assert_eq!(request_map.lock().len(), 1, "pending request kept");
 }
 
 #[tokio::test]
@@ -395,7 +376,6 @@ async fn empty_id_success_is_dropped_as_orphan() {
 
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
 
     route_response(
@@ -403,7 +383,6 @@ async fn empty_id_success_is_dropped_as_orphan() {
         &clients,
         &request_map,
         &empty_cache(),
-        &counter,
         &last_active,
     )
     .await;
@@ -420,7 +399,6 @@ async fn empty_id_error_without_pending_request_is_orphaned() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
 
     route_response(
@@ -428,7 +406,6 @@ async fn empty_id_error_without_pending_request_is_orphaned() {
         &clients,
         &request_map,
         &empty_cache(),
-        &counter,
         &last_active,
     )
     .await;

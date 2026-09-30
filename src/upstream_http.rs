@@ -220,10 +220,11 @@ async fn execute(
     )
     .await
     .unwrap_or_else(|_| Err("HTTP request deadline exceeded; request was not replayed".into()));
-    if let Err(error) = result
-        && !answered
-    {
-        send_error(response_tx, request.identifier.as_ref(), &error).await;
+    if let Err(error) = result {
+        crate::diagnostics::log(format!("upstream_http_request_failed: {error}"));
+        if !answered {
+            send_error(response_tx, request.identifier.as_ref(), &error).await;
+        }
     }
     release_initialization(&mut established);
 }
@@ -299,7 +300,8 @@ async fn post(
         "text/event-stream" => {
             let mut decoder = sse_parser::Decoder::new();
             while let Some(chunk) = read_chunk(&mut response).await? {
-                for event in decoder.feed(&chunk)? {
+                let feed = decoder.feed(&chunk);
+                for event in feed.events {
                     if event.name.is_empty() || event.name == "message" {
                         deliver(
                             &event.data,
@@ -312,6 +314,9 @@ async fn post(
                         )
                         .await?;
                     }
+                }
+                if let Some(error) = feed.error {
+                    return Err(error);
                 }
             }
             if request.identifier.is_some() && !*answered {

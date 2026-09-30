@@ -33,11 +33,9 @@ pub(super) async fn spawn(
                 .await
                 .map_err(|_| "Legacy SSE endpoint discovery read failed")?
                 .ok_or("Legacy SSE ended before endpoint discovery")?;
-            let events = decoder
-                .feed(&chunk)
-                .map_err(|_| "Legacy SSE endpoint discovery frame is invalid")?;
+            let feed = decoder.feed(&chunk);
             let mut endpoint = None;
-            for event in events {
+            for event in feed.events {
                 if event.name == "endpoint" {
                     let candidate = url
                         .join(&event.data)
@@ -59,6 +57,9 @@ pub(super) async fn spawn(
                         .await
                         .map_err(|_| "Legacy SSE response receiver closed")?;
                 }
+            }
+            if feed.error.is_some() {
+                return Err("Legacy SSE endpoint discovery frame is invalid");
             }
             if let Some(endpoint) = endpoint {
                 return Ok((response, decoder, endpoint));
@@ -153,7 +154,8 @@ async fn receive_events(
         let chunk = read_chunk(response)
             .await?
             .ok_or("Legacy SSE connection ended; restart the upstream")?;
-        for event in decoder.feed(&chunk)? {
+        let feed = decoder.feed(&chunk);
+        for event in feed.events {
             if !event.name.is_empty() && event.name != "message" {
                 continue;
             }
@@ -207,6 +209,9 @@ async fn receive_events(
                     .await
                     .map_err(|_| "Legacy SSE response receiver closed")?;
             }
+        }
+        if let Some(error) = feed.error {
+            return Err(error);
         }
     }
 }

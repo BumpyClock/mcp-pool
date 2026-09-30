@@ -127,29 +127,6 @@ pub(super) fn prepare_tools_list_request(
     DiscoveryAction::Leader
 }
 
-/// Some upstream bridges (notably Agency's HTTP/SSE bridge when a remote MCP
-/// session expires) return an error response with `id:""` instead of echoing the
-/// JSON-RPC request id. If we drop that as an orphan, the downstream client waits
-/// until its own timeout and the tool appears to hang. Route only these empty-id
-/// *errors* to the oldest pending request for this server so the client receives
-/// a concrete MCP error. Successful or non-empty-id responses still require exact
-/// id matching.
-pub(super) fn take_empty_id_error_pending(
-    value: &Value,
-    request_map: &RequestMap,
-) -> Option<PendingRequestInfo> {
-    if !is_empty_id_error(value) {
-        return None;
-    }
-
-    let mut pending = request_map.lock();
-    let key = pending
-        .iter()
-        .min_by(|(_, left), (_, right)| left.inserted_at.cmp(&right.inserted_at))
-        .map(|(key, _)| key.clone())?;
-    pending.remove(&key)
-}
-
 pub(super) fn complete_tools_list_response(
     value: &Value,
     leader: PendingRequestInfo,
@@ -195,7 +172,7 @@ pub(super) fn cleanup_stale_tools_list_waiters(cache: &HandshakeCacheRef) -> Vec
     let mut stale = Vec::new();
     let mut kept = Vec::with_capacity(cache.tools_list.waiters.len());
     for waiter in cache.tools_list.waiters.drain(..) {
-        if now.duration_since(waiter.inserted_at).as_secs() > REQUEST_TTL_SECS {
+        if now.duration_since(waiter.inserted_at) >= Duration::from_secs(REQUEST_TTL_SECS) {
             stale.push((
                 waiter.client_id,
                 build_error_response(waiter.original_id, -32001, "tools/list discovery timed out"),
@@ -269,46 +246,19 @@ pub(super) fn response_outcome(value: &Value) -> &'static str {
     }
 }
 
-pub(super) fn error_summary(value: &Value) -> (String, String) {
-    let Some(error) = value.get("error") else {
-        return ("?".to_string(), "?".to_string());
-    };
-    let code = error
-        .get("code")
-        .map(Value::to_string)
-        .unwrap_or_else(|| "?".to_string());
-    let message = error
-        .get("message")
-        .and_then(Value::as_str)
-        .unwrap_or("?")
-        .to_string();
-    (code, message)
-}
-
 pub(super) fn recovery_reason_label(reason: RecoveryReason) -> &'static str {
     match reason {
         RecoveryReason::SessionNotFound => "session_not_found",
     }
 }
 
-/// Every CLEANUP_INTERVAL-th call, drop request-map entries older than
-/// REQUEST_TTL_SECS. Throttled via a counter so the router hot path stays cheap.
-pub(super) fn cleanup_stale_requests(
-    request_map: &RequestMap,
-    cleanup_counter: &Arc<AtomicU32>,
-) -> Vec<PendingRequestInfo> {
-    let count = cleanup_counter.fetch_add(1, Ordering::Relaxed);
-    if !count.is_multiple_of(CLEANUP_INTERVAL) {
-        return Vec::new();
-    }
-
+pub(super) fn cleanup_stale_requests(request_map: &RequestMap) -> Vec<PendingRequestInfo> {
     let now = Instant::now();
     let mut pending = request_map.lock();
-    let before = pending.len();
     let stale_keys: Vec<String> = pending
         .iter()
         .filter_map(|(key, pending)| {
-            if now.duration_since(pending.inserted_at).as_secs() > REQUEST_TTL_SECS {
+            if now.duration_since(pending.inserted_at) >= Duration::from_secs(REQUEST_TTL_SECS) {
                 Some(key.clone())
             } else {
                 None
@@ -329,21 +279,33 @@ pub(super) fn cleanup_stale_requests(
             removed, after
         ));
     }
-    if before == after {
-        return Vec::new();
-    }
     removed_pending
 }
 
 pub(super) fn expire_pending_requests(
     request_map: &RequestMap,
-    cleanup_counter: &Arc<AtomicU32>,
     cache: &HandshakeCacheRef,
 ) -> Vec<(String, String)> {
-    let stale = cleanup_stale_requests(request_map, cleanup_counter);
+    let stale = cleanup_stale_requests(request_map);
     cleanup_tools_list_after_stale_requests(cache, &stale)
         .into_iter()
         .chain(cleanup_stale_tools_list_waiters(cache))
         .chain(cleanup_initialize_after_stale_requests(cache, &stale))
+        .chain(
+            stale
+                .into_iter()
+                .filter(|pending| pending.cache_key != Some(CacheableMethod::Initialize))
+                .map(|pending| {
+                    let message = if pending.cache_key == Some(CacheableMethod::ToolsList) {
+                        "tools/list discovery timed out"
+                    } else {
+                        "request timed out"
+                    };
+                    (
+                        pending.client_id,
+                        build_error_response(pending.original_id, -32001, message),
+                    )
+                }),
+        )
         .collect()
 }

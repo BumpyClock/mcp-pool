@@ -74,7 +74,6 @@ fn stale_tools_list_leader_clears_in_flight_and_drains_waiters() {
         "10".to_string(),
         stale_pending_request("leader", json!(1), Some("tools/list")),
     );
-    let cleanup_counter = Arc::new(AtomicU32::new(0));
     let cache = empty_cache();
     cache.lock().tools_list.in_flight = true;
     cache.lock().tools_list.waiters.push(PendingWaiter {
@@ -83,7 +82,7 @@ fn stale_tools_list_leader_clears_in_flight_and_drains_waiters() {
         inserted_at: Instant::now(),
     });
 
-    let stale_requests = cleanup_stale_requests(&request_map, &cleanup_counter);
+    let stale_requests = cleanup_stale_requests(&request_map);
     let responses = cleanup_tools_list_after_stale_requests(&cache, &stale_requests);
 
     assert!(request_map.lock().is_empty(), "stale leader removed");

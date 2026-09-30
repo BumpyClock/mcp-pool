@@ -119,6 +119,14 @@ Successful `initialize` and unpaginated `tools/list` results are cached for late
 clients. A `notifications/tools/list_changed` notification invalidates tool
 discovery. Upstream notifications are broadcast to connected clients.
 
+Pending requests expire after five minutes even when the upstream is silent.
+Initialization timeout releases the shared waiters. A later client request can
+start a fresh initialization attempt; timed-out operations are never replayed.
+
+Responses route only by the exact upstream request ID. An uncorrelated response
+with an empty ID is not assigned to another client's oldest pending request.
+HTTP POST failures can still return an error for their known requesting client.
+
 Server requests for sampling or roots go to a client that advertises the required
 capability. The pool prefers the most recently active capable client. This is a
 routing heuristic, not proof that the selected client caused the callback.

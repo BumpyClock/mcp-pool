@@ -213,15 +213,11 @@ async fn concurrent_socket_initialize_has_one_leader_and_one_shared_lifecycle() 
     fixture.stop().await
 }
 
-async fn initialize_error(empty_id: bool) -> io::Result<()> {
+async fn initialize_error() -> io::Result<()> {
     let mut fixture = Fixture::start().await?;
     let (mut first, mut second, leader) = two_clients(&mut fixture).await?;
     let error = json!({"code":-32602,"message":"initialization rejected"});
-    let id = if empty_id {
-        json!("")
-    } else {
-        leader.get("id").cloned().unwrap_or(Value::Null)
-    };
+    let id = leader.get("id").cloned().unwrap_or(Value::Null);
     fixture
         .responses
         .send(json!({"jsonrpc":"2.0","id":id,"error":error}).to_string())
@@ -269,12 +265,7 @@ async fn initialize_error(empty_id: bool) -> io::Result<()> {
 
 #[tokio::test]
 async fn initialize_error_fans_out_and_explicit_retry_coalesces() -> io::Result<()> {
-    initialize_error(false).await
-}
-
-#[tokio::test]
-async fn empty_id_initialize_error_fans_out_without_poisoning_retry() -> io::Result<()> {
-    initialize_error(true).await
+    initialize_error().await
 }
 
 #[tokio::test]
@@ -397,6 +388,9 @@ fn stale_initialize_leader_fails_leader_and_followers_without_touching_tools_wai
     assert!(cache.lock().tools_list.in_flight);
     assert_eq!(cache.lock().tools_list.waiters.len(), 1);
 }
+
+#[path = "socket_proxy_expiration_tests.rs"]
+mod expiration_tests;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_not_found_initialize_error_reaches_both_clients_before_recovery() -> io::Result<()>

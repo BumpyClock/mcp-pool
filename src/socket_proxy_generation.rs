@@ -12,7 +12,7 @@ pub(super) struct Generation {
     pub explicit_stop: AtomicBool,
     pub shutdown_notify: Arc<Notify>,
     pub upstream_ready: Arc<Notify>,
-    pub cleanup_counter: Arc<AtomicU32>,
+    pub expiration_changed: Arc<Notify>,
     pub startup: watch::Receiver<Completion>,
     startup_tx: watch::Sender<Completion>,
     pub completion: watch::Receiver<Completion>,
@@ -36,7 +36,7 @@ impl Generation {
             explicit_stop: AtomicBool::new(false),
             shutdown_notify: Arc::new(Notify::new()),
             upstream_ready: Arc::new(Notify::new()),
-            cleanup_counter: Arc::new(AtomicU32::new(0)),
+            expiration_changed: Arc::new(Notify::new()),
             startup,
             startup_tx,
             completion,
@@ -63,7 +63,6 @@ impl Generation {
         *self.handshake_cache.lock() = HandshakeCache::default();
         self.client_capabilities.lock().clear();
         *self.last_active_client.lock() = None;
-        self.cleanup_counter.store(0, Ordering::SeqCst);
     }
 
     async fn route(
@@ -77,7 +76,6 @@ impl Generation {
             &self.clients,
             &self.request_map,
             &self.handshake_cache,
-            &self.cleanup_counter,
             &self.last_active_client,
             &self.client_capabilities,
             &self.request_tx,
@@ -138,6 +136,7 @@ fn spawn_owner_with(
     let weak_proxy = Arc::downgrade(proxy);
     tokio::spawn(async move {
         let accept = tokio::spawn(accept_loop(listener, generation.clone(), name.clone()));
+        let expiration = tokio::spawn(expiration_loop(generation.clone()));
         let backend_generation = generation.clone();
         let backend_status = status.clone();
         let backend_started_at = started_at.clone();
@@ -251,7 +250,11 @@ fn spawn_owner_with(
             }
         };
         generation.close();
-        let local_retirement = accept.await.map_err(|error| error.to_string());
+        let expiration_retirement = expiration.await.map_err(|error| error.to_string());
+        let local_retirement = accept
+            .await
+            .map_err(|error| error.to_string())
+            .and(expiration_retirement);
         generation.socket_bound.store(false, Ordering::SeqCst);
         generation.clear();
         *started_at.lock() = None;
@@ -317,7 +320,7 @@ async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, 
                             state.request_map.clone(), state.handshake_cache.clone(),
                             state.client_capabilities.clone(), state.last_active_client.clone(),
                             state.clients.clone(), state.shutdown.clone(),
-                            state.shutdown_notify.clone(), state.cleanup_counter.clone(), receiver,
+                            state.shutdown_notify.clone(), state.expiration_changed.clone(), receiver,
                         ).await;
                     });
                 }
@@ -345,6 +348,63 @@ async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, 
         ));
         tasks.abort_all();
         drain_client_tasks(&mut tasks, &name).await;
+    }
+}
+
+pub(super) async fn expiration_loop(generation: Arc<Generation>) {
+    loop {
+        let shutdown = generation.shutdown_notify.notified();
+        let changed = generation.expiration_changed.notified();
+        tokio::pin!(shutdown, changed);
+        shutdown.as_mut().enable();
+        changed.as_mut().enable();
+        if generation.shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        let request_deadline = generation
+            .request_map
+            .lock()
+            .values()
+            .map(|pending| pending.inserted_at + Duration::from_secs(REQUEST_TTL_SECS))
+            .min();
+        let waiter_deadline = generation
+            .handshake_cache
+            .lock()
+            .tools_list
+            .waiters
+            .iter()
+            .map(|waiter| waiter.inserted_at + Duration::from_secs(REQUEST_TTL_SECS))
+            .min();
+        let deadline = request_deadline.into_iter().chain(waiter_deadline).min();
+        let wait_deadline = async {
+            match deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = &mut changed => continue,
+            _ = wait_deadline => {
+                let responses = expire_pending_requests(
+                    &generation.request_map, &generation.handshake_cache,
+                );
+                // A stalled client must not prevent the next deadline or retirement.
+                for (client_id, payload) in responses {
+                    tokio::select! {
+                        _ = &mut shutdown => return,
+                        result = tokio::time::timeout(
+                            Duration::from_millis(250),
+                            send_to_client(&client_id, payload, &generation.clients),
+                        ) => {
+                            if result.is_err() {
+                                diagnostics::log(format!("pool_timeout_delivery_failed client_id={client_id}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

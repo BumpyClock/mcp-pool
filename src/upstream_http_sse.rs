@@ -8,6 +8,13 @@ pub(super) struct Event {
     pub data: String,
 }
 
+// Completed events precede the terminal error, including within one transport chunk.
+#[must_use]
+pub(super) struct Feed {
+    pub events: Vec<Event>,
+    pub error: Option<String>,
+}
+
 #[derive(Default)]
 pub(super) struct Decoder {
     line: Vec<u8>,
@@ -16,6 +23,7 @@ pub(super) struct Decoder {
     frame_bytes: usize,
     after_carriage_return: bool,
     first_line: bool,
+    terminated: bool,
 }
 
 impl Decoder {
@@ -26,8 +34,14 @@ impl Decoder {
         }
     }
 
-    pub fn feed(&mut self, bytes: &[u8]) -> Result<Vec<Event>, String> {
-        let mut events = Vec::new();
+    pub fn feed(&mut self, bytes: &[u8]) -> Feed {
+        let mut feed = Feed {
+            events: Vec::new(),
+            error: None,
+        };
+        if self.terminated {
+            return feed;
+        }
         for &byte in bytes {
             if self.after_carriage_return {
                 self.after_carriage_return = false;
@@ -37,17 +51,22 @@ impl Decoder {
             }
             self.frame_bytes += 1;
             if self.frame_bytes > FRAME_LIMIT {
-                return Err("HTTP SSE frame exceeds size limit".into());
+                feed.error = Some("HTTP SSE frame exceeds size limit".into());
+                break;
             }
             match byte {
                 b'\r' | b'\n' => {
-                    self.finish_line(&mut events)?;
+                    if let Err(error) = self.finish_line(&mut feed.events) {
+                        feed.error = Some(error);
+                        break;
+                    }
                     self.after_carriage_return = byte == b'\r';
                 }
                 _ => self.line.push(byte),
             }
         }
-        Ok(events)
+        self.terminated = feed.error.is_some();
+        feed
     }
 
     fn finish_line(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
@@ -90,13 +109,18 @@ mod tests {
     #[test]
     fn split_crlf_multiline_and_comments() -> Result<(), String> {
         let mut decoder = Decoder::new();
-        assert!(decoder.feed(b"\xef\xbb\xbf: heartbeat\r")?.is_empty());
+        let feed = decoder.feed(b"\xef\xbb\xbf: heartbeat\r");
+        assert!(feed.events.is_empty());
+        assert!(feed.error.is_none());
         assert!(
             decoder
-                .feed(b"\nevent: message\r\ndata: {\"id\":\r\ndata: 7}\r")?
+                .feed(b"\nevent: message\r\ndata: {\"id\":\r\ndata: 7}\r")
+                .events
                 .is_empty()
         );
-        let events = decoder.feed(b"\n\r\n")?;
+        let feed = decoder.feed(b"\n\r\n");
+        assert!(feed.error.is_none());
+        let events = feed.events;
         assert_eq!(events.len(), 1);
         let event = events.first().ok_or("missing event")?;
         assert_eq!(event.name, "message");
@@ -107,6 +131,42 @@ mod tests {
     #[test]
     fn bounds_unterminated_frames() {
         let mut decoder = Decoder::new();
-        assert!(decoder.feed(&vec![b'x'; FRAME_LIMIT + 1]).is_err());
+        assert!(decoder.feed(&vec![b'x'; FRAME_LIMIT + 1]).error.is_some());
+    }
+
+    #[test]
+    fn completed_events_survive_invalid_suffix_at_every_chunk_boundary() {
+        for (suffix, expected_error) in [
+            (vec![0xff, b'\n'], "HTTP SSE contains invalid UTF-8"),
+            (
+                vec![b'x'; FRAME_LIMIT + 1],
+                "HTTP SSE frame exceeds size limit",
+            ),
+        ] {
+            let prefix = b"event: message\r\ndata: {\"id\":7,\"result\":{}}\r\n\r\n";
+            let bytes = [prefix.as_slice(), suffix.as_slice()].concat();
+            // Exercise every boundary around dispatch and UTF-8; sample the large frame's interior.
+            let boundaries =
+                (0..=prefix.len() + 2).chain([bytes.len() / 2, bytes.len() - 1, bytes.len()]);
+            for boundary in boundaries {
+                let (first, second) = bytes.split_at(boundary);
+                let mut decoder = Decoder::new();
+                let first = decoder.feed(first);
+                let second = decoder.feed(second);
+                let events: Vec<Event> = first.events.into_iter().chain(second.events).collect();
+                assert_eq!(events.len(), 1, "boundary {boundary}");
+                assert_eq!(
+                    events
+                        .first()
+                        .map(|event| (event.name.as_str(), event.data.as_str())),
+                    Some(("message", "{\"id\":7,\"result\":{}}"))
+                );
+                let errors: Vec<String> = first.error.into_iter().chain(second.error).collect();
+                assert_eq!(errors, vec![expected_error], "boundary {boundary}");
+                let repeated = decoder.feed(prefix);
+                assert!(repeated.events.is_empty());
+                assert!(repeated.error.is_none());
+            }
+        }
     }
 }

@@ -41,7 +41,6 @@ async fn route_response(
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
     request_map: &RequestMap,
     handshake_cache: &HandshakeCacheRef,
-    cleanup_counter: &Arc<AtomicU32>,
     last_active_client: &Arc<Mutex<Option<String>>>,
 ) -> mpsc::Receiver<RecoveryReason> {
     let (recovery_tx, recovery_rx) = mpsc::channel::<RecoveryReason>(8);
@@ -62,7 +61,6 @@ async fn route_response(
         clients,
         request_map,
         handshake_cache,
-        cleanup_counter,
         last_active_client,
         &client_capabilities,
         &request_tx,
@@ -74,7 +72,7 @@ async fn route_response(
 }
 
 #[tokio::test]
-async fn session_not_found_empty_id_error_clears_caches_and_signals_recovery() {
+async fn uncorrelated_session_error_preserves_caches_and_generation() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     request_map.lock().insert(
         "10".into(),
@@ -82,7 +80,6 @@ async fn session_not_found_empty_id_error_clears_caches_and_signals_recovery() {
     );
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let _rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
     let cache = empty_cache();
     cache
@@ -95,14 +92,14 @@ async fn session_not_found_empty_id_error_clears_caches_and_signals_recovery() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
 
-    assert_eq!(cache.lock().get("initialize"), None);
-    assert_eq!(cache.lock().tools_list.cached_result, None);
-    assert_eq!(recovery_rx.try_recv(), Ok(RecoveryReason::SessionNotFound));
+    assert!(cache.lock().get("initialize").is_some());
+    assert!(cache.lock().tools_list.cached_result.is_some());
+    assert!(recovery_rx.try_recv().is_err());
+    assert_eq!(request_map.lock().len(), 1);
 }
 
 #[tokio::test]
@@ -114,7 +111,6 @@ async fn non_session_error_does_not_signal_recovery() {
     );
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let _rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
     let cache = empty_cache();
     cache
@@ -126,7 +122,6 @@ async fn non_session_error_does_not_signal_recovery() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -147,15 +142,13 @@ async fn tool_call_session_not_found_is_returned_to_client() {
     );
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
 
     let _recovery_rx = route_response(
-        r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
+        r#"{"jsonrpc":"2.0","id":10,"error":{"code":-32001,"message":"Session not found"}}"#,
         &clients,
         &request_map,
         &empty_cache(),
-        &counter,
         &last_active,
     )
     .await;
@@ -211,7 +204,6 @@ async fn route_response_caches_success_not_error() {
 
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let _rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let cache = empty_cache();
     let last_active = last_active(None);
 
@@ -220,7 +212,6 @@ async fn route_response_caches_success_not_error() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -229,7 +220,6 @@ async fn route_response_caches_success_not_error() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -239,7 +229,6 @@ async fn route_response_caches_success_not_error() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -274,7 +263,6 @@ async fn route_response_does_not_cache_error_into_empty_cache() {
     );
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let _rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let cache = empty_cache();
     let last_active = last_active(None);
 
@@ -283,7 +271,6 @@ async fn route_response_does_not_cache_error_into_empty_cache() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -298,7 +285,6 @@ async fn tools_list_cache_invalidated_on_list_changed() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
 
     let cache = empty_cache();
@@ -310,7 +296,6 @@ async fn tools_list_cache_invalidated_on_list_changed() {
         &clients,
         &request_map,
         &cache,
-        &counter,
         &last_active,
     )
     .await;
@@ -356,7 +341,6 @@ async fn only_eligible_discovery_success_is_cached() {
     let pending: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     let clients = Arc::new(Mutex::new(HashMap::new()));
     let _responses = channel_client(&clients, "clientA");
-    let counter = Arc::new(AtomicU32::new(0));
     let last_active = last_active(None);
     for (id, method, response, expected_cache) in [
         (
@@ -387,7 +371,6 @@ async fn only_eligible_discovery_success_is_cached() {
             &clients,
             &pending,
             &cache,
-            &counter,
             &last_active,
         )
         .await;

@@ -19,7 +19,7 @@ pub(super) async fn handle_client(
     clients: Arc<Mutex<HashMap<String, ClientSender>>>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
-    cleanup_counter: Arc<AtomicU32>,
+    expiration_changed: Arc<Notify>,
     mut rx: mpsc::Receiver<String>,
 ) {
     diagnostics::log(format!(
@@ -303,6 +303,7 @@ pub(super) async fn handle_client(
                         }
                     };
 
+                    expiration_changed.notify_one();
                     let (forward_line, forward_method, forward_tool, forward_pool_id) = match action {
                         // Cache hit: reply directly to this client. handle_client
                         // owns write_half and the select! arms never run
@@ -441,9 +442,5 @@ pub(super) async fn handle_client(
     }
     clients.lock().remove(&client_id);
     client_capabilities.lock().remove(&client_id);
-    for (client_id, payload) in
-        expire_pending_requests(&request_map, &cleanup_counter, &handshake_cache)
-    {
-        send_to_client(&client_id, payload, &clients).await;
-    }
+    expiration_changed.notify_one();
 }

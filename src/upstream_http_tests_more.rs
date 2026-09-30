@@ -4,6 +4,98 @@ use super::tests::*;
 use super::*;
 
 #[tokio::test]
+async fn valid_response_precedes_terminal_sse_frame_error() -> TestResult {
+    for legacy in [false, true] {
+        let (listener, url) = fixture().await?;
+        let server = tokio::spawn(async move {
+            let (mut events, _) = listener.accept().await?;
+            incoming(&mut events).await?;
+            stream_headers(&mut events, "").await?;
+            if legacy {
+                events
+                    .write_all(b"event: endpoint\ndata: /messages\n\n")
+                    .await?;
+                events.flush().await?;
+                let (mut post, _) = listener.accept().await?;
+                let request = incoming(&mut post).await?;
+                assert_eq!(request.body.get("id"), Some(&Value::from("final-valid")));
+                reply(&mut post, 202, "", "").await?;
+            }
+            events
+                .write_all(
+                    b"data: {\"jsonrpc\":\"2.0\",\"id\":\"final-valid\",\"result\":{\"ok\":true}}\r\n\r\ndata: \xff\r\n\r\n",
+                )
+                .await?;
+            events.flush().await?;
+            let mut byte = [0];
+            assert_eq!(
+                timeout(Duration::from_secs(1), events.read(&mut byte)).await??,
+                0,
+                "terminal frame error must close the stream"
+            );
+            assert!(
+                timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err(),
+                "requests must not replay"
+            );
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let (response_tx, mut responses) = mpsc::channel(16);
+        let mut handle = spawn(url, legacy, response_tx).await?;
+        handle
+            .request_tx
+            .send(r#"{"jsonrpc":"2.0","id":"final-valid","method":"tools/call"}"#.into())
+            .await?;
+        assert_eq!(
+            message(&mut responses).await?,
+            serde_json::json!({"jsonrpc":"2.0","id":"final-valid","result":{"ok":true}})
+        );
+        server.await??;
+        if legacy {
+            timeout(Duration::from_secs(1), handle.wait_for_exit()).await??;
+        }
+        stop(&mut handle).await?;
+        assert!(
+            responses.try_recv().is_err(),
+            "no duplicate or replacement error"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn legacy_discovery_delivers_complete_message_before_terminal_frame_error() -> TestResult {
+    let (listener, url) = fixture().await?;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        incoming(&mut stream).await?;
+        stream_headers(&mut stream, "").await?;
+        stream
+            .write_all(
+                b"event: endpoint\ndata: /messages\n\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/test\"}\n\ndata: \xff\n\n",
+            )
+            .await?;
+        stream.flush().await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let (response_tx, mut responses) = mpsc::channel(16);
+    let result = spawn(url, true, response_tx).await;
+    // A network chunk may end at the endpoint. Either discovery or receive owns the error.
+    if let Ok(mut handle) = result {
+        timeout(Duration::from_secs(1), handle.wait_for_exit()).await??;
+        stop(&mut handle).await?;
+    }
+    assert_eq!(
+        message(&mut responses).await?,
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/test"})
+    );
+    assert!(responses.try_recv().is_err());
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn post_sse_remains_transparent_after_the_matching_response() -> TestResult {
     let (listener, url) = fixture().await?;
     let (release, released) = oneshot::channel();
