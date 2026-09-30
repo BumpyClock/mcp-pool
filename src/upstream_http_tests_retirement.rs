@@ -162,10 +162,7 @@ async fn definitive_legacy_disconnect_allows_same_proxy_restart_without_replay()
         std::process::id(),
     ));
     #[cfg(unix)]
-    let path = std::path::PathBuf::from(format!(
-        "target/http-retirement-{}-{port}.sock",
-        std::process::id(),
-    ));
+    let path = std::env::temp_dir().join(format!("pool-http-{}-{port}.sock", std::process::id(),));
     let proxy = Arc::new(crate::socket_proxy::SocketProxy::new(
         format!("http-retirement-{port}"),
         path.clone(),

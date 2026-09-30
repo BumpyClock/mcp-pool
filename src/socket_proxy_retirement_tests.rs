@@ -92,3 +92,42 @@ async fn failed_retirement_propagates_and_registry_entry_blocks_replacement() ->
     retained_failure(&pool);
     Ok(())
 }
+
+#[tokio::test]
+async fn failed_shutdown_preserves_poison_and_allows_unrelated_pool_operations() -> io::Result<()> {
+    let pool = failed_retirement_pool().await?;
+    assert_eq!(
+        pool.shutdown().await.err().map(|error| error.to_string()),
+        Some(RETIREMENT_ERROR.to_string())
+    );
+    let healthy = proxy();
+    let Backend {
+        setup,
+        handle,
+        retired,
+        responses,
+        ..
+    } = backend(&healthy);
+    setup
+        .send(Ok(handle))
+        .map_err(|_| io::Error::other("setup lost"))?;
+    healthy.start().await?;
+    pool.insert_test_proxy("healthy-server", healthy);
+    let unused_spec = UpstreamSpec::Http {
+        url: "http://127.0.0.1:1/not-used".to_string(),
+        sse: false,
+    };
+    pool.start("healthy-server", unused_spec.clone()).await?;
+    assert_eq!(
+        pool.start("failed-server", unused_spec)
+            .await
+            .err()
+            .map(|error| error.to_string()),
+        Some(RETIREMENT_ERROR.to_string())
+    );
+    retired.send_replace(Some(Ok(())));
+    assert!(pool.stop_server("healthy-server").await?);
+    drop(responses);
+    retained_failure(&pool);
+    Ok(())
+}

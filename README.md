@@ -73,6 +73,14 @@ inside a Job Object. Unix children run inside an owned process group. Unix
 children that deliberately leave that group are outside this ownership boundary.
 Do not configure servers that daemonize or detach their workers.
 
+Windows executable resolution honors configured PATH and PATHEXT. Native programs
+launch directly; batch launchers use Rust's batch argument encoding. Batch
+arguments containing carriage returns or newlines are rejected before launch.
+Diagnostic stderr is decoded lossily, so non-UTF-8 output does not stop a server.
+
+If daemon shutdown fails, failed pools remain blocked and visible in status.
+The daemon resumes accepting lifecycle commands for unrelated pools.
+
 Restart creates fresh routing and discovery state. It disconnects existing proxy
 clients; agents must reconnect. Pools share a configured name, not an executable
 fingerprint. Configuring the same command under two names creates two pools.

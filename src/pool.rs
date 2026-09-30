@@ -166,7 +166,10 @@ impl Pool {
             }
         }
         match failure {
-            Some(error) => Err(error),
+            Some(error) => {
+                self.shutting_down.store(false, Ordering::SeqCst);
+                Err(error)
+            }
             None => Ok(()),
         }
     }

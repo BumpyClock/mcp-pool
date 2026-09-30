@@ -21,9 +21,9 @@ pub async fn spawn(
 ) -> io::Result<UpstreamHandle> {
     #[cfg(windows)]
     let mut launch = {
-        validate_windows_command(&command, &env)?;
-        let mut launch = Command::new("cmd");
-        launch.arg("/d").arg("/c").arg(command).args(args);
+        // Rust selects cmd.exe and its batch-specific encoder only for .cmd/.bat.
+        let mut launch = Command::new(resolve_windows_command(&command, &env)?);
+        launch.args(args);
         launch
     };
     #[cfg(unix)]
@@ -178,13 +178,14 @@ async fn read_stderr(stderr: ChildStderr) -> io::Result<()> {
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))
         .unwrap_or(false);
     let mut reader = BufReader::new(stderr);
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
     loop {
         buffer.clear();
-        if reader.read_line(&mut buffer).await? == 0 {
+        if reader.read_until(b'\n', &mut buffer).await? == 0 {
             return Ok(());
         }
-        let trimmed = buffer.trim_end_matches(['\r', '\n']);
+        let text = String::from_utf8_lossy(&buffer);
+        let trimmed = text.trim_end_matches(['\r', '\n']);
         if !trimmed.is_empty() {
             let line = if raw {
                 trimmed.to_string()
@@ -197,10 +198,10 @@ async fn read_stderr(stderr: ChildStderr) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn validate_windows_command(
+fn resolve_windows_command(
     command: &str,
     environment: &BTreeMap<String, String>,
-) -> io::Result<()> {
+) -> io::Result<std::path::PathBuf> {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -226,14 +227,14 @@ fn validate_windows_command(
     let extensions = variable("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
     for candidate in candidates {
         if candidate.is_file() {
-            return Ok(());
+            return std::path::absolute(candidate);
         }
         if candidate.extension().is_none() {
             for extension in extensions.to_string_lossy().split(';') {
                 let mut executable = candidate.as_os_str().to_os_string();
                 executable.push(extension);
                 if Path::new(&executable).is_file() {
-                    return Ok(());
+                    return std::path::absolute(executable);
                 }
             }
         }

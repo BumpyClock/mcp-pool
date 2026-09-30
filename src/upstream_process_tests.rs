@@ -20,6 +20,16 @@ fn process_fixture() -> io::Result<()> {
     let Ok(role) = std::env::var(FIXTURE) else {
         return Ok(());
     };
+    if role == "argv" {
+        println!(
+            "POOL_ARGV:{}",
+            serde_json::to_string(&std::env::args().skip(1).collect::<Vec<_>>())?
+        );
+        for line in std::io::BufRead::lines(std::io::stdin().lock()) {
+            println!("{}", line?);
+        }
+        return Ok(());
+    }
     #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGTERM, libc::SIG_IGN);
@@ -477,3 +487,7 @@ async fn windows_cmd_launcher_preserves_stdio() -> io::Result<()> {
 
 #[path = "upstream_process_terminal_tests.rs"]
 mod terminal;
+
+#[cfg(windows)]
+#[path = "upstream_stdio_windows_tests.rs"]
+mod windows_launch;
