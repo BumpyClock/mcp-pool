@@ -19,6 +19,8 @@ pub struct PendingRequestInfo {
     pub client_id: String,
     pub original_id: Value,
     pub method: Option<String>,
+    // Cursor pages share the method name, not the first-page cache.
+    pub cache_key: Option<CacheableMethod>,
     /// Tool name for `tools/call` requests (`params.name`), used to enrich the
     /// response route log. None for every other method. Never carries args.
     pub tool: Option<String>,
@@ -35,14 +37,26 @@ pub struct PendingWaiter {
 #[derive(Debug, Default)]
 pub struct ToolsListCache {
     pub cached_result: Option<Value>,
-    pub last_good_result: Option<Value>,
     pub waiters: Vec<PendingWaiter>,
     pub in_flight: bool,
 }
 
 #[derive(Debug, Default)]
+pub enum Initialization {
+    #[default]
+    Empty,
+    InFlight {
+        waiters: Vec<PendingWaiter>,
+    },
+    Ready {
+        result: Value,
+        notification_forwarded: bool,
+    },
+}
+
+#[derive(Debug, Default)]
 pub struct HandshakeCache {
-    pub initialize: Option<Value>,
+    pub initialize: Initialization,
     pub tools_list: ToolsListCache,
 }
 
@@ -57,6 +71,19 @@ pub fn cacheable_method(method: &str) -> Option<CacheableMethod> {
         "tools/list" => Some(CacheableMethod::ToolsList),
         _ => None,
     }
+}
+
+pub fn cacheable_request(value: &Value) -> Option<CacheableMethod> {
+    let method = cacheable_method(value.get("method")?.as_str()?)?;
+    if method == CacheableMethod::ToolsList
+        && value
+            .get("params")
+            .and_then(|params| params.get("cursor"))
+            .is_some()
+    {
+        return None;
+    }
+    Some(method)
 }
 
 pub fn build_success_response(original_id: Value, result: Value) -> String {
@@ -123,16 +150,13 @@ pub fn is_empty_id_error(value: &Value) -> bool {
         && matches!(value.get("id"), Some(Value::String(id)) if id.is_empty())
 }
 
-pub fn should_swallow_initialized(locally_initialized: bool, value: &Value) -> bool {
-    locally_initialized
-        && value.get("method").and_then(Value::as_str) == Some("notifications/initialized")
-        && value.get("id").is_none_or(Value::is_null)
-}
-
 impl HandshakeCache {
     pub fn get(&self, method: &str) -> Option<Value> {
         match cacheable_method(method) {
-            Some(CacheableMethod::Initialize) => self.initialize.clone(),
+            Some(CacheableMethod::Initialize) => match &self.initialize {
+                Initialization::Ready { result, .. } => Some(result.clone()),
+                _ => None,
+            },
             Some(CacheableMethod::ToolsList) => self.tools_list.cached_result.clone(),
             None => None,
         }
@@ -140,10 +164,14 @@ impl HandshakeCache {
 
     pub fn store(&mut self, method: &str, result: Value) {
         match cacheable_method(method) {
-            Some(CacheableMethod::Initialize) => self.initialize = Some(result),
+            Some(CacheableMethod::Initialize) => {
+                self.initialize = Initialization::Ready {
+                    result,
+                    notification_forwarded: false,
+                }
+            }
             Some(CacheableMethod::ToolsList) => {
-                self.tools_list.cached_result = Some(result.clone());
-                self.tools_list.last_good_result = Some(result);
+                self.tools_list.cached_result = Some(result);
             }
             None => {}
         }
@@ -154,10 +182,29 @@ impl HandshakeCache {
     }
 
     pub fn clear_all(&mut self) {
-        self.initialize = None;
+        self.initialize = Initialization::Empty;
         self.tools_list.cached_result = None;
         self.tools_list.waiters.clear();
         self.tools_list.in_flight = false;
+    }
+
+    pub fn swallow_initialized(&mut self, value: &Value) -> bool {
+        if value.get("method").and_then(Value::as_str) != Some("notifications/initialized")
+            || !value.get("id").is_none_or(Value::is_null)
+        {
+            return false;
+        }
+        match &mut self.initialize {
+            Initialization::Ready {
+                notification_forwarded,
+                ..
+            } => {
+                let duplicate = *notification_forwarded;
+                *notification_forwarded = true;
+                duplicate
+            }
+            _ => false,
+        }
     }
 }
 
@@ -197,6 +244,31 @@ mod tests {
         );
         assert_eq!(cacheable_method("tools/call"), None);
         assert_eq!(cacheable_method("notifications/initialized"), None);
+    }
+
+    #[test]
+    fn tools_list_cursor_requests_are_not_shared_discovery() {
+        assert_eq!(
+            cacheable_request(&json!({"method":"tools/list"})),
+            Some(CacheableMethod::ToolsList)
+        );
+        assert_eq!(
+            cacheable_request(&json!({"method":"tools/list","params":{}})),
+            Some(CacheableMethod::ToolsList)
+        );
+        assert_eq!(
+            cacheable_request(&json!({"method":"tools/list","params":{"cursor":"page-two"}})),
+            None
+        );
+        assert_eq!(
+            cacheable_request(&json!({"method":"tools/list","params":{"cursor":null}})),
+            None
+        );
+        assert_eq!(
+            cacheable_request(&json!({"method":"initialize"})),
+            Some(CacheableMethod::Initialize)
+        );
+        assert_eq!(cacheable_request(&json!({"method":"tools/call"})), None);
     }
 
     #[test]
@@ -262,17 +334,11 @@ mod tests {
 
     #[test]
     fn cached_initialize_lifecycle_swallows_initialized_notification() {
-        assert!(should_swallow_initialized(
-            true,
-            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        ));
-        assert!(!should_swallow_initialized(
-            false,
-            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        ));
-        assert!(!should_swallow_initialized(
-            true,
-            &json!({"jsonrpc": "2.0", "method": "notifications/progress"})
-        ));
+        let mut cache = HandshakeCache::default();
+        cache.store("initialize", json!({"capabilities":{}}));
+        let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
+        assert!(!cache.swallow_initialized(&initialized));
+        assert!(cache.swallow_initialized(&initialized));
+        assert!(!cache.swallow_initialized(&json!({"method":"notifications/progress"})));
     }
 }
