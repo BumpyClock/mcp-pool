@@ -300,6 +300,49 @@ async fn startup_failure_is_reported_and_socket_is_retired() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn bind_conflict_retains_startup_error_without_retiring_other_owner() -> io::Result<()> {
+    let proxy = proxy();
+    let listener = crate::transport::bind(&proxy.socket_path())?;
+    let error = proxy
+        .start()
+        .await
+        .err()
+        .ok_or_else(|| io::Error::other("bind unexpectedly succeeded"))?;
+    assert_eq!(proxy.readiness().startup_error, Some(error.to_string()));
+    assert!(!proxy.readiness().local_socket_bound);
+    assert!(!proxy.readiness().upstream_transport_ready);
+    proxy.stop().await?;
+    assert_eq!(proxy.readiness().startup_error, Some(error.to_string()));
+    assert!(proxy.readiness().retirement_error.is_none());
+    assert!(crate::transport::bind(&proxy.socket_path()).is_err());
+    drop(listener);
+    #[cfg(unix)]
+    std::fs::remove_file(proxy.socket_path())?;
+    let Backend {
+        setup,
+        handle,
+        shutdown,
+        retired,
+        responses,
+        ..
+    } = backend(&proxy);
+    setup
+        .send(Ok(handle))
+        .map_err(|_| io::Error::other("setup lost"))?;
+    proxy.start().await?;
+    assert!(proxy.readiness().startup_error.is_none());
+    let stop = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move { proxy.stop().await })
+    };
+    shutdown.await.map_err(io::Error::other)?;
+    retired.send_replace(Some(Ok(())));
+    finish(stop).await?;
+    drop(responses);
+    Ok(())
+}
+
+#[tokio::test]
 async fn first_client_request_queues_through_startup() -> io::Result<()> {
     let proxy = proxy();
     let Backend {
@@ -317,6 +360,27 @@ async fn first_client_request_queues_through_startup() -> io::Result<()> {
     starting(&proxy).await?;
     let mut client = crate::transport::connect(&proxy.socket_path()).await?;
     client.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{}}}\n").await?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if proxy
+                .generation
+                .lock()
+                .as_ref()
+                .is_some_and(|generation| !generation.request_map.lock().is_empty())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), requests.recv())
+            .await
+            .is_err()
+    );
+    assert!(!start.is_finished());
     setup
         .send(Ok(handle))
         .map_err(|_| io::Error::other("setup lost"))?;

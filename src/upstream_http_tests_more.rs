@@ -4,6 +4,66 @@ use super::tests::*;
 use super::*;
 
 #[tokio::test]
+async fn null_id_notifications_release_workers_without_responses() -> TestResult {
+    for legacy in [false, true] {
+        let (listener, url) = fixture().await?;
+        let (posted, all_posted) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut events = if legacy {
+                let (mut events, _) = listener.accept().await?;
+                incoming(&mut events).await?;
+                stream_headers(&mut events, "").await?;
+                events
+                    .write_all(b"event: endpoint\ndata: /messages\n\n")
+                    .await?;
+                events.flush().await?;
+                Some(events)
+            } else {
+                None
+            };
+            for number in 0..MAX_CONCURRENT_REQUESTS + 2 {
+                let (mut post, _) = listener.accept().await?;
+                let request = incoming(&mut post).await?;
+                assert_eq!(request.body.get("id"), Some(&Value::Null));
+                reply(&mut post, if number % 2 == 0 { 202 } else { 204 }, "", "").await?;
+            }
+            posted.send(()).map_err(|_| "POST observation closed")?;
+            if let Some(events) = events.as_mut() {
+                let mut byte = [0];
+                assert_eq!(
+                    timeout(Duration::from_secs(1), events.read(&mut byte)).await??,
+                    0
+                );
+            }
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        });
+        let (response_tx, mut responses) = mpsc::channel(64);
+        let mut handle = spawn(url, legacy, response_tx).await?;
+        for _ in 0..MAX_CONCURRENT_REQUESTS + 1 {
+            handle
+                .request_tx
+                .send(r#"{"jsonrpc":"2.0","id":null,"method":"notifications/test"}"#.into())
+                .await?;
+        }
+        // A barrier cannot run until all earlier workers finish; null IDs must not await SSE replies.
+        handle
+            .request_tx
+            .send(r#"{"jsonrpc":"2.0","id":null,"method":"notifications/initialized"}"#.into())
+            .await?;
+        timeout(Duration::from_secs(1), all_posted).await??;
+        assert!(
+            timeout(Duration::from_millis(100), responses.recv())
+                .await
+                .is_err()
+        );
+        stop(&mut handle).await?;
+        server.await??;
+        assert!(responses.try_recv().is_err());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn valid_response_precedes_terminal_sse_frame_error() -> TestResult {
     for legacy in [false, true] {
         let (listener, url) = fixture().await?;

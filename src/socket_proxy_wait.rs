@@ -1,11 +1,7 @@
 use super::*;
 
-const UPSTREAM_READY_TIMEOUT_SECS: u64 = 30;
-
 /// Obtain the upstream request sender, waiting if the upstream is still starting.
-/// Returns `None` only if the upstream stops or never publishes a sender within
-/// the timeout, so a client's first request is queued through cold start instead
-/// of being silently dropped.
+/// The generation owner signals shutdown on terminal setup failure.
 pub(super) async fn acquire_request_sender(
     request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
     upstream_ready: &Arc<Notify>,
@@ -15,8 +11,8 @@ pub(super) async fn acquire_request_sender(
     if let Some(sender) = request_tx.lock().clone() {
         return Some(sender);
     }
+
     diagnostics::log(format!("pool_upstream_wait client_id={}", client_id));
-    let deadline = Instant::now() + Duration::from_secs(UPSTREAM_READY_TIMEOUT_SECS);
     loop {
         // Arm the waiter before re-checking the slot so a notify firing between
         // the check and the await is not lost (lost-wakeup safe).
@@ -30,12 +26,100 @@ pub(super) async fn acquire_request_sender(
         if shutdown.load(Ordering::SeqCst) {
             return None;
         }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return request_tx.lock().clone();
-        }
-        if tokio::time::timeout(remaining, ready).await.is_err() {
-            return request_tx.lock().clone();
-        }
+        ready.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deferred_sender_wait_does_not_require_a_timer() -> io::Result<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        runtime.block_on(async {
+            let generation = Arc::new(Generation::new());
+            let waiting = {
+                let generation = generation.clone();
+                tokio::spawn(async move {
+                    acquire_request_sender(
+                        &generation.request_tx,
+                        &generation.upstream_ready,
+                        &generation.shutdown,
+                        "timer-free",
+                    )
+                    .await
+                })
+            };
+            tokio::task::yield_now().await;
+            assert!(
+                !waiting.is_finished(),
+                "setup owns the wait, not a local deadline"
+            );
+            let (sender, mut receiver) = mpsc::channel(1);
+            *generation.request_tx.lock() = Some(sender);
+            generation.upstream_ready.notify_waiters();
+            let sender = waiting
+                .await
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("deferred sender lost"))?;
+            sender
+                .send("initialize".into())
+                .await
+                .map_err(io::Error::other)?;
+            assert_eq!(receiver.recv().await.as_deref(), Some("initialize"));
+            Ok(())
+        })
+    }
+
+    #[tokio::test]
+    async fn deferred_sender_waits_until_publication_or_shutdown() -> io::Result<()> {
+        let generation = Generation::new();
+        let waiting = acquire_request_sender(
+            &generation.request_tx,
+            &generation.upstream_ready,
+            &generation.shutdown,
+            "deferred",
+        );
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), &mut waiting)
+                .await
+                .is_err()
+        );
+        let (sender, mut receiver) = mpsc::channel(1);
+        *generation.request_tx.lock() = Some(sender);
+        generation.upstream_ready.notify_waiters();
+        let sender = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("deferred sender lost"))?;
+        sender
+            .send("initialize".into())
+            .await
+            .map_err(io::Error::other)?;
+        assert_eq!(receiver.recv().await.as_deref(), Some("initialize"));
+
+        let stopped = Generation::new();
+        let waiting = acquire_request_sender(
+            &stopped.request_tx,
+            &stopped.upstream_ready,
+            &stopped.shutdown,
+            "stopped",
+        );
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), &mut waiting)
+                .await
+                .is_err()
+        );
+        stopped.signal_shutdown();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .map_err(io::Error::other)?
+                .is_none()
+        );
+        Ok(())
     }
 }

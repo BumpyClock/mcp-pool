@@ -1,6 +1,52 @@
 use super::*;
 
 #[tokio::test]
+async fn disconnected_initialize_leader_still_expires_followers() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let (first, mut second, _) = two_clients(&mut fixture).await?;
+    drop(first);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.proxy.connection_count() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    let generation = fixture
+        .proxy
+        .generation
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing generation"))?;
+    {
+        let mut pending = generation.request_map.lock();
+        assert_eq!(
+            pending.len(),
+            1,
+            "disconnected leader retains the shared deadline"
+        );
+        for request in pending.values_mut() {
+            request.inserted_at = Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1);
+        }
+    }
+    generation.expiration_changed.notify_one();
+    assert_eq!(
+        read(&mut second).await?,
+        json!({"jsonrpc":"2.0","id":"second","error":{"code":-32001,"message":"initialize timed out"}})
+    );
+    assert!(generation.request_map.lock().is_empty());
+    assert!(matches!(
+        generation.handshake_cache.lock().initialize,
+        Initialization::Empty
+    ));
+    assert!(
+        fixture.requests.try_recv().is_err(),
+        "expiration must not replay"
+    );
+    fixture.stop().await
+}
+
+#[tokio::test]
 async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() -> io::Result<()> {
     let mut fixture = Fixture::start().await?;
     let (mut first, mut second, _) = two_clients(&mut fixture).await?;

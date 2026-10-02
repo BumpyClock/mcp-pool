@@ -193,15 +193,17 @@ impl SocketProxy {
         }
 
         *self.status.lock() = ServerStatus::Starting;
+        let generation = Arc::new(Generation::new());
+        *self.generation.lock() = Some(generation.clone());
         let listener = match crate::transport::bind(&self.socket_path) {
             Ok(listener) => Arc::new(listener),
             Err(error) => {
+                generation.fail_binding(&error);
                 *self.status.lock() = ServerStatus::Stopped;
                 return Err(error);
             }
         };
-        let generation = Arc::new(Generation::new());
-        *self.generation.lock() = Some(generation.clone());
+        generation.socket_bound.store(true, Ordering::SeqCst);
         if self.stop_requested.load(Ordering::SeqCst) {
             generation.signal_shutdown();
         }

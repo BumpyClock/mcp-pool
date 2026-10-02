@@ -65,7 +65,12 @@ impl Request {
             return Err("HTTP transport requires a JSON-RPC object".into());
         }
         let method = value.get("method").and_then(Value::as_str);
-        let identifier = method.and_then(|_| value.get("id").cloned());
+        let identifier = method.and_then(|_| {
+            value
+                .get("id")
+                .filter(|identifier| !identifier.is_null())
+                .cloned()
+        });
         let initialize = method == Some("initialize");
         let initialization_barrier = initialize || method == Some("notifications/initialized");
         Ok(Self {

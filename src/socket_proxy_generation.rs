@@ -41,13 +41,20 @@ impl Generation {
             startup_tx,
             completion,
             completion_tx,
-            socket_bound: AtomicBool::new(true),
+            socket_bound: AtomicBool::new(false),
         }
     }
 
     pub fn signal_shutdown(&self) {
         self.explicit_stop.store(true, Ordering::SeqCst);
         self.close();
+    }
+
+    pub fn fail_binding(&self, error: &io::Error) {
+        self.startup_tx.send_replace(Some(Err(error.to_string())));
+        self.close();
+        // Binding acquired no backend or local tasks, and must not unlink another owner's socket.
+        self.completion_tx.send_replace(Some(Ok(())));
     }
 
     fn close(&self) {
@@ -361,6 +368,7 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
         if generation.shutdown.load(Ordering::SeqCst) {
             break;
         }
+        // Initialize followers share the leader's deadline, even after its client disconnects.
         let request_deadline = generation
             .request_map
             .lock()
