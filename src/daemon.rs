@@ -1,13 +1,26 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::Notify;
 
-use crate::config::{control_socket_path, PoolConfig};
+use crate::config::{PoolConfig, control_socket_path};
 use crate::control::{ControlRequest, ControlResponse};
 use crate::diagnostics;
-use crate::pool::{upstream_spec_from_def, Pool};
+use crate::pool::{Pool, upstream_spec_from_def};
 use crate::transport;
+
+struct ShutdownSignal {
+    shutdown: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl Drop for ShutdownSignal {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+}
 
 /// Long-lived daemon: binds the control socket, holds the `Pool`, and dispatches
 /// control requests from CLI clients.
@@ -34,7 +47,9 @@ pub async fn serve() -> anyhow::Result<()> {
 
     let pool = Arc::new(Pool::new());
     let discovered = pool.discover_existing_sockets();
-    diagnostics::log(format!("daemon starting; discovered {discovered} existing socket(s)"));
+    diagnostics::log(format!(
+        "daemon starting; discovered {discovered} existing socket(s)"
+    ));
 
     // Bind the control socket. Do NOT pre-remove a stale unix socket file here:
     // transport::bind() now distinguishes a live daemon (AddrInUse + a successful
@@ -44,7 +59,10 @@ pub async fn serve() -> anyhow::Result<()> {
     let control_path = control_socket_path();
 
     let listener = transport::bind(&control_path)?;
-    diagnostics::log(format!("control socket bound at {}", control_path.display()));
+    diagnostics::log(format!(
+        "control socket bound at {}",
+        control_path.display()
+    ));
 
     // Warm the whole pool on boot: start every configured server so their upstreams
     // boot concurrently (each in its own background task) instead of lazily, one at
@@ -54,7 +72,7 @@ pub async fn serve() -> anyhow::Result<()> {
     {
         let warm_pool = Arc::clone(&pool);
         tokio::spawn(async move {
-            match warm_pool.start_all() {
+            match warm_pool.start_all().await {
                 Ok(results) => {
                     let started = results.iter().filter(|(_, error)| error.is_none()).count();
                     diagnostics::log(format!(
@@ -63,7 +81,9 @@ pub async fn serve() -> anyhow::Result<()> {
                     ));
                     for (name, error) in &results {
                         if let Some(error) = error {
-                            diagnostics::log(format!("warm start failed name={name} error={error}"));
+                            diagnostics::log(format!(
+                                "warm start failed name={name} error={error}"
+                            ));
                         }
                     }
                 }
@@ -73,15 +93,23 @@ pub async fn serve() -> anyhow::Result<()> {
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_notify = Arc::new(Notify::new());
 
     loop {
+        let notified = shutdown_notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
 
         // Accept outside the per-connection task so a single listener serializes
         // inbound connections; each accepted stream is handled independently.
-        let stream = match listener.accept().await {
+        let accepted = tokio::select! {
+            _ = &mut notified => break,
+            accepted = listener.accept() => accepted,
+        };
+        let stream = match accepted {
             Ok(stream) => stream,
             Err(error) => {
                 diagnostics::log(format!("accept failed: {error}"));
@@ -96,8 +124,9 @@ pub async fn serve() -> anyhow::Result<()> {
 
         let pool = Arc::clone(&pool);
         let shutdown = Arc::clone(&shutdown);
+        let shutdown_notify = Arc::clone(&shutdown_notify);
         tokio::spawn(async move {
-            handle_connection(stream, pool, shutdown).await;
+            handle_connection(stream, pool, shutdown, shutdown_notify).await;
         });
     }
 
@@ -105,19 +134,23 @@ pub async fn serve() -> anyhow::Result<()> {
     // shouldn't mask the real outcome.
     #[cfg(unix)]
     {
-        let _ = std::fs::remove_file(&control_path);
+        if let Err(error) = std::fs::remove_file(&control_path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            diagnostics::log(format!("control socket cleanup failed: {error}"));
+        }
     }
 
     Ok(())
 }
 
 /// Read one newline-delimited request, dispatch it, and write one response.
-/// The `shutdown` flag is shared so a `Shutdown` request can signal the accept
-/// loop to stop after the response is flushed.
+/// A successful shutdown response confirms pool retirement before stopping accepts.
 async fn handle_connection(
     stream: transport::LocalStream,
     pool: Arc<Pool>,
     shutdown: Arc<AtomicBool>,
+    shutdown_notify: Arc<Notify>,
 ) {
     // Split into reader/writer so the request can be parsed incrementally while
     // the response reuses the same underlying stream.
@@ -146,8 +179,20 @@ async fn handle_connection(
         }
         Err(error) => {
             diagnostics::log(format!("invalid control request: {error}"));
-            (ControlResponse::err(format!("invalid request: {error}")), false)
+            (
+                ControlResponse::err(format!("invalid request: {error}")),
+                false,
+            )
         }
+    };
+    // A vanished shutdown client must not strand an already-retired daemon.
+    let _shutdown_signal = if is_shutdown && response.ok {
+        Some(ShutdownSignal {
+            shutdown,
+            notify: shutdown_notify,
+        })
+    } else {
+        None
     };
 
     // Serialize + write + flush BEFORE any shutdown side effects, so the client
@@ -167,20 +212,11 @@ async fn handle_connection(
     }
     if let Err(error) = write_half.flush().await {
         diagnostics::log(format!("control flush failed: {error}"));
-        return;
-    }
-
-    // Shutdown ack is now safely on the wire. Signal the accept loop and tear
-    // down the pool so no new proxies accept inbound MCP traffic.
-    if is_shutdown {
-        shutdown.store(true, Ordering::SeqCst);
-        pool.shutdown();
     }
 }
 
 /// Map a control request to its response. Pure translation: all pool mutations
-/// go through the shared `Arc<Pool>`. Shutdown side effects are handled by the
-/// caller after the response is flushed, so dispatch only produces the response.
+/// go through the shared `Arc<Pool>` and complete before their response is sent.
 async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse {
     match request {
         ControlRequest::Start { name } => {
@@ -194,17 +230,19 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
                 return ControlResponse::err(format!("unknown server: {name}"));
             };
             let spec = upstream_spec_from_def(definition);
-            match pool.start(name, spec) {
+            match pool.start(name, spec).await {
                 Ok(()) => ControlResponse::ok(),
                 Err(error) => ControlResponse::err(error.to_string()),
             }
         }
-        ControlRequest::StartAll => match pool.start_all() {
+        ControlRequest::StartAll => match pool.start_all().await {
             Ok(results) => {
                 let servers: Vec<serde_json::Value> = results
                     .into_iter()
                     .map(|(name, error)| match error {
-                        Some(error) => serde_json::json!({ "name": name, "ok": false, "error": error }),
+                        Some(error) => {
+                            serde_json::json!({ "name": name, "ok": false, "error": error })
+                        }
                         None => serde_json::json!({ "name": name, "ok": true }),
                     })
                     .collect();
@@ -212,7 +250,7 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
             }
             Err(error) => ControlResponse::err(error.to_string()),
         },
-        ControlRequest::Stop { name } => match pool.stop_server(name) {
+        ControlRequest::Stop { name } => match pool.stop_server(name).await {
             Ok(_stopped) => ControlResponse::ok(),
             Err(error) => ControlResponse::err(error.to_string()),
         },
@@ -223,15 +261,43 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
         ControlRequest::Status { name } => {
             let mut status = pool.get_status();
             if let Some(filter_name) = name {
-                status
-                    .servers
-                    .retain(|server| &server.name == filter_name);
+                status.servers.retain(|server| &server.name == filter_name);
             }
             match serde_json::to_value(&status) {
                 Ok(value) => ControlResponse::data(value),
                 Err(error) => ControlResponse::err(error.to_string()),
             }
         }
-        ControlRequest::Shutdown => ControlResponse::ok(),
+        ControlRequest::Shutdown => match pool.shutdown().await {
+            Ok(()) => ControlResponse::ok(),
+            Err(error) => ControlResponse::err(error.to_string()),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::socket_proxy::retirement_tests::{RETIREMENT_ERROR, failed_retirement_pool};
+
+    #[tokio::test]
+    async fn stop_restart_and_shutdown_return_retirement_errors_to_control_clients()
+    -> std::io::Result<()> {
+        let pool = failed_retirement_pool().await?;
+        for request in [
+            ControlRequest::Stop {
+                name: "failed-server".to_string(),
+            },
+            ControlRequest::Restart {
+                name: "failed-server".to_string(),
+            },
+            ControlRequest::Shutdown,
+        ] {
+            let response = dispatch(&request, &pool).await;
+            assert!(!response.ok);
+            assert_eq!(response.error.as_deref(), Some(RETIREMENT_ERROR));
+            assert_eq!(pool.get_status().server_count, 1);
+        }
+        Ok(())
     }
 }

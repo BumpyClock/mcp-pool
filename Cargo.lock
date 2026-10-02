@@ -607,6 +607,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dirs",
+ "libc",
  "parking_lot",
  "reqwest",
  "serde",
@@ -614,6 +615,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
