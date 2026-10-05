@@ -1,5 +1,10 @@
 use super::*;
 
+type PendingForward = (
+    Option<u64>,
+    std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send>>,
+);
+
 /// Pump one client connection: read newline-delimited JSON-RPC requests from the
 /// client, translate each request id to a pool-unique id, forward to the
 /// upstream, and write routed responses back as they arrive on `rx`. The
@@ -31,13 +36,28 @@ pub(super) async fn handle_client(
     let mut reader = BufReader::new(read_half);
     let mut buffer = String::new();
     let mut parse_failures = 0u32;
+    let mut pending_forward: Option<PendingForward> = None;
 
     loop {
         if shutdown.load(Ordering::SeqCst) {
             break;
         }
         tokio::select! {
-            read_result = reader.read_line(&mut buffer) => match read_result {
+            result = async {
+                match pending_forward.as_mut() {
+                    Some((_, forwarding)) => forwarding.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                pending_forward = None;
+                if let Err(error) = result {
+                    diagnostics::log(format!(
+                        "pool_request_forward_failed client_id={client_id} error={error}"
+                    ));
+                    break;
+                }
+            },
+            read_result = reader.read_line(&mut buffer), if pending_forward.is_none() => match read_result {
                 Ok(0) => {
                     diagnostics::log(format!("pool_client_disconnected client_id={}", client_id));
                     break;
@@ -336,24 +356,29 @@ pub(super) async fn handle_client(
                         } => (line, method, tool, pool_id),
                     };
 
-                    // Wait for the upstream sender if it is still starting rather
-                    // than dropping this request: the first initialize/tools-list
-                    // must survive cold start for tools to appear promptly.
-                    let sender = acquire_request_sender(
-                        &request_tx,
-                        &upstream_ready,
-                        &shutdown,
-                        &client_id,
-                    )
-                    .await;
-                    if let Some(sender) = sender {
-                        if sender.send(forward_line).await.is_err() {
-                            diagnostics::log(format!(
-                                "pool_request_forward_failed client_id={} reason=upstream_closed",
-                                client_id
-                            ));
-                            break;
+                    let request_tx = request_tx.clone();
+                    let upstream_ready = upstream_ready.clone();
+                    let shutdown = shutdown.clone();
+                    let request_map = request_map.clone();
+                    let client_id = client_id.clone();
+                    // One deferred send preserves input order without blocking routed responses.
+                    pending_forward = Some((forward_pool_id, Box::pin(async move {
+                        let Some(sender) = acquire_request_sender(
+                            &request_tx, &upstream_ready, &shutdown, &client_id,
+                        ).await else { return Ok(()) };
+                        let permit = sender.reserve_owned().await.map_err(io::Error::other)?;
+                        let pending = request_map.lock();
+                        if shutdown.load(Ordering::SeqCst)
+                            || forward_pool_id.is_some_and(|pool_id| {
+                                !pending.contains_key(&jsonrpc::id_key(&Value::from(pool_id)))
+                            })
+                        {
+                            return Ok(());
                         }
+                        let bytes = forward_line.len();
+                        // Expiration and dispatch are atomic with respect to the request map.
+                        permit.send(forward_line);
+                        drop(pending);
                         diagnostics::log(format!(
                             "pool_request_forwarded client_id={} method={}{} pool_id={} bytes={}",
                             client_id,
@@ -365,14 +390,10 @@ pub(super) async fn handle_client(
                             forward_pool_id
                                 .map(|pool_id| pool_id.to_string())
                                 .unwrap_or_else(|| "?".to_string()),
-                            line.len()
+                            bytes
                         ));
-                    } else {
-                        diagnostics::log(format!(
-                            "pool_request_dropped client_id={} reason=upstream_unavailable",
-                            client_id
-                        ));
-                    }
+                        Ok(())
+                    })));
                 }
                 Err(err) => {
                     diagnostics::log(format!(
@@ -399,6 +420,13 @@ pub(super) async fn handle_client(
                             client_id, err
                         ));
                         break;
+                    }
+                    if pending_forward.as_ref().is_some_and(|(pool_id, _)| {
+                        pool_id.is_some_and(|pool_id| {
+                            !request_map.lock().contains_key(&jsonrpc::id_key(&Value::from(pool_id)))
+                        })
+                    }) {
+                        pending_forward = None;
                     }
                 }
                 None => break,

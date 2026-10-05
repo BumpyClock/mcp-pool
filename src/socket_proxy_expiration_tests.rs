@@ -1,5 +1,216 @@
 use super::*;
 
+async fn age_registered_requests(proxy: &SocketProxy, count: usize) -> io::Result<()> {
+    let generation = proxy
+        .generation
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing generation"))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while generation.request_map.lock().len() != count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    for request in generation.request_map.lock().values_mut() {
+        request.inserted_at =
+            Instant::now() - Duration::from_secs(REQUEST_TTL_SECS) + Duration::from_millis(50);
+    }
+    generation.expiration_changed.notify_one();
+    Ok(())
+}
+
+#[tokio::test]
+async fn unpublished_backend_expires_socket_leader_and_followers_before_dispatch() -> io::Result<()>
+{
+    let proxy = proxy();
+    let Backend {
+        setup,
+        handle,
+        responses,
+        requests,
+        shutdown,
+        retired,
+    } = backend(&proxy);
+    let start = {
+        let proxy = proxy.clone();
+        tokio::spawn(async move { proxy.start().await })
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !proxy.readiness().local_socket_bound {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    let mut first = BufReader::new(connect(&proxy).await?);
+    let mut second = BufReader::new(connect(&proxy).await?);
+    send(
+        first.get_mut(),
+        json!({"jsonrpc":"2.0","id":"old","method":"initialize","params":{}}),
+    )
+    .await?;
+    send(
+        second.get_mut(),
+        json!({"jsonrpc":"2.0","id":"follower","method":"initialize","params":{}}),
+    )
+    .await?;
+    follower_queued(&proxy).await?;
+    age_registered_requests(&proxy, 1).await?;
+    assert_eq!(
+        read(&mut first).await?,
+        json!({"jsonrpc":"2.0","id":"old","error":{"code":-32001,"message":"initialize timed out"}})
+    );
+    assert_eq!(
+        read(&mut second).await?,
+        json!({"jsonrpc":"2.0","id":"follower","error":{"code":-32001,"message":"initialize timed out"}})
+    );
+    assert!(!start.is_finished(), "timeouts precede sender publication");
+    send(
+        first.get_mut(),
+        json!({"jsonrpc":"2.0","id":"retry","method":"initialize","params":{}}),
+    )
+    .await?;
+    let generation = proxy
+        .generation
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing generation"))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while generation.request_map.lock().len() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    setup
+        .send(Ok(handle))
+        .map_err(|_| io::Error::other("setup lost"))?;
+    start.await.map_err(io::Error::other)??;
+    let mut fixture = Fixture {
+        proxy,
+        responses,
+        requests,
+        shutdown,
+        retired,
+    };
+    let retry = fixture.request().await?;
+    assert_eq!(retry.get("method"), Some(&json!("initialize")));
+    fixture
+        .responses
+        .send(
+            json!({"jsonrpc":"2.0","id":retry.get("id"),"result":{"capabilities":{}}}).to_string(),
+        )
+        .await
+        .map_err(io::Error::other)?;
+    assert_eq!(read(&mut first).await?.get("id"), Some(&json!("retry")));
+    assert!(
+        fixture.requests.try_recv().is_err(),
+        "expired leader is never dispatched"
+    );
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn upstream_backpressure_expires_socket_request_and_preserves_input_order() -> io::Result<()>
+{
+    let mut fixture = Fixture::start().await?;
+    let generation = fixture
+        .proxy
+        .generation
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing generation"))?;
+    let sender = generation
+        .request_tx
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing sender"))?;
+    for _ in 0..16 {
+        sender
+            .send("occupied".into())
+            .await
+            .map_err(io::Error::other)?;
+    }
+    let mut client = BufReader::new(connect(&fixture.proxy).await?);
+    send(
+        client.get_mut(),
+        json!({"jsonrpc":"2.0","id":"old","method":"ping"}),
+    )
+    .await?;
+    age_registered_requests(&fixture.proxy, 1).await?;
+    assert_eq!(
+        read(&mut client).await?,
+        json!({"jsonrpc":"2.0","id":"old","error":{"code":-32001,"message":"request timed out"}})
+    );
+    send(
+        client.get_mut(),
+        json!({"jsonrpc":"2.0","method":"notifications/first"}),
+    )
+    .await?;
+    send(
+        client.get_mut(),
+        json!({"jsonrpc":"2.0","id":"fresh","method":"ping"}),
+    )
+    .await?;
+    for _ in 0..16 {
+        assert_eq!(fixture.requests.recv().await.as_deref(), Some("occupied"));
+    }
+    assert_eq!(
+        fixture.request().await?.get("method"),
+        Some(&json!("notifications/first"))
+    );
+    let fresh = fixture.request().await?;
+    assert_eq!(fresh.get("method"), Some(&json!("ping")));
+    fixture
+        .responses
+        .send(json!({"jsonrpc":"2.0","id":fresh.get("id"),"result":{}}).to_string())
+        .await
+        .map_err(io::Error::other)?;
+    assert_eq!(read(&mut client).await?.get("id"), Some(&json!("fresh")));
+    assert!(
+        fixture.requests.try_recv().is_err(),
+        "expired request is never dispatched"
+    );
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn stop_retires_client_with_backpressured_forward() -> io::Result<()> {
+    let fixture = Fixture::start().await?;
+    let generation = fixture
+        .proxy
+        .generation
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing generation"))?;
+    let sender = generation
+        .request_tx
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing sender"))?;
+    for _ in 0..16 {
+        sender
+            .send("occupied".into())
+            .await
+            .map_err(io::Error::other)?;
+    }
+    let mut client = connect(&fixture.proxy).await?;
+    send(
+        &mut client,
+        json!({"jsonrpc":"2.0","id":"blocked","method":"ping"}),
+    )
+    .await?;
+    age_registered_requests(&fixture.proxy, 1).await?;
+    tokio::time::timeout(Duration::from_secs(2), fixture.stop())
+        .await
+        .map_err(io::Error::other)??;
+    assert!(generation.clients.lock().is_empty());
+    assert!(generation.request_map.lock().is_empty());
+    Ok(())
+}
+
 #[tokio::test]
 async fn disconnected_initialize_leader_still_expires_followers() -> io::Result<()> {
     let mut fixture = Fixture::start().await?;
