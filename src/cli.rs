@@ -9,6 +9,10 @@ use crate::control::{ControlRequest, ControlResponse};
 use crate::diagnostics;
 use crate::transport;
 
+#[path = "cli_output.rs"]
+mod output;
+use output::print_response_data;
+
 #[derive(Parser)]
 #[command(
     name = "mcp-pool",
@@ -126,18 +130,14 @@ pub async fn run() -> anyhow::Result<()> {
             };
             control_round_trip(request, mode, color).await
         }
-        Cmd::Stop { name } => {
-            control_round_trip(ControlRequest::Stop { name }, mode, color).await
-        }
+        Cmd::Stop { name } => control_round_trip(ControlRequest::Stop { name }, mode, color).await,
         Cmd::Restart { name } => {
             control_round_trip(ControlRequest::Restart { name }, mode, color).await
         }
         Cmd::Status { name } => {
             control_round_trip(ControlRequest::Status { name }, mode, color).await
         }
-        Cmd::Shutdown => {
-            control_round_trip(ControlRequest::Shutdown, mode, color).await
-        }
+        Cmd::Shutdown => control_round_trip(ControlRequest::Shutdown, mode, color).await,
     }
 }
 
@@ -175,7 +175,9 @@ fn build_server_def(
     let (stdio_command, args) = match (command, trailing.split_first()) {
         (Some(command), None) => (command, Vec::new()),
         (Some(_), Some(_)) => {
-            return Err(anyhow::anyhow!("--command cannot be combined with trailing command args"));
+            return Err(anyhow::anyhow!(
+                "--command cannot be combined with trailing command args"
+            ));
         }
         (None, None) => (String::new(), Vec::new()),
         (None, Some((first, rest))) => {
@@ -197,16 +199,26 @@ fn build_server_def(
                 .map(|value| normalize_transport(&value))
                 .transpose()?
                 .unwrap_or_else(|| "http".to_string());
-            Ok(ServerDef { url, transport, ..Default::default() })
+            Ok(ServerDef {
+                url,
+                transport,
+                ..Default::default()
+            })
         }
-        (None, true) => Ok(ServerDef { command: stdio_command, args, ..Default::default() }),
+        (None, true) => Ok(ServerDef {
+            command: stdio_command,
+            args,
+            ..Default::default()
+        }),
     }
 }
 
 fn normalize_transport(value: &str) -> anyhow::Result<String> {
     match value.to_ascii_lowercase().as_str() {
         "http" | "sse" => Ok(value.to_ascii_lowercase()),
-        other => Err(anyhow::anyhow!("invalid --transport '{other}': expected 'http' or 'sse'")),
+        other => Err(anyhow::anyhow!(
+            "invalid --transport '{other}': expected 'http' or 'sse'"
+        )),
     }
 }
 
@@ -246,11 +258,10 @@ fn remove_server(name: &str, yes: bool) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    if !yes && io::stdin().is_terminal()
-        && !confirm(&format!("remove server '{name}'?")) {
-            println!("aborted");
-            return Ok(());
-        }
+    if !yes && io::stdin().is_terminal() && !confirm(&format!("remove server '{name}'?")) {
+        println!("aborted");
+        return Ok(());
+    }
 
     let removed = pool_config.remove(name);
     pool_config.save()?;
@@ -286,13 +297,19 @@ fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
             (
                 name.clone(),
                 def.transport_kind().to_string(),
-                config::server_socket_path(name).to_string_lossy().to_string(),
+                config::server_socket_path(name)
+                    .to_string_lossy()
+                    .to_string(),
             )
         })
         .collect();
 
     if entries.is_empty() {
-        if mode == OutputMode::Json { println!("[]") } else { println!("no servers configured") }
+        if mode == OutputMode::Json {
+            println!("[]")
+        } else {
+            println!("no servers configured")
+        }
         return Ok(());
     }
 
@@ -333,7 +350,9 @@ async fn control_round_trip(
     let response = send_control(&request).await?;
 
     if !response.ok {
-        let message = response.error.unwrap_or_else(|| "unknown error".to_string());
+        let message = response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string());
         eprintln!("mcp-pool: {message}");
         std::process::exit(1);
     }
@@ -354,7 +373,9 @@ pub(crate) async fn ensure_started(name: &str) -> anyhow::Result<()> {
         Ok(())
     } else {
         Err(anyhow::anyhow!(
-            response.error.unwrap_or_else(|| "unknown error".to_string())
+            response
+                .error
+                .unwrap_or_else(|| "unknown error".to_string())
         ))
     }
 }
@@ -374,9 +395,7 @@ async fn send_control(request: &ControlRequest) -> anyhow::Result<ControlRespons
             diagnostics::log("control response empty; retrying once");
             send_request(&request_line)
                 .await?
-                .ok_or_else(|| {
-                    anyhow::anyhow!("daemon closed control socket without responding")
-                })?
+                .ok_or_else(|| anyhow::anyhow!("daemon closed control socket without responding"))?
         }
     };
 
@@ -394,113 +413,11 @@ async fn send_request(request_line: &str) -> anyhow::Result<Option<String>> {
     let mut reader = BufReader::new(stream);
     let mut response_line = String::new();
     let bytes = reader.read_line(&mut response_line).await?;
-    Ok(if bytes == 0 { None } else { Some(response_line) })
-}
-
-fn print_response_data(
-    request: &ControlRequest,
-    data: Option<serde_json::Value>,
-    mode: OutputMode,
-    color: bool,
-) {
-    if mode == OutputMode::Json {
-        let text = data
-            .and_then(|value| serde_json::to_string_pretty(&value).ok())
-            .unwrap_or_else(|| "{}".to_string());
-        println!("{text}");
-        return;
-    }
-    let (green, yellow, _red, reset) = colors(color);
-
-    match request {
-        ControlRequest::Start { name } => println!("{green}started{reset} {name}"),
-        ControlRequest::StartAll => print_start_all(data.as_ref(), color),
-        ControlRequest::Stop { name } => println!("{yellow}stopped{reset} {name}"),
-        ControlRequest::Restart { name } => println!("{green}restarted{reset} {name}"),
-        ControlRequest::Shutdown => println!("{yellow}daemon shutting down{reset}"),
-        ControlRequest::Status { name } => print_status_table(data.as_ref(), name.as_deref(), color),
-    }
-}
-
-/// Render the result of a "start all" request: one line per configured server.
-fn print_start_all(data: Option<&serde_json::Value>, color: bool) {
-    let (green, _yellow, red, reset) = colors(color);
-    let servers = data
-        .and_then(|value| value.get("servers"))
-        .and_then(|value| value.as_array())
-        .map(|array| array.as_slice())
-        .unwrap_or(&[]);
-
-    if servers.is_empty() {
-        println!("no servers configured");
-        return;
-    }
-
-    for server in servers {
-        let name = str_field(server, "name");
-        let ok = server.get("ok").and_then(|value| value.as_bool()).unwrap_or(false);
-        if ok {
-            println!("{green}started{reset} {name}");
-        } else {
-            let error = server.get("error").and_then(|value| value.as_str()).unwrap_or("error");
-            println!("{red}failed{reset} {name}: {error}");
-        }
-    }
-}
-
-fn colors(color: bool) -> (&'static str, &'static str, &'static str, &'static str) {
-    if color {
-        ("\x1b[32m", "\x1b[33m", "\x1b[31m", "\x1b[0m")
+    Ok(if bytes == 0 {
+        None
     } else {
-        ("", "", "", "")
-    }
-}
-
-fn str_field<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
-    value.get(key).and_then(|v| v.as_str()).unwrap_or("?")
-}
-
-fn print_status_table(data: Option<&serde_json::Value>, filter: Option<&str>, color: bool) {
-    let (green, yellow, red, reset) = colors(color);
-    let servers = data
-        .and_then(|value| value.get("servers"))
-        .and_then(|value| value.as_array())
-        .map(|arr| arr.as_slice())
-        .unwrap_or(&[]);
-
-    let matches = |server: &serde_json::Value| match filter {
-        Some(target) => str_field(server, "name") == target,
-        None => true,
-    };
-    let shown: Vec<&serde_json::Value> = servers.iter().filter(|server| matches(server)).collect();
-
-    if shown.is_empty() {
-        match filter {
-            Some(name) => println!("server '{name}' is not running"),
-            None => println!("no servers running"),
-        }
-        return;
-    }
-
-    println!("{:<20} {:<10} {:<10} {:<6} SOCKET", "NAME", "STATUS", "TRANSPORT", "CONNS");
-    for server in shown {
-        let status = str_field(server, "status");
-        let (prefix, suffix) = match status {
-            "running" => (green, reset),
-            "starting" => (yellow, reset),
-            "stopped" => (red, reset),
-            _ => ("", ""),
-        };
-        let connections = server.get("connection_count").and_then(|v| v.as_u64()).unwrap_or(0);
-        println!(
-            "{:<20} {prefix}{:<10}{suffix} {:<10} {:<6} {}",
-            str_field(server, "name"),
-            status,
-            str_field(server, "transport"),
-            connections,
-            str_field(server, "socket_path"),
-        );
-    }
+        Some(response_line)
+    })
 }
 
 /// Connect to the control socket. If unreachable, spawn the daemon detached and
@@ -525,8 +442,7 @@ async fn retry_connect(socket_path: &std::path::Path) -> anyhow::Result<transpor
             Err(error) => last_error = Some(error),
         }
     }
-    let error = last_error
-        .unwrap_or_else(|| std::io::Error::other("control socket unreachable"));
+    let error = last_error.unwrap_or_else(|| std::io::Error::other("control socket unreachable"));
     Err(anyhow::anyhow!(
         "could not reach daemon after launch ({}). Try `mcp-pool serve` manually.",
         error

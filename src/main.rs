@@ -14,6 +14,9 @@ mod socket_proxy;
 mod transport;
 mod types;
 mod upstream;
+mod upstream_http;
+mod upstream_process;
+mod upstream_stdio;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
