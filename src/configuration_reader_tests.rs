@@ -203,6 +203,54 @@ fn missing_environment_variables_are_explicit_errors() -> Result<()> {
 }
 
 #[test]
+fn headers_prefer_configured_environment_over_missing_or_different_caller_values() -> Result<()> {
+    for caller in [None, Some("synthetic-caller")] {
+        let configuration = parse_with_environment(
+            &source()?,
+            r#"{"imports":[],"mcpServers":{"test":{
+                "baseUrl":"https://example.test/mcp",
+                "env":{"LOOKUP":"synthetic-configured"},
+                "headers":{"X-Fixture":"prefix-${LOOKUP}"},
+                "bearerTokenEnv":"LOOKUP"
+            }}}"#,
+            &|_| Ok(caller.map(str::to_owned)),
+            &|| Ok(BTreeMap::new()),
+        )?;
+        let definition = &server(&configuration)?.definition;
+        assert_eq!(
+            definition.headers.get("X-Fixture").map(String::as_str),
+            Some("prefix-synthetic-configured")
+        );
+        assert_eq!(
+            definition.headers.get("Authorization").map(String::as_str),
+            Some("synthetic-configured")
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+#[test]
+fn configured_header_environment_uses_windows_case_insensitive_names() -> Result<()> {
+    let configuration = parse(
+        r#"{"imports":[],"mcpServers":{"test":{
+            "baseUrl":"https://example.test/mcp",
+            "env":{"Lookup":"synthetic-configured"},
+            "headers":{"X-Fixture":"${LOOKUP}"}
+        }}}"#,
+    )?;
+    assert_eq!(
+        server(&configuration)?
+            .definition
+            .headers
+            .get("X-Fixture")
+            .map(String::as_str),
+        Some("synthetic-configured")
+    );
+    Ok(())
+}
+
+#[test]
 fn environment_defaults_and_empty_values_match_reference() -> Result<()> {
     let empty = |_: &str| Ok(Some(String::new()));
     assert_eq!(

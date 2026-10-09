@@ -12,8 +12,7 @@ use tokio::task::JoinSet;
 use crate::mcp_client::McpClient;
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 
-#[path = "mcp_bridge_filter.rs"]
-mod filter;
+use crate::tool_filter as filter;
 #[path = "mcp_bridge_http.rs"]
 mod http;
 #[path = "mcp_bridge_names.rs"]

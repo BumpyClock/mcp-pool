@@ -23,6 +23,7 @@ mod server_config;
 mod socket_proxy;
 mod tool_arguments;
 mod tool_discovery;
+mod tool_filter;
 mod tool_output;
 mod transport;
 mod types;

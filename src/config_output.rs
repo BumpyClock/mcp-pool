@@ -20,10 +20,16 @@ pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
             "oauthRedirectUrl",
             "oauthRequestedScope",
             "lifecycle",
-            "allowedTools",
-            "blockedTools",
         ] {
             if let Some(value) = server.raw.get(key) {
+                object.insert(key.to_owned(), value.clone());
+            }
+        }
+        for (key, alias) in [
+            ("allowedTools", "allowed_tools"),
+            ("blockedTools", "blocked_tools"),
+        ] {
+            if let Some(value) = server.raw.get(key).or_else(|| server.raw.get(alias)) {
                 object.insert(key.to_owned(), value.clone());
             }
         }

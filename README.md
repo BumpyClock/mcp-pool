@@ -75,6 +75,8 @@ is set. `--quiet` suppresses output and enables that failure exit code. A failed
 single-server discovery exits unsuccessfully.
 
 `call` accepts `SERVER.TOOL`, `SERVER TOOL`, or `--server NAME --tool NAME`.
+Dotted tool selectors split at the first dot: `docs.search.v2` selects server
+`docs` and tool `search.v2`. This also applies to tool-specific discovery.
 Arguments can use `key=value`, `key:value`, JSON through `--args`/`--params`, or
 `--args -` for a JSON object on stdin. Positional arguments use the tool schema's
 property declaration order. Named `key=@FILE` values read a regular UTF-8 file
@@ -125,11 +127,14 @@ The config reader accepts JSONC comments and trailing commas, an `mcpServers`
 object, stdio commands, HTTP/SSE URLs, environment values, headers, and working
 directories. Relative command paths and `cwd` resolve against the selected
 config file's directory; absent stdio `cwd` uses that directory.
+HTTP headers, `bearerToken`, and `bearerTokenEnv` resolve environment values
+from the server's configured `env` overrides before the caller's environment.
 Editor config imports and automatic config conversion are deferred. Only the selected file's
 `mcpServers` entries are loaded, and ignored imports produce a warning.
 
-Server entries can use `allowedTools` or `blockedTools` arrays to filter
-compatibility discovery, calls, and bridge exposure. Names match upstream tool
+Server entries can use `allowedTools` or `blockedTools` arrays, with
+`allowed_tools` and `blocked_tools` as aliases, to filter discovery, calls,
+and bridge exposure. All three paths use the same filter. Names match upstream tool
 names exactly, not patterns or bridge-prefixed names. An empty `allowedTools`
 array hides all tools. Specifying both fields, or a field that is not an array
 of strings, is an error. These filters do not constrain a raw `proxy` connection
@@ -514,6 +519,7 @@ that changes state.
 - `config_commands.rs` / `daemon_commands.rs` — JSON config operations, auth, vault, and daemon commands
 - `mcp_client.rs` / `mcp_client_wire.rs` — MCP requests through pooled local connections
 - `mcp_bridge.rs` / `mcp_bridge_*.rs` — keep-alive tool bridge over stdio or HTTP
+- `tool_filter.rs` — shared tool filtering for discovery, calls, and bridge exposure
 - `oauth.rs` / `oauth_*.rs` — explicit authorization, credential reuse, storage, and refresh
 - `upstream.rs` — upstream ownership and confirmed shutdown contract
 - `upstream_stdio.rs` / `upstream_http.rs` — stdio and remote transport backends

@@ -232,20 +232,36 @@ fn normalize(
             .env
             .insert(name, expand(&value).context("field 'env'")?);
     }
-    for (name, value) in entry.headers {
-        definition
-            .headers
-            .insert(name, expand(&value).context("field 'headers'")?);
-    }
-    if let Some(token) = entry.bearer_token {
-        definition.headers.insert(
-            "Authorization".into(),
-            format!("Bearer {}", expand(&token).context("field 'bearerToken'")?),
-        );
-    }
-    if let Some(name) = entry.bearer_token_env {
-        let token = expand(&format!("$env:{name}")).context("field 'bearerTokenEnv'")?;
-        definition.headers.insert("Authorization".into(), token);
+    {
+        let effective_environment = |name: &str| {
+            definition
+                .env
+                .iter()
+                .find(|(configured, _)| {
+                    if cfg!(windows) {
+                        configured.eq_ignore_ascii_case(name)
+                    } else {
+                        configured.as_str() == name
+                    }
+                })
+                .map_or_else(|| environment(name), |(_, value)| Ok(Some(value.clone())))
+        };
+        let expand = |value: &str| values::expand_environment(value, &effective_environment);
+        for (name, value) in entry.headers {
+            definition
+                .headers
+                .insert(name, expand(&value).context("field 'headers'")?);
+        }
+        if let Some(token) = entry.bearer_token {
+            definition.headers.insert(
+                "Authorization".into(),
+                format!("Bearer {}", expand(&token).context("field 'bearerToken'")?),
+            );
+        }
+        if let Some(name) = entry.bearer_token_env {
+            let token = expand(&format!("$env:{name}")).context("field 'bearerTokenEnv'")?;
+            definition.headers.insert("Authorization".into(), token);
+        }
     }
     let transport =
         expand(entry.transport.as_deref().unwrap_or_default()).context("field 'transport'")?;

@@ -31,6 +31,21 @@ fn dotted_separate_and_expression_calls() -> Result<()> {
                 .context("object")?
         );
     }
+
+    Ok(())
+}
+
+#[test]
+fn dotted_tool_names_keep_the_full_suffix_in_selectors_and_expressions() -> Result<()> {
+    for tokens in [
+        vec!["docs.search.v2", "query=fixture"],
+        vec!["docs.search.v2(query: 'fixture')"],
+    ] {
+        let parsed = parse(&tokens)?;
+        assert_eq!(parsed.server.as_deref(), Some("docs"));
+        assert_eq!(parsed.tool.as_deref(), Some("search.v2"));
+        assert_eq!(parsed.arguments.get("query"), Some(&json!("fixture")));
+    }
     Ok(())
 }
 

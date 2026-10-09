@@ -136,3 +136,35 @@ fn single_tool_inference_uses_actual_discovery_and_rejects_ambiguity() -> Result
     );
     Ok(())
 }
+
+#[test]
+fn tool_filter_aliases_apply_to_calls_discovery_and_single_tool_inference() -> Result<()> {
+    let configuration = configuration()?;
+    let mut selected = configuration.servers.get("docs").context("docs")?.clone();
+    for raw in [
+        json!({"allowed_tools":["lookup"]}),
+        json!({"blocked_tools":["delete"]}),
+        json!({"allowedTools":["lookup"],"allowed_tools":["delete"]}),
+    ] {
+        selected.raw = raw;
+        assert!(tool_allowed(&selected, "lookup")?);
+        assert!(!tool_allowed(&selected, "delete")?);
+        assert_eq!(
+            invocation::select_tool(
+                &selected,
+                &[json!({"name":"lookup"}), json!({"name":"delete"})],
+                None
+            )?,
+            "lookup"
+        );
+    }
+    for raw in [
+        json!({"allowed_tools":"lookup"}),
+        json!({"blocked_tools":[1]}),
+        json!({"allowedTools":["lookup"],"blocked_tools":["delete"]}),
+    ] {
+        selected.raw = raw;
+        assert!(tool_allowed(&selected, "delete").is_err());
+    }
+    Ok(())
+}

@@ -47,6 +47,64 @@ async fn active_discovery_paginates_and_retains_schema() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn dotted_tool_selectors_and_filter_aliases_apply_in_real_cli_commands() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    let mut configuration: Value = serde_json::from_slice(&tokio::fs::read(&fixture.config).await?)
+        .map_err(io::Error::other)?;
+    let server = configuration
+        .pointer_mut("/mcpServers/fixture")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("missing fixture entry"))?;
+    server
+        .get_mut("env")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("missing fixture environment"))?
+        .insert("MCP_POOL_TEST_DOTTED_TOOL".to_owned(), json!("1"));
+    server.insert("allowed_tools".to_owned(), json!(["echo.v2"]));
+    tokio::fs::write(
+        &fixture.config,
+        serde_json::to_vec(&configuration).map_err(io::Error::other)?,
+    )
+    .await?;
+    fixture.warm("fixture").await?;
+
+    let configured = parse_json(
+        &fixture
+            .success(&["config", "get", "fixture", "--json"])
+            .await?,
+    )?;
+    assert_eq!(configured.get("allowedTools"), Some(&json!(["echo.v2"])));
+    assert!(configured.get("allowed_tools").is_none());
+    let listed = parse_json(
+        &fixture
+            .success(&["list", "fixture.echo.v2", "--json"])
+            .await?,
+    )?;
+    assert_eq!(listed.pointer("/tools/0/name"), Some(&json!("echo.v2")));
+    assert_eq!(
+        listed.get("tools").and_then(Value::as_array).map(Vec::len),
+        Some(1)
+    );
+    for selector in ["fixture.echo.v2", "fixture.echo.v2(label: 'fixture')"] {
+        let arguments = if selector.contains('(') {
+            vec!["call", selector, "--output", "json"]
+        } else {
+            vec!["call", selector, "label=fixture", "--output", "json"]
+        };
+        assert_eq!(
+            parse_json(&fixture.success(&arguments).await?)?.pointer("/arguments/label"),
+            Some(&json!("fixture"))
+        );
+    }
+    let blocked = fixture
+        .command(&["call", "fixture.delayed", "label=blocked"])
+        .await?;
+    assert!(!blocked.status.success());
+    assert_eq!(fixture.event_count("tools/call").await?, 2);
+    fixture.finish().await
+}
+
+#[tokio::test]
 async fn two_cli_calls_and_compatibility_proxy_share_one_upstream() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     let mut proxy = RpcProcess::fixture_proxy(fixture.spawn(&["proxy", "fixture"])?)?;

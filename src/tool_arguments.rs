@@ -398,7 +398,7 @@ fn set_selector(result: &mut Call, selector: &str) -> Result<()> {
         result.ephemeral.command = Some(selector.to_owned());
         return Ok(());
     }
-    if let Some((server, tool)) = selector.rsplit_once('.') {
+    if let Some((server, tool)) = selector.split_once('.') {
         if result
             .server
             .as_deref()

@@ -343,33 +343,9 @@ pub(crate) async fn stdin() -> Result<String> {
 }
 
 pub(crate) fn tool_allowed(server: &ConfiguredServer, tool: &str) -> Result<bool> {
-    let allowed = server.raw.get("allowedTools");
-    let blocked = server.raw.get("blockedTools");
-    if allowed.is_some() && blocked.is_some() {
-        bail!(
-            "Server '{}' cannot specify both allowedTools and blockedTools",
-            server.name
-        );
-    }
-    for (label, field) in [("allowedTools", allowed), ("blockedTools", blocked)] {
-        if let Some(field) = field
-            && !field
-                .as_array()
-                .is_some_and(|values| values.iter().all(Value::is_string))
-        {
-            bail!(
-                "Server '{}' {label} must be an array of strings",
-                server.name
-            );
-        }
-    }
-    if let Some(allowed) = allowed.and_then(Value::as_array) {
-        Ok(allowed.iter().any(|value| value.as_str() == Some(tool)))
-    } else if let Some(blocked) = blocked.and_then(Value::as_array) {
-        Ok(!blocked.iter().any(|value| value.as_str() == Some(tool)))
-    } else {
-        Ok(true)
-    }
+    Ok(crate::tool_filter::ToolFilter::from_raw(&server.raw)
+        .with_context(|| format!("Server '{}' has invalid tool filters", server.name))?
+        .permits(tool))
 }
 
 #[cfg(test)]

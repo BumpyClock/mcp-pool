@@ -43,7 +43,12 @@ pub fn response(request: &Value) -> io::Result<Value> {
             if parameters.get("cursor") == Some(&json!("tools-page-two")) {
                 json!({"tools":[tool("delayed"),tool("fail_rpc"),tool("fail_tool")]})
             } else {
-                json!({"tools":[tool("echo")], "nextCursor":"tools-page-two"})
+                let echo = if std::env::var_os("MCP_POOL_TEST_DOTTED_TOOL").is_some() {
+                    "echo.v2"
+                } else {
+                    "echo"
+                };
+                json!({"tools":[tool(echo)], "nextCursor":"tools-page-two"})
             }
         }
         "tools/call" => {

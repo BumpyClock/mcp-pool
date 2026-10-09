@@ -99,7 +99,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
                 target,
                 &flags.ephemeral,
             )?]
-        } else if let Some((server, tool)) = target.rsplit_once('.') {
+        } else if let Some((server, tool)) = target.split_once('.') {
             selected_tool = Some(tool.to_owned());
             vec![crate::mcp_cli::server(
                 &configuration,

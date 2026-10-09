@@ -67,6 +67,8 @@ upstream process/connection instead of launching N copies.
 - **SSE** — legacy GET stream with same-origin POST endpoint discovery.
 - Configured headers and associated OAuth credentials are supported for servers
   resolved from JSON config. Only explicit `auth`/`config login` starts consent.
+  HTTP headers, `bearerToken`, and `bearerTokenEnv` resolve environment values
+  from configured `env` overrides before the caller's environment.
   Discovery, calls, resources, and proxy can reuse credentials or refresh tokens;
   they do not launch consent. `--no-oauth` permits valid cached tokens only.
   Authorization requires advertised PKCE S256; signed token methods are unsupported.
@@ -104,6 +106,8 @@ upstream process/connection instead of launching N copies.
   dedicated notification connections across subscriptions.
 - `allowedTools`/`blockedTools` filter discovery, calls, and bridge exposure by
   exact upstream names. They are mutually exclusive string arrays, not patterns.
+  `allowed_tools`/`blocked_tools` are aliases. All paths use `tool_filter.rs`;
+  there is no separate bridge filter.
   Raw `proxy` and direct upstream access bypass these filters.
 
 ## CLI surface
@@ -115,6 +119,8 @@ upstream process/connection instead of launching N copies.
 - `add NAME -- COMMAND [ARGS...]` (stdio) or `add NAME --url URL [--transport http|sse]`.
 - Top-level `list` performs live discovery, not a native config listing.
   `running` pool status confirms transport setup, not discovery or MCP readiness.
+- Dotted tool selectors split at the first dot. `docs.search.v2` selects server
+  `docs` and tool `search.v2` for calls and tool-specific discovery.
 - `call --output raw` deliberately emits a JSON result envelope, not Node inspect text.
 - `--oauth-timeout` is accepted only for `auth` and `config login`.
   Cached refresh keeps its fixed OAuth deadline; `--timeout` bounds operation waits.
