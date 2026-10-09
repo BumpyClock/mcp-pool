@@ -17,10 +17,9 @@ pub struct LocalListener {
     inner: tokio::net::UnixListener,
     #[cfg(windows)]
     pipe_name: String,
-    // Holds the secured exclusive first pipe instance created eagerly in bind().
-    // Later accepts create instances with the same DACL and remote-client rule.
+    // Keep pending instances in the listener because select! may cancel accept.
     #[cfg(windows)]
-    first_instance: parking_lot::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
+    pending_instance: tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
 }
 
 /// Bind a listening endpoint at `path`.
@@ -44,7 +43,7 @@ pub fn bind(path: &Path) -> io::Result<LocalListener> {
         let first_instance = crate::local_security::create_named_pipe(&pipe_name, true)?;
         Ok(LocalListener {
             pipe_name,
-            first_instance: parking_lot::Mutex::new(Some(first_instance)),
+            pending_instance: tokio::sync::Mutex::new(Some(first_instance)),
         })
     }
 }
@@ -82,14 +81,13 @@ impl LocalListener {
 
         #[cfg(windows)]
         {
-            // Release the lock before connect().await so the sync guard never
-            // spans a suspension point.
-            let pre_created = self.first_instance.lock().take();
-            let server = match pre_created {
-                Some(server) => server,
-                None => crate::local_security::create_named_pipe(&self.pipe_name, false)?,
-            };
+            let mut pending = self.pending_instance.lock().await;
+            if pending.is_none() {
+                *pending = Some(crate::local_security::create_named_pipe(&self.pipe_name, false)?);
+            }
+            let server = pending.as_ref().ok_or_else(|| io::Error::other("missing pending pipe"))?;
             server.connect().await?;
+            let server = pending.take().ok_or_else(|| io::Error::other("missing connected pipe"))?;
             Ok(Box::new(server))
         }
     }
@@ -146,6 +144,25 @@ mod tests {
             duplicate.err().map(|error| error.kind()),
             Some(io::ErrorKind::PermissionDenied)
         );
+        drop(listener);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancelled_accept_preserves_the_pending_endpoint() -> io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let path = unique_endpoint();
+        let listener = bind(&path)?;
+        assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+        let mut client = connect(&path).await?;
+        let mut server = listener.accept().await?;
+        client.write_all(b"retained").await?;
+        let mut received = [0; 8];
+        server.read_exact(&mut received).await?;
+        assert_eq!(&received, b"retained");
+        drop(server);
+        drop(client);
         drop(listener);
         Ok(())
     }
