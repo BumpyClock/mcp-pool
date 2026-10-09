@@ -53,9 +53,6 @@ pub async fn spawn_configured(
             clear_env,
         )?);
         launch.args(args);
-        if clear_env {
-            launch.env_clear();
-        }
         launch
     };
     #[cfg(unix)]
@@ -64,6 +61,9 @@ pub async fn spawn_configured(
         launch.args(args);
         launch
     };
+    if clear_env {
+        launch.env_clear();
+    }
     launch
         .envs(env)
         .stdin(Stdio::piped())
