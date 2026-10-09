@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::config;
 
+#[path = "daemon_logging.rs"]
+pub(crate) mod logging;
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// Maximum byte length of a single log line preserved verbatim. Lines longer
@@ -72,18 +75,26 @@ pub fn log(message: impl AsRef<str>) {
     if STDERR.load(Ordering::SeqCst) {
         eprintln!("{message}");
     }
+    if let Some(result) = logging::write(message) {
+        if let Err(error) = result {
+            eprintln!("mcp-pool: daemon log write failed: {error}");
+        }
+        return;
+    }
     let Some(dir) = log_dir() else {
         return;
     };
-    if std::fs::create_dir_all(&dir).is_err() {
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        eprintln!("mcp-pool: diagnostic log directory unavailable: {error}");
         return;
     }
-    if let Ok(mut file) = OpenOptions::new()
+    let result = OpenOptions::new()
         .create(true)
         .append(true)
         .open(dir.join("mcp-pool.log"))
-    {
-        let _ = writeln!(file, "{}", message);
+        .and_then(|mut file| writeln!(file, "{message}"));
+    if let Err(error) = result {
+        eprintln!("mcp-pool: diagnostic log write failed: {error}");
     }
 }
 
@@ -108,7 +119,10 @@ mod tests {
         let body = "x".repeat(10_000);
         let out = summarize_log_line(&body);
         assert!(out.contains("truncated=true"), "marker present: {out:.40}");
-        assert!(out.contains("original_len=10000"), "original length recorded");
+        assert!(
+            out.contains("original_len=10000"),
+            "original length recorded"
+        );
         assert!(out.len() < body.len(), "output shorter than input");
         // The full payload tail must never appear in the summarized line.
         assert!(!out.contains(&"x".repeat(10_000)));

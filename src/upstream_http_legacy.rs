@@ -16,59 +16,80 @@ pub(super) async fn spawn(
     client: reqwest::Client,
     url: reqwest::Url,
     response_tx: mpsc::Sender<String>,
+    options: Options,
+    startup_budget: Option<crate::request_deadline::SharedDeadline>,
 ) -> io::Result<UpstreamHandle> {
-    let (mut response, mut decoder, endpoint) = timeout(REQUEST_TIMEOUT, async {
-        let mut response = client
-            .get(url.clone())
-            .header(ACCEPT, "text/event-stream")
-            .send()
-            .await
-            .map_err(|_| "Legacy SSE connection failed")?;
-        if !response.status().is_success() || content_type(&response) != "text/event-stream" {
-            return Err("Legacy SSE requires a successful GET event stream");
-        }
-        let mut decoder = sse_parser::Decoder::new();
-        loop {
-            let chunk = read_chunk(&mut response)
+    let discovery_budget = match &startup_budget {
+        Some(budget) => budget.clone(),
+        None => crate::request_deadline::SharedDeadline::new(
+            std::time::Instant::now()
+                .checked_add(options.request_timeout)
+                .ok_or_else(|| {
+                    io::Error::other("Legacy SSE discovery deadline exceeds the clock range")
+                })?,
+        ),
+    };
+    let (mut response, mut decoder, endpoint) = discovery_budget
+        .wait(async {
+            let mut response = options
+                .authorize(client.get(url.clone()))
+                .await?
+                .headers(HeaderMap::from_iter([(
+                    ACCEPT,
+                    HeaderValue::from_static("text/event-stream"),
+                )]))
+                .send()
                 .await
+                .map_err(|_| "Legacy SSE connection failed")?;
+            if !response.status().is_success() || content_type(&response) != "text/event-stream" {
+                return Err("Legacy SSE requires a successful GET event stream".into());
+            }
+            let mut decoder = sse_parser::Decoder::new();
+            loop {
+                let chunk = match &startup_budget {
+                    Some(budget) => read_chunk_with_deadline(&mut response, budget).await,
+                    None => read_chunk_with_timeout(&mut response, options.read_timeout).await,
+                }
                 .map_err(|_| "Legacy SSE endpoint discovery read failed")?
                 .ok_or("Legacy SSE ended before endpoint discovery")?;
-            let feed = decoder.feed(&chunk);
-            let mut endpoint = None;
-            for event in feed.events {
-                if event.name == "endpoint" {
-                    let candidate = url
-                        .join(&event.data)
-                        .map_err(|_| "Legacy SSE advertised an invalid message endpoint")?;
-                    // The discovery stream cannot redirect credentials or messages to another origin.
-                    if candidate.origin() != url.origin()
-                        || candidate.username() != url.username()
-                        || candidate.password() != url.password()
-                        || candidate.fragment().is_some()
-                    {
-                        return Err("Legacy SSE message endpoint must use the same origin");
+                let feed = decoder.feed(&chunk);
+                let mut endpoint = None;
+                for event in feed.events {
+                    if event.name == "endpoint" {
+                        let candidate = url
+                            .join(&event.data)
+                            .map_err(|_| "Legacy SSE advertised an invalid message endpoint")?;
+                        // The discovery stream cannot redirect credentials or messages to another origin.
+                        if candidate.origin() != url.origin()
+                            || candidate.username() != url.username()
+                            || candidate.password() != url.password()
+                            || candidate.fragment().is_some()
+                        {
+                            return Err(
+                                "Legacy SSE message endpoint must use the same origin".into()
+                            );
+                        }
+                        endpoint = Some(candidate);
+                    } else if event.name == "message" || event.name.is_empty() {
+                        let message = parse_message(&event.data)
+                            .map_err(|_| "Legacy SSE discovery returned an invalid message")?;
+                        response_tx
+                            .send(message.to_string())
+                            .await
+                            .map_err(|_| "Legacy SSE response receiver closed")?;
                     }
-                    endpoint = Some(candidate);
-                } else if event.name == "message" || event.name.is_empty() {
-                    let message = parse_message(&event.data)
-                        .map_err(|_| "Legacy SSE discovery returned an invalid message")?;
-                    response_tx
-                        .send(message.to_string())
-                        .await
-                        .map_err(|_| "Legacy SSE response receiver closed")?;
+                }
+                if feed.error.is_some() {
+                    return Err("Legacy SSE endpoint discovery frame is invalid".into());
+                }
+                if let Some(endpoint) = endpoint {
+                    return Ok::<_, String>((response, decoder, endpoint));
                 }
             }
-            if feed.error.is_some() {
-                return Err("Legacy SSE endpoint discovery frame is invalid");
-            }
-            if let Some(endpoint) = endpoint {
-                return Ok((response, decoder, endpoint));
-            }
-        }
-    })
-    .await
-    .map_err(|_| io::Error::other("Legacy SSE endpoint discovery deadline exceeded"))?
-    .map_err(io::Error::other)?;
+        })
+        .await
+        .map_err(|_| io::Error::other("Legacy SSE endpoint discovery deadline exceeded"))?
+        .map_err(io::Error::other)?;
 
     let (request_tx, request_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -93,6 +114,7 @@ pub(super) async fn spawn(
                 &session,
                 &response_tx,
                 &mut workers,
+                &options,
             );
             tokio::pin!(stream);
             tokio::pin!(requests);
@@ -151,8 +173,11 @@ async fn receive_events(
     response_tx: &mpsc::Sender<String>,
 ) -> Result<(), String> {
     loop {
-        let chunk = read_chunk(response)
-            .await?
+        // Idle time does not retire a persistent pool; execute bounds each pending request.
+        let chunk = response
+            .chunk()
+            .await
+            .map_err(|_| "Legacy SSE connection read failed; request was not replayed")?
             .ok_or("Legacy SSE connection ended; restart the upstream")?;
         let feed = decoder.feed(&chunk);
         for event in feed.events {
@@ -220,11 +245,12 @@ async fn receive_events(
 async fn run_requests(
     client: &reqwest::Client,
     endpoint: &reqwest::Url,
-    mut request_rx: mpsc::Receiver<String>,
+    mut request_rx: mpsc::Receiver<crate::upstream::UpstreamRequest>,
     pending: &Requests,
     session: &Arc<Mutex<Session>>,
     response_tx: &mpsc::Sender<String>,
     workers: &mut JoinSet<()>,
+    options: &Options,
 ) -> Result<(), String> {
     loop {
         tokio::select! {
@@ -240,7 +266,10 @@ async fn run_requests(
                     while workers.join_next().await.is_some() {}
                     return Ok(());
                 };
-                let request = match Request::parse(line.clone()) {
+                let request = match Request::parse(line.clone()).and_then(|mut request| {
+                    request.establish_budget(options)?;
+                    Ok(request)
+                }) {
                     Ok(request) => request,
                     Err(error) => {
                         let value = serde_json::from_str::<Value>(&line).ok();
@@ -251,15 +280,16 @@ async fn run_requests(
                 };
                 if request.initialization_barrier {
                     while workers.join_next().await.is_some() {}
-                    execute(client, endpoint, request, pending, session, response_tx).await;
+                    execute(client, endpoint, request, pending, session, response_tx, options).await;
                 } else {
                     let client = client.clone();
                     let endpoint = endpoint.clone();
                     let pending = pending.clone();
                     let session = session.clone();
                     let response_tx = response_tx.clone();
+                    let options = options.clone();
                     workers.spawn(async move {
-                        execute(&client, &endpoint, request, &pending, &session, &response_tx).await;
+                        execute(&client, &endpoint, request, &pending, &session, &response_tx, &options).await;
                     });
                 }
             }
@@ -274,65 +304,87 @@ async fn execute(
     pending: &Requests,
     session: &Arc<Mutex<Session>>,
     response_tx: &mpsc::Sender<String>,
+    options: &Options,
 ) {
     let key = request.identifier.as_ref().map(Value::to_string);
     let answered = Arc::new(AtomicBool::new(false));
-    let result = timeout(REQUEST_TIMEOUT, async {
-        let state = session.lock().await.clone();
-        if matches!(state, Session::Expired) {
-            return Err(
-                "Legacy SSE session expired; restart the upstream before sending requests".into(),
-            );
-        }
-        if matches!(state, Session::Ready { .. }) && request.initialize {
-            return Err("Legacy SSE upstream is already initialized".into());
-        }
-        let mut builder = client
-            .post(endpoint.clone())
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream");
-        if let Session::Ready { protocol, .. } = state {
-            builder = builder.header("MCP-Protocol-Version", protocol);
-        }
-        let (done, completed) = oneshot::channel();
-        if let (Some(key), Some(identifier)) = (&key, &request.identifier) {
-            pending.lock().await.insert(
-                key.clone(),
-                Pending {
-                    identifier: identifier.clone(),
-                    initialize: request.initialize,
-                    answered: answered.clone(),
-                    done,
-                },
-            );
-        }
-        let response = builder
-            .body(request.line.clone())
-            .send()
-            .await
-            .map_err(|_| "Legacy SSE POST failed; request was not replayed")?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            *session.lock().await = Session::Expired;
-            return Err("Legacy SSE session expired (HTTP 404); request was not replayed".into());
-        }
-        if !response.status().is_success() {
-            return Err(format!(
-                "Legacy SSE POST returned status {}; request was not replayed",
-                response.status().as_u16()
-            ));
-        }
-        if key.is_some() {
-            completed
+    let Some(budget) = &request.budget else {
+        send_error(
+            response_tx,
+            request.identifier.as_ref(),
+            "Legacy SSE request budget missing",
+        )
+        .await;
+        return;
+    };
+    let result = budget
+        .wait(async {
+            let state = session.lock().await.clone();
+            if matches!(state, Session::Expired) {
+                return Err(
+                    "Legacy SSE session expired; restart the upstream before sending requests"
+                        .into(),
+                );
+            }
+            if matches!(state, Session::Ready { .. }) && request.initialize {
+                return Err("Legacy SSE upstream is already initialized".into());
+            }
+            let (done, completed) = oneshot::channel();
+            if let (Some(key), Some(identifier)) = (&key, &request.identifier) {
+                pending.lock().await.insert(
+                    key.clone(),
+                    Pending {
+                        identifier: identifier.clone(),
+                        initialize: request.initialize,
+                        answered: answered.clone(),
+                        done,
+                    },
+                );
+            }
+            let mut builder = options
+                .authorize(client.post(endpoint.clone()))
+                .await?
+                .headers(HeaderMap::from_iter([
+                    (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                    (
+                        ACCEPT,
+                        HeaderValue::from_static("application/json, text/event-stream"),
+                    ),
+                ]));
+            if let Session::Ready { protocol, .. } = state {
+                let mut headers = HeaderMap::new();
+                headers.insert("MCP-Protocol-Version", protocol);
+                builder = builder.headers(headers);
+            }
+            let response = builder
+                .body(request.line.clone())
+                .send()
                 .await
-                .map_err(|_| "Legacy SSE response stream closed")?
-        } else {
-            Ok(())
-        }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        Err("Legacy SSE request deadline exceeded; request was not replayed".into())
-    });
+                .map_err(|_| "Legacy SSE POST failed; request was not replayed")?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                *session.lock().await = Session::Expired;
+                return Err(
+                    "Legacy SSE session expired (HTTP 404); request was not replayed".into(),
+                );
+            }
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Legacy SSE POST returned status {}; request was not replayed",
+                    response.status().as_u16()
+                ));
+            }
+            if key.is_some() {
+                completed
+                    .await
+                    .map_err(|_| "Legacy SSE response stream closed")?
+            } else {
+                Ok(())
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err("Legacy SSE request deadline exceeded; request was not replayed".into())
+        });
     if let Some(key) = key {
         pending.lock().await.remove(&key);
     }

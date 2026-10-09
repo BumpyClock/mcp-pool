@@ -16,7 +16,9 @@ pub(super) fn print_response_data(
     let (green, yellow, _red, reset) = colors(color);
 
     match request {
-        ControlRequest::Start { name } => println!("{green}started{reset} {name}"),
+        ControlRequest::Start { name } | ControlRequest::StartDefinition { name, .. } => {
+            println!("{green}started{reset} {name}")
+        }
         ControlRequest::StartAll => print_start_all(data.as_ref(), color),
         ControlRequest::Stop { name } => println!("{yellow}stopped{reset} {name}"),
         ControlRequest::Restart { name } => println!("{green}restarted{reset} {name}"),

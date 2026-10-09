@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) struct Generation {
-    pub request_tx: Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pub request_tx: Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
     pub clients: Arc<Mutex<HashMap<String, ClientSender>>>,
     pub request_map: RequestMap,
     pub handshake_cache: HandshakeCacheRef,
@@ -140,9 +140,22 @@ fn spawn_owner_with(
     let started_at = proxy.started_at.clone();
     let name = proxy.name.clone();
     let socket_path = proxy.socket_path.clone();
+    let (remote, shared_timeout) = match &proxy.spec {
+        UpstreamSpec::Stdio { .. } => (false, Duration::from_secs(REQUEST_TTL_SECS)),
+        UpstreamSpec::Http { timeout_ms, .. } => (
+            true,
+            crate::upstream_http::configured_request_timeout(*timeout_ms),
+        ),
+    };
     let weak_proxy = Arc::downgrade(proxy);
     tokio::spawn(async move {
-        let accept = tokio::spawn(accept_loop(listener, generation.clone(), name.clone()));
+        let accept = tokio::spawn(accept_loop(
+            listener,
+            generation.clone(),
+            name.clone(),
+            remote,
+            shared_timeout,
+        ));
         let expiration = tokio::spawn(expiration_loop(generation.clone()));
         let backend_generation = generation.clone();
         let backend_status = status.clone();
@@ -296,7 +309,13 @@ fn spawn_owner_with(
     });
 }
 
-async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, name: String) {
+async fn accept_loop(
+    listener: Arc<LocalListener>,
+    generation: Arc<Generation>,
+    name: String,
+    remote: bool,
+    shared_timeout: Duration,
+) {
     let mut tasks = tokio::task::JoinSet::new();
     let mut counter = 0u64;
     loop {
@@ -327,7 +346,8 @@ async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, 
                             state.request_map.clone(), state.handshake_cache.clone(),
                             state.client_capabilities.clone(), state.last_active_client.clone(),
                             state.clients.clone(), state.shutdown.clone(),
-                            state.shutdown_notify.clone(), state.expiration_changed.clone(), receiver,
+                            state.shutdown_notify.clone(), state.expiration_changed.clone(),
+                            remote, shared_timeout, receiver,
                         ).await;
                     });
                 }
@@ -368,20 +388,26 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
         if generation.shutdown.load(Ordering::SeqCst) {
             break;
         }
-        // Initialize followers share the leader's deadline, even after its client disconnects.
-        let request_deadline = generation
-            .request_map
-            .lock()
-            .values()
-            .map(|pending| pending.inserted_at + Duration::from_secs(REQUEST_TTL_SECS))
-            .min();
+        let request_deadline = {
+            let requests = generation.request_map.lock();
+            let cache = generation.handshake_cache.lock();
+            requests
+                .values()
+                .map(|pending| pending_expiration(pending, &cache))
+                .min()
+        };
         let waiter_deadline = generation
             .handshake_cache
             .lock()
             .tools_list
             .waiters
             .iter()
-            .map(|waiter| waiter.inserted_at + Duration::from_secs(REQUEST_TTL_SECS))
+            .map(|waiter| {
+                waiter
+                    .inserted_at
+                    .checked_add(waiter.expires_after)
+                    .unwrap_or_else(Instant::now)
+            })
             .min();
         let deadline = request_deadline.into_iter().chain(waiter_deadline).min();
         let wait_deadline = async {

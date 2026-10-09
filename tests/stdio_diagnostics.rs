@@ -46,7 +46,7 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     let mut daemon = Command::new(binary)
         .env("MCP_POOL_HOME", &home)
         .env(FIXTURE, "1")
-        .arg("serve")
+        .args(["pool", "serve"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

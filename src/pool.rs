@@ -37,7 +37,12 @@ impl Pool {
             .clone()
     }
 
-    pub async fn start(&self, name: &str, spec: UpstreamSpec) -> std::io::Result<()> {
+    pub async fn start(
+        &self,
+        name: &str,
+        spec: UpstreamSpec,
+        configuration_entry: Option<crate::config::ConfigurationEntry>,
+    ) -> std::io::Result<()> {
         let _gate = self.shutdown_gate.read().await;
         let operation = self.operation(name);
         let _operation = operation.lock().await;
@@ -45,6 +50,20 @@ impl Pool {
             return Err(std::io::Error::other("pool is shutting down"));
         }
         let existing = self.proxies.read().get(name).cloned();
+        if let Some(existing) = &existing
+            && existing.configuration_entry() != configuration_entry.as_ref()
+        {
+            return Err(std::io::Error::other(
+                "pool belongs to a different configuration entry",
+            ));
+        }
+        crate::diagnostics::logging::register_identity(
+            name,
+            configuration_entry
+                .as_ref()
+                .map_or(name, |entry| entry.name.as_str()),
+        )
+        .map_err(std::io::Error::other)?;
         if let Some(existing) = existing {
             match existing.status() {
                 crate::types::ServerStatus::Starting | crate::types::ServerStatus::Running => {
@@ -58,6 +77,7 @@ impl Pool {
             crate::config::server_socket_path(name),
             spec,
             true,
+            configuration_entry,
         ));
         // Publish before awaiting setup so status reports Starting, not absence.
         self.proxies.write().insert(name.to_string(), proxy.clone());
@@ -78,7 +98,7 @@ impl Pool {
             let pool = self.clone();
             starts.spawn(async move {
                 let error = pool
-                    .start(&name, spec)
+                    .start(&name, spec, None)
                     .await
                     .err()
                     .map(|error| error.to_string());
@@ -215,12 +235,15 @@ impl Pool {
                 command: String::new(),
                 args: Vec::new(),
                 env: BTreeMap::new(),
+                cwd: None,
+                clear_env: false,
             };
             let proxy = Arc::new(SocketProxy::new(
                 name.clone(),
                 path.clone(),
                 placeholder,
                 false,
+                None,
             ));
             self.proxies.write().insert(name, proxy);
             discovered += 1;
@@ -242,6 +265,7 @@ impl Pool {
                 owned: proxy.is_owned(),
                 transport: proxy.transport().to_string(),
                 readiness: proxy.readiness(),
+                configuration_entry: proxy.configuration_entry().cloned(),
             })
             .collect();
 
@@ -269,12 +293,17 @@ pub fn upstream_spec_from_def(def: &ServerDef) -> UpstreamSpec {
         UpstreamSpec::Http {
             url: def.url.clone(),
             sse: def.transport.eq_ignore_ascii_case("sse"),
+            headers: def.headers.clone(),
+            timeout_ms: def.timeout_ms,
+            auth: def.auth.clone().map(Box::new),
         }
     } else {
         UpstreamSpec::Stdio {
             command: def.command.clone(),
             args: def.args.clone(),
             env: def.env.clone(),
+            cwd: def.cwd.clone(),
+            clear_env: def.clear_env,
         }
     }
 }
@@ -308,4 +337,124 @@ pub fn socket_name_from_path(path: &Path) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+
+    #[test]
+    fn status_preserves_configuration_entry_ownership() -> std::io::Result<()> {
+        let entry = crate::config::ConfigurationEntry {
+            source: "fixture-source.json".into(),
+            name: "configured-server".into(),
+        };
+        let pool = Pool::new();
+        pool.insert_test_proxy(
+            "resolved-runtime",
+            Arc::new(SocketProxy::new(
+                "resolved-runtime".into(),
+                "unused-fixture-endpoint".into(),
+                upstream_spec_from_def(&ServerDef::default()),
+                true,
+                Some(entry.clone()),
+            )),
+        );
+        let status = pool.get_status();
+        let server = status
+            .servers
+            .first()
+            .ok_or_else(|| std::io::Error::other("missing registered server"))?;
+        assert_eq!(server.configuration_entry.as_ref(), Some(&entry));
+        let serialized = serde_json::to_value(server)?;
+        assert_eq!(
+            serialized.get("configuration_entry"),
+            Some(&serde_json::json!({
+                "source":"fixture-source.json", "name":"configured-server"
+            }))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_existing_runtime_cannot_be_claimed_by_another_entry() -> std::io::Result<()> {
+        let entry = crate::config::ConfigurationEntry {
+            source: "fixture-source.json".into(),
+            name: "configured-server".into(),
+        };
+        let pool = Pool::new();
+        pool.insert_test_proxy(
+            "resolved-runtime",
+            Arc::new(SocketProxy::new(
+                "resolved-runtime".into(),
+                "unused-fixture-endpoint".into(),
+                upstream_spec_from_def(&ServerDef::default()),
+                true,
+                Some(entry.clone()),
+            )),
+        );
+        let replacement = crate::config::ConfigurationEntry {
+            name: "another-server".into(),
+            ..entry.clone()
+        };
+        let result = pool
+            .start(
+                "resolved-runtime",
+                upstream_spec_from_def(&ServerDef::default()),
+                Some(replacement),
+            )
+            .await;
+        assert!(result.is_err());
+        let status = pool.get_status();
+        assert_eq!(status.server_count, 1);
+        assert_eq!(
+            status
+                .servers
+                .first()
+                .and_then(|server| server.configuration_entry.as_ref()),
+            Some(&entry)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_definition_preserves_transport_options() {
+        let definition = ServerDef {
+            command: "synthetic-command".into(),
+            args: vec!["synthetic-argument".into()],
+            env: BTreeMap::from([("SYNTHETIC_ENV".into(), "synthetic-value".into())]),
+            cwd: Some(std::path::PathBuf::from("synthetic-cwd")),
+            ..Default::default()
+        };
+        let stdio = upstream_spec_from_def(&definition);
+        assert!(
+            matches!(&stdio, UpstreamSpec::Stdio { command, args, env, cwd, clear_env: false }
+            if command == &definition.command && args == &definition.args
+            && env == &definition.env && cwd == &definition.cwd)
+        );
+        let captured = ServerDef {
+            clear_env: true,
+            ..definition
+        };
+        assert!(matches!(
+            upstream_spec_from_def(&captured),
+            UpstreamSpec::Stdio {
+                clear_env: true,
+                ..
+            }
+        ));
+        let remote = ServerDef {
+            url: "http://127.0.0.1:1/synthetic".into(),
+            transport: "SSE".into(),
+            headers: BTreeMap::from([("Authorization".into(), "synthetic-secret".into())]),
+            timeout_ms: Some(120_000),
+            ..Default::default()
+        };
+        let http = upstream_spec_from_def(&remote);
+        assert!(
+            matches!(&http, UpstreamSpec::Http { url, sse: true, headers, timeout_ms: Some(120_000), auth: None }
+            if url == &remote.url && headers == &remote.headers)
+        );
+        assert!(!format!("{http:?}").contains("synthetic-secret"));
+    }
 }

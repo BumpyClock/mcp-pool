@@ -8,7 +8,7 @@ pub(super) async fn route_server_request(
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
     last_active_client: &Arc<Mutex<Option<String>>>,
     client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
 ) {
     let method = value.get("method").and_then(Value::as_str).unwrap_or("?");
     if let Some(required) = required_capability(method) {
@@ -123,7 +123,7 @@ fn has_required_capability(
 
 async fn send_to_upstream(
     payload: String,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
     method: &str,
 ) {
     let sender = request_tx.lock().clone();
@@ -134,7 +134,7 @@ async fn send_to_upstream(
         ));
         return;
     };
-    if sender.send(payload).await.is_err() {
+    if sender.send(payload.into()).await.is_err() {
         diagnostics::log(format!(
             "pool_server_request_error_send_failed method={} reason=upstream_closed",
             method

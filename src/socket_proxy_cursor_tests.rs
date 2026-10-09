@@ -129,7 +129,7 @@ async fn cursor_result_does_not_complete_first_page_leader_or_followers() -> io:
         read(&mut page_client).await?,
         json!({"jsonrpc":"2.0","id":2,"result":second_page})
     );
-    assert!(state.handshake_cache.lock().tools_list.in_flight);
+    assert!(state.handshake_cache.lock().tools_list.in_flight.is_some());
     assert_eq!(state.handshake_cache.lock().tools_list.waiters.len(), 1);
     assert!(state.handshake_cache.lock().get("tools/list").is_none());
     let first_page = json!({"tools":[{"name":"first-page"}],"nextCursor":"page-two"});

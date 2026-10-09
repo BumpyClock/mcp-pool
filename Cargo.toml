@@ -9,21 +9,27 @@ publish = false
 
 [dependencies]
 anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+jsonc-parser = { version = "0.29", features = ["serde"] }
 parking_lot = "0.12"
+oauth2 = { version = "5", default-features = false, features = ["reqwest", "rustls-tls"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "io-std", "sync", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "io-util", "io-std", "sync", "time", "fs", "signal"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 toml = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

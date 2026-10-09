@@ -9,6 +9,7 @@ pub(super) async fn terminate_session(
     client: &reqwest::Client,
     url: &reqwest::Url,
     session: &Arc<Mutex<Session>>,
+    options: &Options,
 ) {
     let previous = std::mem::replace(&mut *session.lock().await, Session::Expired);
     let Session::Ready {
@@ -18,12 +19,21 @@ pub(super) async fn terminate_session(
     else {
         return;
     };
-    let request = client
-        .delete(url.clone())
-        .header(ACCEPT, "application/json, text/event-stream")
-        .header("Mcp-Session-Id", identifier)
-        .header("MCP-Protocol-Version", protocol)
-        .send();
+    let request = async {
+        options
+            .authorize(client.delete(url.clone()))
+            .await
+            .map_err(|_| ())?
+            .headers(HeaderMap::from_iter([(
+                ACCEPT,
+                HeaderValue::from_static("application/json, text/event-stream"),
+            )]))
+            .header("Mcp-Session-Id", identifier)
+            .header("MCP-Protocol-Version", protocol)
+            .send()
+            .await
+            .map_err(|_| ())
+    };
     match timeout(DELETE_TIMEOUT, request).await {
         Ok(Ok(response)) if response.status().is_success() => {}
         Ok(Ok(response)) if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED => {

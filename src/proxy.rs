@@ -30,7 +30,7 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
             // Socket not live: ask the daemon to start the upstream (idempotent,
             // auto-launches the daemon), then connect to the freshly bound socket.
             diagnostics::log(format!("proxy_autostart name={}", name));
-            if let Err(error) = crate::cli::ensure_started(name).await {
+            if let Err(error) = crate::daemon_client::ensure_started(name).await {
                 eprintln!("mcp-pool: could not start pool server '{name}': {error}");
                 std::process::exit(1);
             }
@@ -46,6 +46,16 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
         }
     };
 
+    bridge(stream, name).await
+}
+
+pub async fn run_resolved(name: &str, definition: &config::ServerDef) -> anyhow::Result<()> {
+    crate::daemon_client::ensure_definition_started(name, definition).await?;
+    let stream = connect_with_retry(&config::server_socket_path(name)).await?;
+    bridge(stream, name).await
+}
+
+async fn bridge(stream: transport::LocalStream, name: &str) -> anyhow::Result<()> {
     diagnostics::log(format!("proxy_connected name={}", name));
 
     let (reader, writer) = tokio::io::split(stream);

@@ -107,13 +107,14 @@ pub(super) async fn stop(handle: &mut UpstreamHandle) -> TestResult {
     Ok(())
 }
 
-pub(super) fn initialize(identifier: i64) -> String {
+pub(super) fn initialize(identifier: i64) -> crate::upstream::UpstreamRequest {
     serde_json::json!({
         "jsonrpc":"2.0", "id":identifier, "method":"initialize",
         "params":{"protocolVersion":"2025-03-26", "capabilities":{},
         "clientInfo":{"name":"fixture","version":"1"}}
     })
     .to_string()
+    .into()
 }
 
 #[tokio::test]
@@ -392,7 +393,8 @@ async fn expired_sessions_reject_later_requests_without_replay() -> TestResult {
             .request_tx
             .send(
                 serde_json::json!({"jsonrpc":"2.0","id":identifier,"method":"tools/call"})
-                    .to_string(),
+                    .to_string()
+                    .into(),
             )
             .await?;
         let response = message(&mut responses).await?;

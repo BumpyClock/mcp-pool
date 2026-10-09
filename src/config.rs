@@ -113,9 +113,18 @@ fn sanitize_socket_name(name: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationEntry {
+    pub source: PathBuf,
+    pub name: String,
+}
+
 /// A configured MCP server. Either a local stdio command or a remote HTTP/SSE URL.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ServerDef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_entry: Option<ConfigurationEntry>,
+
     /// Executable to run for stdio MCPs.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
@@ -128,6 +137,21 @@ pub struct ServerDef {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear_env: bool,
+
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<crate::oauth::HttpAuth>,
+
     /// URL for HTTP/SSE MCPs.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
@@ -139,6 +163,16 @@ pub struct ServerDef {
     /// Human-readable description.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+}
+
+impl std::fmt::Debug for ServerDef {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ServerDef")
+            .field("transport", &self.transport_kind())
+            .field("timeout_ms", &self.timeout_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ServerDef {
@@ -174,7 +208,10 @@ impl PoolConfig {
         }
         let contents = std::fs::read_to_string(&path)?;
         toml::from_str(&contents).map_err(|error| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("{}: {error}", path.display()))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {error}", path.display()),
+            )
         })
     }
 
@@ -183,8 +220,8 @@ impl PoolConfig {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let serialized = toml::to_string_pretty(self)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+        let serialized =
+            toml::to_string_pretty(self).map_err(|error| io::Error::other(error.to_string()))?;
         // Atomic write: temp file + rename.
         let temp = path.with_extension("toml.tmp");
         std::fs::write(&temp, serialized)?;
@@ -206,12 +243,36 @@ mod tests {
 
     #[test]
     fn server_def_transport_kind() {
-        let stdio = ServerDef { command: "npx".into(), ..Default::default() };
+        let stdio = ServerDef {
+            command: "npx".into(),
+            ..Default::default()
+        };
         assert_eq!(stdio.transport_kind(), "stdio");
-        let http = ServerDef { url: "http://x".into(), ..Default::default() };
+        let http = ServerDef {
+            url: "http://x".into(),
+            ..Default::default()
+        };
         assert_eq!(http.transport_kind(), "http");
-        let sse = ServerDef { url: "http://x".into(), transport: "sse".into(), ..Default::default() };
+        let sse = ServerDef {
+            url: "http://x".into(),
+            transport: "sse".into(),
+            ..Default::default()
+        };
         assert_eq!(sse.transport_kind(), "sse");
+    }
+
+    #[test]
+    fn server_debug_omits_connection_secrets() {
+        let definition = ServerDef {
+            url: "https://example.invalid/mcp?secret=fixture-secret".into(),
+            headers: BTreeMap::from([("Authorization".into(), "fixture-secret".into())]),
+            env: BTreeMap::from([("API_KEY".into(), "fixture-secret".into())]),
+            ..Default::default()
+        };
+        let formatted = format!("{definition:?}");
+        assert!(formatted.contains("http"));
+        assert!(!formatted.contains("fixture-secret"));
+        assert!(!formatted.contains("example.invalid"));
     }
 
     #[test]
@@ -219,7 +280,11 @@ mod tests {
         let mut cfg = PoolConfig::default();
         cfg.upsert(
             "echo",
-            ServerDef { command: "npx".into(), args: vec!["-y".into()], ..Default::default() },
+            ServerDef {
+                command: "npx".into(),
+                args: vec!["-y".into()],
+                ..Default::default()
+            },
         );
         let serialized = toml::to_string(&cfg).unwrap();
         let mut back: PoolConfig = toml::from_str(&serialized).unwrap();

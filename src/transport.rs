@@ -83,11 +83,18 @@ impl LocalListener {
         {
             let mut pending = self.pending_instance.lock().await;
             if pending.is_none() {
-                *pending = Some(crate::local_security::create_named_pipe(&self.pipe_name, false)?);
+                *pending = Some(crate::local_security::create_named_pipe(
+                    &self.pipe_name,
+                    false,
+                )?);
             }
-            let server = pending.as_ref().ok_or_else(|| io::Error::other("missing pending pipe"))?;
+            let server = pending
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing pending pipe"))?;
             server.connect().await?;
-            let server = pending.take().ok_or_else(|| io::Error::other("missing connected pipe"))?;
+            let server = pending
+                .take()
+                .ok_or_else(|| io::Error::other("missing connected pipe"))?;
             Ok(Box::new(server))
         }
     }
@@ -154,7 +161,11 @@ mod tests {
 
         let path = unique_endpoint();
         let listener = bind(&path)?;
-        assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
         let mut client = connect(&path).await?;
         let mut server = listener.accept().await?;
         client.write_all(b"retained").await?;

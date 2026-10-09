@@ -189,7 +189,7 @@ fn token_user_information(token: HANDLE) -> io::Result<Vec<usize>> {
 }
 
 fn token_user_sid(buffer: &[usize]) -> io::Result<*mut core::ffi::c_void> {
-    if buffer.len() * std::mem::size_of::<usize>() < std::mem::size_of::<TOKEN_USER>() {
+    if std::mem::size_of_val(buffer) < std::mem::size_of::<TOKEN_USER>() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "Windows token-user information is truncated",

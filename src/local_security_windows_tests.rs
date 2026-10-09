@@ -44,7 +44,8 @@ async fn connect_to_instance(name: &str, server: NamedPipeServer) -> io::Result<
         }
         Err(last_error)
     };
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+
+    tokio::time::timeout(Duration::from_secs(5), async {
         let (server_connection, client) = tokio::join!(server.connect(), connecting);
         server_connection?;
         let client = client?;
@@ -54,8 +55,7 @@ async fn connect_to_instance(name: &str, server: NamedPipeServer) -> io::Result<
         Ok(())
     })
     .await
-    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error.to_string()))?;
-    result
+    .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error.to_string()))?
 }
 
 #[test]

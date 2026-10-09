@@ -33,6 +33,7 @@ fn pending_request(
         cache_key: method.and_then(cacheable_method),
         tool: None,
         inserted_at: Instant::now(),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     }
 }
 
@@ -75,7 +76,7 @@ async fn route_response_with_capabilities(
     line: &str,
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
     client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
 ) {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     let cache = empty_cache();
@@ -265,7 +266,7 @@ async fn no_capable_client_sends_error_response_upstream() {
             roots: false,
         },
     );
-    let (upstream_tx, mut upstream_rx) = mpsc::channel::<String>(8);
+    let (upstream_tx, mut upstream_rx) = mpsc::channel::<crate::upstream::UpstreamRequest>(8);
     let request_tx = Arc::new(Mutex::new(Some(upstream_tx)));
 
     route_response_with_capabilities(

@@ -30,7 +30,7 @@ impl Daemon {
         tokio::fs::create_dir(home.join("config")).await?;
         tokio::fs::write(home.join("config").join("config.toml"), config).await?;
         let child = Command::new(BINARY)
-            .arg("serve")
+            .args(["pool", "serve"])
             .env("MCP_POOL_HOME", &home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())

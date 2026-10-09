@@ -29,6 +29,8 @@ pub struct McpServerStatus {
     pub owned: bool,
     pub transport: String,
     pub readiness: ServerReadiness,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configuration_entry: Option<crate::config::ConfigurationEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -14,7 +14,7 @@ type PendingForward = (
 pub(super) async fn handle_client(
     stream: LocalStream,
     client_id: String,
-    request_tx: Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    request_tx: Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
     upstream_ready: Arc<Notify>,
     id_allocator: Arc<IdAllocator>,
     request_map: RequestMap,
@@ -25,6 +25,8 @@ pub(super) async fn handle_client(
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
     expiration_changed: Arc<Notify>,
+    remote: bool,
+    shared_timeout: Duration,
     mut rx: mpsc::Receiver<String>,
 ) {
     diagnostics::log(format!(
@@ -78,7 +80,45 @@ pub(super) async fn handle_client(
                     // success response is already cached is answered directly,
                     // skipping the upstream entirely.
                     let action = match serde_json::from_str::<Value>(&line) {
-                        Ok(value) if value.is_object() => {
+                        Ok(mut value) if value.is_object() => 'message: {
+                            let timeout_ms = match crate::request_deadline::timeout_ms(&value) {
+                                Ok(timeout_ms) => timeout_ms,
+                                Err(error) => break 'message ClientAction::Cached(build_error_response(
+                                    non_null_id(&value).cloned().unwrap_or(Value::Null),
+                                    -32602,
+                                    &error,
+                                )),
+                            };
+                            let floor = Duration::from_secs(REQUEST_TTL_SECS).max(
+                                if cacheable_request(&value).is_some() { shared_timeout } else { Duration::ZERO }
+                            );
+                            let expires_after = timeout_ms
+                                .map(Duration::from_millis)
+                                .unwrap_or(floor)
+                                .max(floor);
+                            if Instant::now().checked_add(expires_after).is_none() {
+                                break 'message ClientAction::Cached(build_error_response(
+                                    non_null_id(&value).cloned().unwrap_or(Value::Null),
+                                    -32602,
+                                    "Pool request timeout exceeds the clock range",
+                                ));
+                            }
+                            let transport_timeout = timeout_ms.map(Duration::from_millis)
+                                .unwrap_or(shared_timeout).max(shared_timeout);
+                            let Some(transport_deadline) = Instant::now().checked_add(transport_timeout) else {
+                                break 'message ClientAction::Cached(build_error_response(
+                                    non_null_id(&value).cloned().unwrap_or(Value::Null),
+                                    -32602, "Pool request timeout exceeds the clock range",
+                                ));
+                            };
+                            let line = if !remote && timeout_ms.is_some() {
+                                if let Some(object) = value.as_object_mut() {
+                                    object.remove(crate::request_deadline::TIMEOUT_FIELD);
+                                }
+                                value.to_string()
+                            } else {
+                                line.clone()
+                            };
                             // Clone the original id (ending the borrow) before
                             // moving the object into `with_id`.
                             let original_id = non_null_id(&value).cloned();
@@ -118,6 +158,8 @@ pub(super) async fn handle_client(
                                                 &handshake_cache,
                                                 &client_id,
                                                 original_id.clone(),
+                                                expires_after,
+                                                transport_deadline,
                                             ) {
                                             DiscoveryAction::Cached(response) => {
                                                 diagnostics::log(format!(
@@ -147,6 +189,7 @@ pub(super) async fn handle_client(
                                                         cache_key,
                                                         tool: None,
                                                         inserted_at: Instant::now(),
+                                                        expires_after,
                                                     },
                                                 );
                                                 *last_active_client.lock() = Some(client_id.clone());
@@ -172,6 +215,8 @@ pub(super) async fn handle_client(
                                                 &handshake_cache,
                                                 &client_id,
                                                 original_id.clone(),
+                                                expires_after,
+                                                transport_deadline,
                                             ) {
                                                 DiscoveryAction::Cached(response) => {
                                                     diagnostics::log(format!(
@@ -202,6 +247,7 @@ pub(super) async fn handle_client(
                                                         cache_key,
                                                         tool: None,
                                                         inserted_at: Instant::now(),
+                                                        expires_after,
                                                     },
                                                 );
                                                 *last_active_client.lock() = Some(client_id.clone());
@@ -243,6 +289,7 @@ pub(super) async fn handle_client(
                                                 cache_key,
                                                 tool: tool.clone(),
                                                 inserted_at: Instant::now(),
+                                                expires_after,
                                             },
                                         );
                                         // Record this client as most-recently-active
@@ -357,6 +404,10 @@ pub(super) async fn handle_client(
                     };
 
                     let request_tx = request_tx.clone();
+                    let forward_deadline = forward_pool_id.and_then(|pool_id| {
+                        request_map.lock().get(&jsonrpc::id_key(&Value::from(pool_id)))
+                            .and_then(|pending| pending.cache_key)
+                    }).and_then(|method| handshake_cache.lock().deadline(method));
                     let upstream_ready = upstream_ready.clone();
                     let shutdown = shutdown.clone();
                     let request_map = request_map.clone();
@@ -377,7 +428,10 @@ pub(super) async fn handle_client(
                         }
                         let bytes = forward_line.len();
                         // Expiration and dispatch are atomic with respect to the request map.
-                        permit.send(forward_line);
+                        permit.send(crate::upstream::UpstreamRequest {
+                            line: forward_line,
+                            deadline: forward_deadline,
+                        });
                         drop(pending);
                         diagnostics::log(format!(
                             "pool_request_forwarded client_id={} method={}{} pool_id={} bytes={}",
@@ -460,7 +514,7 @@ pub(super) async fn handle_client(
         .retain(|_, pending| pending.client_id != client_id || pending.cache_key.is_some());
     {
         let mut cache = handshake_cache.lock();
-        if let Initialization::InFlight { waiters } = &mut cache.initialize {
+        if let Initialization::InFlight { waiters, .. } = &mut cache.initialize {
             waiters.retain(|waiter| waiter.client_id != client_id);
         }
         cache

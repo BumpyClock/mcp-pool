@@ -166,8 +166,15 @@ async fn definitive_legacy_disconnect_allows_same_proxy_restart_without_replay()
     let proxy = Arc::new(crate::socket_proxy::SocketProxy::new(
         format!("http-retirement-{port}"),
         path.clone(),
-        crate::upstream::UpstreamSpec::Http { url, sse: true },
+        crate::upstream::UpstreamSpec::Http {
+            url,
+            sse: true,
+            headers: Default::default(),
+            timeout_ms: None,
+            auth: None,
+        },
         true,
+        None,
     ));
     proxy.start().await?;
     let mut first = crate::transport::connect(&path).await?;

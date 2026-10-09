@@ -8,7 +8,7 @@ pub(super) async fn route_response(
     handshake_cache: &HandshakeCacheRef,
     last_active_client: &Arc<Mutex<Option<String>>>,
     client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
     recovery_tx: &mpsc::Sender<RecoveryReason>,
     recovery_requested: &Arc<AtomicBool>,
 ) {

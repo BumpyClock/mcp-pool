@@ -76,6 +76,7 @@ pub struct SocketProxy {
     socket_path: PathBuf,
     spec: UpstreamSpec,
     owned: bool,
+    configuration_entry: Option<crate::config::ConfigurationEntry>,
     operation: tokio::sync::Mutex<()>,
     stop_requested: AtomicBool,
     status: Arc<Mutex<ServerStatus>>,
@@ -86,12 +87,19 @@ pub struct SocketProxy {
 }
 
 impl SocketProxy {
-    pub fn new(name: String, socket_path: PathBuf, spec: UpstreamSpec, owned: bool) -> Self {
+    pub fn new(
+        name: String,
+        socket_path: PathBuf,
+        spec: UpstreamSpec,
+        owned: bool,
+        configuration_entry: Option<crate::config::ConfigurationEntry>,
+    ) -> Self {
         Self {
             name,
             socket_path,
             spec,
             owned,
+            configuration_entry,
             operation: tokio::sync::Mutex::new(()),
             stop_requested: AtomicBool::new(false),
             status: Arc::new(Mutex::new(if owned {
@@ -116,6 +124,10 @@ impl SocketProxy {
 
     pub fn is_owned(&self) -> bool {
         self.owned
+    }
+
+    pub fn configuration_entry(&self) -> Option<&crate::config::ConfigurationEntry> {
+        self.configuration_entry.as_ref()
     }
 
     pub fn transport(&self) -> &str {

@@ -219,6 +219,16 @@ async fn handle_connection(
 /// go through the shared `Arc<Pool>` and complete before their response is sent.
 async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse {
     match request {
+        ControlRequest::StartDefinition { name, definition } => {
+            let spec = upstream_spec_from_def(definition);
+            match pool
+                .start(name, spec, definition.configuration_entry.clone())
+                .await
+            {
+                Ok(()) => ControlResponse::ok(),
+                Err(error) => ControlResponse::err(error.to_string()),
+            }
+        }
         ControlRequest::Start { name } => {
             // Always reload config so a freshly-added server is startable without
             // restarting the daemon.
@@ -230,7 +240,7 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
                 return ControlResponse::err(format!("unknown server: {name}"));
             };
             let spec = upstream_spec_from_def(definition);
-            match pool.start(name, spec).await {
+            match pool.start(name, spec, None).await {
                 Ok(()) => ControlResponse::ok(),
                 Err(error) => ControlResponse::err(error.to_string()),
             }

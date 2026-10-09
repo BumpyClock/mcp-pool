@@ -486,7 +486,8 @@ async fn legacy_expired_endpoint_rejects_later_posts_without_replay() -> TestRes
             .request_tx
             .send(
                 serde_json::json!({"jsonrpc":"2.0","id":identifier,"method":"tools/call"})
-                    .to_string(),
+                    .to_string()
+                    .into(),
             )
             .await?;
         let response = message(&mut responses).await?;

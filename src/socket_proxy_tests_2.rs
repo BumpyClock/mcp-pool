@@ -33,6 +33,7 @@ fn pending_request(
         cache_key: method.and_then(cacheable_method),
         tool: None,
         inserted_at: Instant::now(),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     }
 }
 
@@ -382,13 +383,28 @@ async fn only_eligible_discovery_success_is_cached() {
 fn concurrent_tools_list_misses_create_one_leader_and_one_waiter() {
     let cache = empty_cache();
 
-    let first = prepare_tools_list_request(&cache, "clientA", json!(1));
-    let second = prepare_tools_list_request(&cache, "clientB", json!(2));
+    let first = prepare_tools_list_request(
+        &cache,
+        "clientA",
+        json!(1),
+        Duration::from_secs(REQUEST_TTL_SECS),
+        Instant::now(),
+    );
+    let second = prepare_tools_list_request(
+        &cache,
+        "clientB",
+        json!(2),
+        Duration::from_secs(REQUEST_TTL_SECS),
+        Instant::now(),
+    );
 
     assert!(matches!(first, DiscoveryAction::Leader));
     assert!(matches!(second, DiscoveryAction::Coalesced));
     let guard = cache.lock();
-    assert!(guard.tools_list.in_flight, "leader owns upstream discovery");
+    assert!(
+        guard.tools_list.in_flight.is_some(),
+        "leader owns upstream discovery"
+    );
     assert_eq!(guard.tools_list.waiters.len(), 1, "follower waits");
     assert_eq!(guard.tools_list.waiters[0].client_id, "clientB");
 }

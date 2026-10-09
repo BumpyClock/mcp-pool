@@ -13,17 +13,49 @@ use crate::upstream_process::OwnedProcess;
 
 const STDOUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
+#[cfg(test)]
 pub async fn spawn(
     command: String,
     args: Vec<String>,
     env: BTreeMap<String, String>,
     response_tx: mpsc::Sender<String>,
 ) -> io::Result<UpstreamHandle> {
+    spawn_with_cwd(command, args, env, None, response_tx).await
+}
+
+/// The configured environment overlays, rather than replaces, the parent's environment.
+#[cfg(test)]
+pub async fn spawn_with_cwd(
+    command: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    cwd: Option<std::path::PathBuf>,
+    response_tx: mpsc::Sender<String>,
+) -> io::Result<UpstreamHandle> {
+    spawn_configured(command, args, env, cwd, false, response_tx).await
+}
+
+pub async fn spawn_configured(
+    command: String,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    cwd: Option<std::path::PathBuf>,
+    clear_env: bool,
+    response_tx: mpsc::Sender<String>,
+) -> io::Result<UpstreamHandle> {
     #[cfg(windows)]
     let mut launch = {
         // Rust selects cmd.exe and its batch-specific encoder only for .cmd/.bat.
-        let mut launch = Command::new(resolve_windows_command(&command, &env)?);
+        let mut launch = Command::new(resolve_windows_command(
+            &command,
+            &env,
+            cwd.as_deref(),
+            clear_env,
+        )?);
         launch.args(args);
+        if clear_env {
+            launch.env_clear();
+        }
         launch
     };
     #[cfg(unix)]
@@ -37,6 +69,9 @@ pub async fn spawn(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cwd) = cwd {
+        launch.current_dir(cwd);
+    }
     let mut process = OwnedProcess::spawn(launch).await?;
     let pipes = (
         process.child.stdin.take(),
@@ -118,7 +153,7 @@ fn log_worker_result(worker: &str, result: io::Result<()>) {
 
 async fn write_requests(
     mut stdin: ChildStdin,
-    mut requests: mpsc::Receiver<String>,
+    mut requests: mpsc::Receiver<crate::upstream::UpstreamRequest>,
 ) -> io::Result<()> {
     while let Some(line) = requests.recv().await {
         stdin.write_all(line.as_bytes()).await?;
@@ -198,9 +233,11 @@ async fn read_stderr(stderr: ChildStderr) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn resolve_windows_command(
+pub(crate) fn resolve_windows_command(
     command: &str,
     environment: &BTreeMap<String, String>,
+    cwd: Option<&std::path::Path>,
+    clear_env: bool,
 ) -> io::Result<std::path::PathBuf> {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -210,16 +247,33 @@ fn resolve_windows_command(
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| OsString::from(value))
-            .or_else(|| std::env::var_os(name))
+            .or_else(|| {
+                if clear_env {
+                    None
+                } else {
+                    std::env::var_os(name)
+                }
+            })
     };
     let path = Path::new(command);
+    let directory = match cwd {
+        Some(path) => std::path::absolute(path)?,
+        None => std::env::current_dir()?,
+    };
+    let resolve = |path: PathBuf| {
+        if path.is_absolute() {
+            path
+        } else {
+            directory.join(path)
+        }
+    };
     let candidates: Vec<PathBuf> = if path.components().count() > 1 || path.is_absolute() {
-        vec![path.to_path_buf()]
+        vec![resolve(path.to_path_buf())]
     } else {
-        std::iter::once(PathBuf::from(command))
+        std::iter::once(directory.join(command))
             .chain(variable("PATH").into_iter().flat_map(|value| {
                 std::env::split_paths(&value)
-                    .map(|directory| directory.join(command))
+                    .map(|directory| resolve(directory.join(command)))
                     .collect::<Vec<_>>()
             }))
             .collect()
@@ -248,3 +302,124 @@ fn resolve_windows_command(
 #[cfg(test)]
 #[path = "upstream_process_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn relative_executable_is_resolved_from_configured_cwd() -> io::Result<()> {
+        let directory =
+            std::path::PathBuf::from(std::env::var("SystemRoot").map_err(io::Error::other)?)
+                .join("System32");
+        assert_eq!(
+            resolve_windows_command(".\\cmd.exe", &BTreeMap::new(), Some(&directory), false)?,
+            directory.join("cmd.exe")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_cwd_and_env_preserve_inherited_environment() -> io::Result<()> {
+        let directory = std::env::current_dir()?.join("src");
+        #[cfg(windows)]
+        let (command, arguments, inherited) = (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".into(),
+                "-Command".into(),
+                "[Console]::WriteLine((Get-Location).Path); [Console]::WriteLine($env:MCP_POOL_TRANSPORT_TEST_VALUE); [Console]::WriteLine($env:SystemRoot)".into(),
+            ],
+            std::env::var("SystemRoot").map_err(io::Error::other)?,
+        );
+        #[cfg(unix)]
+        let (command, arguments, inherited) = (
+            "sh".to_string(),
+            vec![
+                "-c".into(),
+                "pwd; printf '%s\\n' \"$MCP_POOL_TRANSPORT_TEST_VALUE\" \"$HOME\"".into(),
+            ],
+            std::env::var("HOME").map_err(io::Error::other)?,
+        );
+        let environment = BTreeMap::from([(
+            "MCP_POOL_TRANSPORT_TEST_VALUE".into(),
+            "synthetic-env-value".into(),
+        )]);
+        let (responses, mut receiver) = mpsc::channel(8);
+        let mut handle = spawn_with_cwd(
+            command,
+            arguments,
+            environment,
+            Some(directory.clone()),
+            responses,
+        )
+        .await?;
+        for expected in [
+            directory.to_string_lossy().into_owned(),
+            "synthetic-env-value".into(),
+            inherited,
+        ] {
+            let response = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other("stdio fixture ended before output"))?;
+            assert_eq!(response, expected);
+        }
+        handle.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clear_env_uses_only_the_captured_environment() -> io::Result<()> {
+        #[cfg(windows)]
+        let (command, arguments, absent) = {
+            assert!(std::env::var_os("USERPROFILE").is_some());
+            let command =
+                std::path::PathBuf::from(std::env::var("SystemRoot").map_err(io::Error::other)?)
+                    .join("System32")
+                    .join("cmd.exe")
+                    .to_string_lossy()
+                    .into_owned();
+            (
+                command,
+                vec![
+                    "/d".into(),
+                    "/c".into(),
+                    "echo %MCP_POOL_TRANSPORT_TEST_VALUE%&echo %USERPROFILE%".into(),
+                ],
+                "%USERPROFILE%",
+            )
+        };
+        #[cfg(unix)]
+        let (command, arguments, absent) = {
+            assert!(std::env::var_os("HOME").is_some());
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "printf '%s\\n' \"$MCP_POOL_TRANSPORT_TEST_VALUE\" \"${HOME-unset}\"".into(),
+                ],
+                "unset",
+            )
+        };
+        let (responses, mut receiver) = mpsc::channel(4);
+        let environment = BTreeMap::from([(
+            "MCP_POOL_TRANSPORT_TEST_VALUE".into(),
+            "synthetic-captured-value".into(),
+        )]);
+        let mut handle =
+            spawn_configured(command, arguments, environment, None, true, responses).await?;
+        for expected in ["synthetic-captured-value", absent] {
+            let response = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .map_err(io::Error::other)?
+                .ok_or_else(|| {
+                    io::Error::other("captured-environment fixture ended before output")
+                })?;
+            assert_eq!(response, expected);
+        }
+        handle.shutdown().await?;
+        Ok(())
+    }
+}
