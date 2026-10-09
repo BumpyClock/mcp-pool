@@ -17,63 +17,31 @@ pub struct LocalListener {
     inner: tokio::net::UnixListener,
     #[cfg(windows)]
     pipe_name: String,
-    // Holds the exclusive first pipe instance created eagerly in bind(). The
-    // first accept() consumes it; interior mutability is required because
-    // accept() takes &self. A parking_lot Mutex keeps this sync-only so the
-    // guard is never held across an .await.
+    // Holds the secured exclusive first pipe instance created eagerly in bind().
+    // Later accepts create instances with the same DACL and remote-client rule.
     #[cfg(windows)]
-    first_instance:
-        parking_lot::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
+    first_instance: parking_lot::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
 }
 
 /// Bind a listening endpoint at `path`.
-/// - Unix: a Unix domain socket file. The parent dir is created, then bind is
-///   attempted directly; an `AddrInUse` error is resolved by probing for a live
-///   listener so a live owner wins (the caller exits) while only a genuinely
-///   stale file is removed and rebound.
+/// - Unix: private application directories, a mode-0600 socket, and same-user
+///   peer checks; only a validated same-user stale socket can be removed.
 /// - Windows: eagerly creates the first pipe instance with
-///   `first_pipe_instance(true)`, claiming the name exclusively so a second
-///   process binding the same name fails. Later accepts create more instances.
+///   `first_pipe_instance(true)`, an owner-only DACL, and remote-client
+///   rejection. Later accepts create instances with the same protections.
 pub fn bind(path: &Path) -> io::Result<LocalListener> {
     #[cfg(unix)]
     {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        // Singleton semantics: do NOT unconditionally unlink before bind. Two
-        // cold-start daemons could otherwise both unlink and then bind separate
-        // listeners on the same path (split brain). Instead bind first and only
-        // on AddrInUse distinguish a live owner from a stale leftover file.
-        match tokio::net::UnixListener::bind(path) {
-            Ok(inner) => Ok(LocalListener { inner }),
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                // A successful connect means a live daemon already owns this
-                // path, so this losing daemon must surface AddrInUse and exit.
-                if std::os::unix::net::UnixStream::connect(path).is_ok() {
-                    return Err(error);
-                }
-                // No listener answered: the socket file is a stale leftover from
-                // a daemon that crashed without cleaning up. Best-effort remove
-                // (it may already be gone) then retry the bind exactly once.
-                let _ = std::fs::remove_file(path);
-                let inner = tokio::net::UnixListener::bind(path)?;
-                Ok(LocalListener { inner })
-            }
-            Err(error) => Err(error),
-        }
+        let inner = crate::local_security::bind_unix_listener(path)?;
+        Ok(LocalListener { inner })
     }
 
     #[cfg(windows)]
     {
         let pipe_name = path.to_string_lossy().to_string();
-        // first_pipe_instance(true) gives Windows named pipes the singleton
-        // semantics UnixListener::bind already provides: if another process
-        // owns an instance of this name the OS rejects creation with
-        // ERROR_ACCESS_DENIED, so the losing daemon's bind() errors and that
-        // process exits, leaving exactly one pool owner.
-        let first_instance = tokio::net::windows::named_pipe::ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&pipe_name)?;
+        // The first pipe instance claims the name exclusively so a second
+        // daemon cannot start even when it supplies the same DACL.
+        let first_instance = crate::local_security::create_named_pipe(&pipe_name, true)?;
         Ok(LocalListener {
             pipe_name,
             first_instance: parking_lot::Mutex::new(Some(first_instance)),
@@ -85,14 +53,15 @@ pub fn bind(path: &Path) -> io::Result<LocalListener> {
 pub async fn connect(path: &Path) -> io::Result<LocalStream> {
     #[cfg(unix)]
     {
-        let stream = tokio::net::UnixStream::connect(path).await?;
+        let endpoint = crate::local_security::validate_unix_socket_path(path)?;
+        let stream = tokio::net::UnixStream::connect(endpoint).await?;
+        crate::local_security::verify_unix_peer(&stream)?;
         Ok(Box::new(stream))
     }
 
     #[cfg(windows)]
     {
-        let client = tokio::net::windows::named_pipe::ClientOptions::new()
-            .open(path.to_string_lossy().as_ref())?;
+        let client = crate::local_security::connect_named_pipe(path)?;
         Ok(Box::new(client))
     }
 }
@@ -107,6 +76,7 @@ impl LocalListener {
         #[cfg(unix)]
         {
             let (stream, _) = self.inner.accept().await?;
+            crate::local_security::verify_unix_peer(&stream)?;
             Ok(Box::new(stream))
         }
 
@@ -117,8 +87,7 @@ impl LocalListener {
             let pre_created = self.first_instance.lock().take();
             let server = match pre_created {
                 Some(server) => server,
-                None => tokio::net::windows::named_pipe::ServerOptions::new()
-                    .create(&self.pipe_name)?,
+                None => crate::local_security::create_named_pipe(&self.pipe_name, false)?,
             };
             server.connect().await?;
             Ok(Box::new(server))
@@ -160,5 +129,24 @@ mod tests {
         }
         assert!(connected, "client could not connect to bound endpoint");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_live_listener_keeps_singleton_bind_ownership() -> io::Result<()> {
+        let path = unique_endpoint();
+        let listener = bind(&path)?;
+        let duplicate = bind(&path);
+        #[cfg(unix)]
+        assert_eq!(
+            duplicate.err().map(|error| error.kind()),
+            Some(io::ErrorKind::AddrInUse)
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            duplicate.err().map(|error| error.kind()),
+            Some(io::ErrorKind::PermissionDenied)
+        );
+        drop(listener);
+        Ok(())
     }
 }
