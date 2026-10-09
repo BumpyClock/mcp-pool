@@ -335,6 +335,7 @@ fn configured_secret(
     Ok(())
 }
 
+/// Matching OAuth denial callbacks are terminal; unrelated invalid callbacks are ignored.
 pub(super) async fn callback(
     listener: &TcpListener,
     redirect: &Url,
@@ -408,7 +409,6 @@ pub(super) async fn callback(
         };
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
-        // A denied consent must terminate; unsolicited invalid callbacks do not.
         if valid {
             return result;
         }

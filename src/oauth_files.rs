@@ -163,6 +163,7 @@ fn private_file(path: &Path) -> std::io::Result<File> {
         .open(path)
 }
 
+/// Creates credential files with the protected DACL before any bytes are written.
 #[cfg(windows)]
 fn private_file(path: &Path) -> std::io::Result<File> {
     use std::os::windows::ffi::OsStrExt;
@@ -200,7 +201,6 @@ fn with_security<T>(
         .encode_utf16()
         .collect();
     let mut descriptor = std::ptr::null_mut();
-    // The protected DACL is applied at creation, before any secret is written.
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             security.as_ptr(),
@@ -259,6 +259,7 @@ pub(super) struct Lock {
     contents: String,
 }
 
+/// Releases locks on a blocking thread when cancellation cannot await cleanup.
 pub(super) struct AsyncLocks(Option<Vec<Lock>>);
 
 impl AsyncLocks {
@@ -275,7 +276,6 @@ impl AsyncLocks {
 impl Drop for AsyncLocks {
     fn drop(&mut self) {
         if let Some(locks) = self.0.take() {
-            // Cancellation/error paths must not perform Windows retry sleeps on the reactor.
             tokio::task::spawn_blocking(move || drop(locks));
         }
     }

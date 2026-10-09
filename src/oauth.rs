@@ -36,7 +36,7 @@ mod test_support;
 #[path = "oauth_tests.rs"]
 mod tests;
 
-/// Persisted transport context deliberately excludes tokens and client secrets.
+/// Carries authentication and storage context, not token or client-secret values.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HttpAuth {
     pub server_name: String,

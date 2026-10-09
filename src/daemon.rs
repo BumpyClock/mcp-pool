@@ -22,25 +22,13 @@ impl Drop for ShutdownSignal {
     }
 }
 
-/// Long-lived daemon: binds the control socket, holds the `Pool`, and dispatches
-/// control requests from CLI clients.
-///
-/// Framing: newline-delimited JSON. Exactly one request line in -> one response
-/// line out (see control.rs contracts). Per-connection tasks share `Arc<Pool>`.
 pub async fn serve() -> anyhow::Result<()> {
     diagnostics::init_from_env();
 
-    // The daemon runs in the foreground here (whether launched directly via
-    // `mcp-pool serve --debug` or auto-spawned). When debug logging is on, mirror
-    // it to stderr so a terminal-run daemon shows logs live; an auto-spawned
-    // daemon has stderr redirected to null, so this is harmless there.
     if diagnostics::is_enabled() {
         diagnostics::set_stderr_mirror(true);
     }
 
-    // Validate config up front so a malformed file is surfaced immediately, but
-    // keep running either way: dispatch reloads it on Start so a fixed
-    // config becomes effective without restarting the daemon.
     if let Err(error) = PoolConfig::load() {
         diagnostics::log(format!("config load failed at startup: {error}"));
     }
@@ -51,11 +39,6 @@ pub async fn serve() -> anyhow::Result<()> {
         "daemon starting; discovered {discovered} existing socket(s)"
     ));
 
-    // Bind the control socket. Do NOT pre-remove a stale unix socket file here:
-    // transport::bind() now distinguishes a live daemon (AddrInUse + a successful
-    // connect probe means we lose and exit) from a stale leftover (probe fails, so
-    // bind removes and rebinds). Unlinking first would reopen the cold-start
-    // split-brain race where two daemons each unlink then bind separate listeners.
     let control_path = control_socket_path();
 
     let listener = transport::bind(&control_path)?;
@@ -64,11 +47,6 @@ pub async fn serve() -> anyhow::Result<()> {
         control_path.display()
     ));
 
-    // Warm the whole pool on boot: start every configured server so their upstreams
-    // boot concurrently (each in its own background task) instead of lazily, one at
-    // a time, as proxy clients connect. Run it in a spawned task so the control
-    // accept loop below starts IMMEDIATELY — doing this inline delays the first
-    // accept and breaks the first control connection on a cold-launched daemon.
     {
         let warm_pool = Arc::clone(&pool);
         tokio::spawn(async move {
@@ -103,8 +81,6 @@ pub async fn serve() -> anyhow::Result<()> {
             break;
         }
 
-        // Accept outside the per-connection task so a single listener serializes
-        // inbound connections; each accepted stream is handled independently.
         let accepted = tokio::select! {
             _ = &mut notified => break,
             accepted = listener.accept() => accepted,
@@ -113,8 +89,6 @@ pub async fn serve() -> anyhow::Result<()> {
             Ok(stream) => stream,
             Err(error) => {
                 diagnostics::log(format!("accept failed: {error}"));
-                // A transient accept error shouldn't kill the daemon. If shutdown
-                // was requested concurrently the loop guard catches it next iter.
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
@@ -130,8 +104,6 @@ pub async fn serve() -> anyhow::Result<()> {
         });
     }
 
-    // Cleanup the control socket on exit (unix). Best-effort: a failed unlink
-    // shouldn't mask the real outcome.
     #[cfg(unix)]
     {
         if let Err(error) = std::fs::remove_file(&control_path)
@@ -144,16 +116,13 @@ pub async fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read one newline-delimited request, dispatch it, and write one response.
-/// A successful shutdown response confirms pool retirement before stopping accepts.
+/// A successful shutdown retires the pool before acknowledging and stopping accepts.
 async fn handle_connection(
     stream: transport::LocalStream,
     pool: Arc<Pool>,
     shutdown: Arc<AtomicBool>,
     shutdown_notify: Arc<Notify>,
 ) {
-    // Split into reader/writer so the request can be parsed incrementally while
-    // the response reuses the same underlying stream.
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
 
@@ -167,7 +136,6 @@ async fn handle_connection(
         }
     };
     if bytes_read == 0 {
-        // Client connected then disconnected without sending a request.
         return;
     }
 
@@ -185,7 +153,6 @@ async fn handle_connection(
             )
         }
     };
-    // A vanished shutdown client must not strand an already-retired daemon.
     let _shutdown_signal = if is_shutdown && response.ok {
         Some(ShutdownSignal {
             shutdown,
@@ -195,8 +162,6 @@ async fn handle_connection(
         None
     };
 
-    // Serialize + write + flush BEFORE any shutdown side effects, so the client
-    // always receives its ack before the listener stops accepting.
     let mut payload = match serde_json::to_string(&response) {
         Ok(serialized) => serialized,
         Err(error) => {
@@ -215,8 +180,6 @@ async fn handle_connection(
     }
 }
 
-/// Map a control request to its response. Pure translation: all pool mutations
-/// go through the shared `Arc<Pool>` and complete before their response is sent.
 async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse {
     let result = match request {
         ControlRequest::StartDefinition { name, definition } => {
@@ -225,8 +188,6 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
                 .await
         }
         ControlRequest::Start { name } => {
-            // Always reload config so a freshly-added server is startable without
-            // restarting the daemon.
             let config = match PoolConfig::load() {
                 Ok(config) => config,
                 Err(error) => return ControlResponse::err(error.to_string()),

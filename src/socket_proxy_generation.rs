@@ -50,10 +50,10 @@ impl Generation {
         self.close();
     }
 
+    /// Confirms retirement without unlinking a socket this generation failed to bind.
     pub fn fail_binding(&self, error: &io::Error) {
         self.startup_tx.send_replace(Some(Err(error.to_string())));
         self.close();
-        // Binding acquired no backend or local tasks, and must not unlink another owner's socket.
         self.completion_tx.send_replace(Some(Ok(())));
     }
 
@@ -123,6 +123,8 @@ pub(super) type TestSetup = (
     mpsc::Receiver<String>,
 );
 
+/// Owns setup through retirement, including children created before shutdown.
+/// `ResourceBusy` leaves retirement unverified; shutdown can cancel slow client delivery.
 fn spawn_owner_with(
     proxy: &Arc<SocketProxy>,
     generation: Arc<Generation>,
@@ -161,7 +163,6 @@ fn spawn_owner_with(
             let started_at = backend_started_at;
             let name = backend_name;
             let (recovery_tx, mut recovery_rx) = mpsc::channel(8);
-            // Never cancel spawn: it can already own a child that must be retired.
             let spawned = setup.await;
             let mut recover = false;
             let retirement = match spawned {
@@ -194,7 +195,6 @@ fn spawn_owner_with(
                                 }
                                 *status.lock() = ServerStatus::Stopping;
                                 generation.request_tx.lock().take();
-                                // Terminal completion can precede routing buffered final responses.
                                 tokio::select! {
                                     _ = &mut shutdown => {}
                                     drained = tokio::time::timeout(Duration::from_millis(250), async {
@@ -222,7 +222,6 @@ fn spawn_owner_with(
                             }
                             message = response_rx.recv() => {
                                 let Some(message) = message else { break };
-                                // Slow client channels must not delay backend retirement.
                                 tokio::select! {
                                     _ = &mut shutdown => break,
                                     _ = generation.route(&message, &recovery_tx) => {}
@@ -242,7 +241,6 @@ fn spawn_owner_with(
                         .startup_tx
                         .send_replace(Some(Err(error.to_string())));
                     generation.close();
-                    // ResourceBusy explicitly means partial setup could not be retired.
                     if error.kind() == io::ErrorKind::ResourceBusy {
                         Err(error.to_string())
                     } else {
@@ -354,7 +352,6 @@ async fn accept_loop(
             }
         }
     }
-    // Flush queued terminal errors, but do not let slow clients block retirement.
     if tokio::time::timeout(
         Duration::from_millis(250),
         drain_client_tasks(&mut tasks, &name),
@@ -371,6 +368,7 @@ async fn accept_loop(
     }
 }
 
+/// Bounds timeout delivery so one stalled client cannot block later deadlines or shutdown.
 pub(super) async fn expiration_loop(generation: Arc<Generation>) {
     loop {
         let shutdown = generation.shutdown_notify.notified();
@@ -416,7 +414,6 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
                 let responses = expire_pending_requests(
                     &generation.request_map, &generation.handshake_cache,
                 );
-                // A stalled client must not prevent the next deadline or retirement.
                 for (client_id, payload) in responses {
                     tokio::select! {
                         _ = &mut shutdown => return,

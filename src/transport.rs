@@ -3,31 +3,27 @@ use std::path::Path;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-/// Combined read+write trait so a single `dyn` object can stand in for both
-/// Unix sockets and Windows named pipes.
 pub trait LocalIo: AsyncRead + AsyncWrite {}
 impl<T> LocalIo for T where T: AsyncRead + AsyncWrite {}
 
-/// Unified bidirectional local stream. Boxed trait object so Unix domain sockets
-/// and Windows named pipes share one type across the multiplexer and proxy code.
 pub type LocalStream = Box<dyn LocalIo + Unpin + Send>;
 
+/// Retains an unaccepted Windows pipe instance across cancelled `accept` futures.
 pub struct LocalListener {
     #[cfg(unix)]
     inner: tokio::net::UnixListener,
     #[cfg(windows)]
     pipe_name: String,
-    // Keep pending instances in the listener because select! may cancel accept.
     #[cfg(windows)]
     pending_instance: tokio::sync::Mutex<Option<tokio::net::windows::named_pipe::NamedPipeServer>>,
 }
 
-/// Bind a listening endpoint at `path`.
-/// - Unix: private application directories, a mode-0600 socket, and same-user
-///   peer checks; only a validated same-user stale socket can be removed.
-/// - Windows: eagerly creates the first pipe instance with
-///   `first_pipe_instance(true)`, an owner-only DACL, and remote-client
-///   rejection. Later accepts create instances with the same protections.
+/// Binds a same-user endpoint without unlinking a live listener first.
+///
+/// Unix uses private directories, a mode-0600 socket, and peer checks; only a
+/// validated same-user stale socket can be removed. Windows claims the first
+/// pipe instance exclusively and applies an owner-only DACL with remote-client
+/// rejection to every instance.
 pub fn bind(path: &Path) -> io::Result<LocalListener> {
     #[cfg(unix)]
     {
@@ -38,8 +34,6 @@ pub fn bind(path: &Path) -> io::Result<LocalListener> {
     #[cfg(windows)]
     {
         let pipe_name = path.to_string_lossy().to_string();
-        // The first pipe instance claims the name exclusively so a second
-        // daemon cannot start even when it supplies the same DACL.
         let first_instance = crate::local_security::create_named_pipe(&pipe_name, true)?;
         Ok(LocalListener {
             pipe_name,
@@ -48,7 +42,6 @@ pub fn bind(path: &Path) -> io::Result<LocalListener> {
     }
 }
 
-/// Connect to a bound endpoint as a client.
 pub async fn connect(path: &Path) -> io::Result<LocalStream> {
     #[cfg(unix)]
     {
@@ -66,11 +59,6 @@ pub async fn connect(path: &Path) -> io::Result<LocalStream> {
 }
 
 impl LocalListener {
-    /// Accept one client connection and return a unified stream.
-    ///
-    /// On Windows the first accept reuses the exclusive instance created in
-    /// bind(); every later accept creates a fresh instance, which must NOT set
-    /// first_pipe_instance (only the first instance of a name may claim it).
     pub async fn accept(&self) -> io::Result<LocalStream> {
         #[cfg(unix)]
         {
@@ -110,8 +98,6 @@ mod tests {
     fn unique_endpoint() -> std::path::PathBuf {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let name = format!("test-{}-{n}", std::process::id());
-        // Reuse the production path helper so the endpoint matches the real
-        // socket/pipe scheme on every platform (and avoids a backslash literal).
         crate::config::server_socket_path(&name)
     }
 
@@ -122,8 +108,6 @@ mod tests {
         let server = tokio::spawn(async move {
             listener.accept().await.expect("accept failed");
         });
-        // On Windows the listener creates its pipe instance lazily inside
-        // accept(), so the client may need to retry until it rendezvouses.
         let mut connected = false;
         for _ in 0..50 {
             if connect(&path).await.is_ok() {

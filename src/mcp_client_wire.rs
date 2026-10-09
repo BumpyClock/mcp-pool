@@ -27,8 +27,7 @@ pub(super) async fn write_message(
     Ok(())
 }
 
-// An outer error means the stream can no longer be trusted. An inner error is
-// a valid JSON-RPC rejection and leaves the session available for another call.
+/// Outer errors mean the stream is unusable; inner errors are valid JSON-RPC rejections.
 pub(super) async fn receive_result(
     reader: &mut BufReader<LocalStream>,
     request_id: u64,

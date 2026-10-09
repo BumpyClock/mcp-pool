@@ -8,7 +8,7 @@ pub(super) struct Event {
     pub data: String,
 }
 
-// Completed events precede the terminal error, including within one transport chunk.
+/// Preserves completed events that precede an error in the same input chunk.
 #[must_use]
 pub(super) struct Feed {
     pub events: Vec<Event>,
@@ -177,7 +177,6 @@ mod tests {
         ] {
             let prefix = b"event: message\r\ndata: {\"id\":7,\"result\":{}}\r\n\r\n";
             let bytes = [prefix.as_slice(), suffix.as_slice()].concat();
-            // Exercise every boundary around dispatch and UTF-8; sample the large frame's interior.
             let boundaries =
                 (0..=prefix.len() + 2).chain([bytes.len() / 2, bytes.len() - 1, bytes.len()]);
             for boundary in boundaries {

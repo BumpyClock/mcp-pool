@@ -12,6 +12,7 @@ struct Pending {
 
 type Requests = Arc<Mutex<HashMap<String, Pending>>>;
 
+/// Requires discovered endpoints to retain the stream's origin and user information and omit fragments.
 pub(super) async fn spawn(
     client: reqwest::Client,
     url: reqwest::Url,
@@ -59,7 +60,6 @@ pub(super) async fn spawn(
                         let candidate = url
                             .join(&event.data)
                             .map_err(|_| "Legacy SSE advertised an invalid message endpoint")?;
-                        // The discovery stream cannot redirect credentials or messages to another origin.
                         if candidate.origin() != url.origin()
                             || candidate.username() != url.username()
                             || candidate.password() != url.password()
@@ -165,6 +165,7 @@ async fn receive(
     result
 }
 
+/// Keeps the event stream open while idle; per-request budgets bound pending work.
 async fn receive_events(
     response: &mut reqwest::Response,
     decoder: &mut sse_parser::Decoder,
@@ -173,7 +174,6 @@ async fn receive_events(
     response_tx: &mpsc::Sender<String>,
 ) -> Result<(), String> {
     loop {
-        // Idle time does not retire a persistent pool; execute bounds each pending request.
         let chunk = response
             .chunk()
             .await

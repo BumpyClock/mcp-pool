@@ -49,7 +49,6 @@ fn arguments(literals: &[&str]) -> Vec<String> {
         FIXTURE_TEST.to_string(),
         "--nocapture".to_string(),
     ];
-    // The test harness accepts arbitrary literals as skip filters.
     for literal in literals {
         arguments.push("--skip".to_string());
         arguments.push((*literal).to_string());

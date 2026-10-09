@@ -81,7 +81,6 @@ async fn pooled_http_notifications_broadcast_survive_idle_and_cancel_on_disconne
     }
     wait_for_connections(&fixture, 3).await?;
 
-    // A timed-out tool request retires only the ordinary call connection.
     let failed = call(
         &client,
         &url,

@@ -311,7 +311,6 @@ async fn dropping_handle_retires_process_tree() -> io::Result<()> {
     })
     .await
     .map_err(io::Error::other)?;
-    // Pipe closure happens before verified retirement, so observe the processes.
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let mut alive = false;

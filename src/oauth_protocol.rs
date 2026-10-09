@@ -74,6 +74,7 @@ fn well_known(base: &Url, kind: &str, insert_path: bool) -> Url {
     url
 }
 
+/// Existing credentials stay bound to their issuer; changed issuers require explicit reauthorization.
 pub(super) async fn discover(
     authentication: &HttpAuth,
     snapshot: &Value,
@@ -122,7 +123,6 @@ pub(super) async fn discover(
             .get("authorization_servers")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow::anyhow!("resource metadata has no authorization servers"))?;
-        // Preserve an existing issuer rather than switching among advertised providers.
         let bound = string(snapshot, "authorizationServerUrl").or_else(|| {
             snapshot
                 .get("tokens")

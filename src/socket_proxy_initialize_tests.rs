@@ -176,7 +176,6 @@ async fn concurrent_socket_initialize_has_one_leader_and_one_shared_lifecycle() 
             .any(|value| value.roots && !value.sampling)
     );
 
-    // Per-client ping barriers prove both initialized notifications were consumed.
     send(
         first.get_mut(),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),

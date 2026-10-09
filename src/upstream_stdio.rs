@@ -11,6 +11,7 @@ use crate::diagnostics;
 use crate::upstream::UpstreamHandle;
 use crate::upstream_process::OwnedProcess;
 
+/// Bounds draining after retirement because descendants may inherit stdout writers.
 const STDOUT_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
@@ -23,7 +24,6 @@ pub async fn spawn(
     spawn_with_cwd(command, args, env, None, response_tx).await
 }
 
-/// The configured environment overlays, rather than replaces, the parent's environment.
 #[cfg(test)]
 pub async fn spawn_with_cwd(
     command: String,
@@ -44,7 +44,6 @@ pub async fn spawn_configured(
     response_tx: mpsc::Sender<String>,
 ) -> io::Result<UpstreamHandle> {
     #[cfg(windows)]
-    // Rust selects cmd.exe and its batch-specific encoder only for .cmd/.bat.
     let command = resolve_windows_command(&command, &env, cwd.as_deref(), clear_env)?;
     let mut launch = Command::new(command);
     launch.args(args);
@@ -87,7 +86,6 @@ pub async fn spawn_configured(
                 let requests = write_requests(stdin, request_rx);
                 let errors = async move {
                     read_stderr(stderr).await?;
-                    // Closing stderr alone is valid and must not stop the upstream.
                     std::future::pending::<io::Result<()>>().await
                 };
                 tokio::select! {
@@ -113,8 +111,6 @@ pub async fn spawn_configured(
             };
             let result = process.retire().await.map_err(|error| error.to_string());
             if natural_exit && result.is_ok() {
-                // Retiring descendants closes inherited stdout writers first.
-                // Bound forwarding so a full response queue cannot hold completion.
                 match tokio::time::timeout(STDOUT_DRAIN_TIMEOUT, &mut responses).await {
                     Ok(result) => log_worker_result("stdout_drain", result),
                     Err(_) => diagnostics::log("upstream_stdout_drain_timeout"),
@@ -195,6 +191,7 @@ async fn read_responses(stdout: ChildStdout, responses: mpsc::Sender<String>) ->
     }
 }
 
+/// A closed stderr pipe alone does not establish that the upstream process exited.
 async fn read_stderr(stderr: ChildStderr) -> io::Result<()> {
     let raw = std::env::var("MCP_POOL_RAW_UPSTREAM_STDERR")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))

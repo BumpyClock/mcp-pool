@@ -113,6 +113,7 @@ fn absolute_source(source: &Path) -> Result<PathBuf> {
     }
 }
 
+/// Omits parser details from errors because they can contain credentials.
 fn parse_with_environment(
     source: &Path,
     contents: &str,
@@ -129,7 +130,6 @@ fn parse_with_environment(
         allow_hexadecimal_numbers: false,
         allow_unary_plus_numbers: false,
     };
-    // Parser and deserializer errors can contain config values, including credentials.
     let raw = jsonc_parser::parse_to_serde_value(contents.trim_start_matches('\u{feff}'), &options)
         .map_err(|_| anyhow!("invalid JSONC in mcporter config {}", source.display()))?
         .ok_or_else(|| anyhow!("empty mcporter config {}", source.display()))?;

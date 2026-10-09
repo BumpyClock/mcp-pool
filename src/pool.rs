@@ -10,8 +10,6 @@ use crate::socket_proxy::SocketProxy;
 use crate::types::PoolStatusResponse;
 use crate::upstream::UpstreamSpec;
 
-/// Registry of pooled MCP servers. Each entry owns one `SocketProxy` (one
-/// upstream + one bound socket). The daemon holds a single `Pool`.
 pub struct Pool {
     proxies: RwLock<HashMap<String, Arc<SocketProxy>>>,
     operations: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
@@ -79,7 +77,6 @@ impl Pool {
             true,
             configuration_entry,
         ));
-        // Publish before awaiting setup so status reports Starting, not absence.
         self.proxies.write().insert(name.to_string(), proxy.clone());
         if self.shutting_down.load(Ordering::SeqCst) {
             self.proxies.write().remove(name);
@@ -88,7 +85,6 @@ impl Pool {
         proxy.start().await
     }
 
-    /// Independent backends start concurrently; each result confirms setup.
     pub async fn start_all(self: &Arc<Self>) -> std::io::Result<Vec<(String, Option<String>)>> {
         let config = crate::config::PoolConfig::load()?;
         let mut starts = tokio::task::JoinSet::new();
@@ -127,7 +123,6 @@ impl Pool {
 
         if let Some(proxy) = proxy {
             proxy.stop().await?;
-            // Remove so a subsequent start() can rebind the same socket path.
             self.proxies.write().remove(name);
             Ok(true)
         } else {
@@ -150,7 +145,6 @@ impl Pool {
             }
         };
 
-        // External (non-owned) sockets cannot be restarted by the pool.
         if !proxy.is_owned() {
             return Ok(false);
         }
@@ -194,9 +188,8 @@ impl Pool {
         }
     }
 
-    /// On Windows named pipes are not filesystem entries to enumerate, so there
-    /// is nothing to discover. On Unix we scan the run dir for live sockets we
-    /// did not start ourselves.
+    /// Registers live Unix sockets without taking upstream ownership.
+    /// Windows named pipes cannot be enumerated.
     pub fn discover_existing_sockets(&self) -> usize {
         if cfg!(windows) {
             return 0;
@@ -219,7 +212,6 @@ impl Pool {
                 continue;
             };
 
-            // Skip anything already known to us; it is either running or slated.
             if self.proxies.read().contains_key(&name) {
                 continue;
             }
@@ -228,9 +220,6 @@ impl Pool {
                 continue;
             }
 
-            // Placeholder spec: discovered sockets are external processes we
-            // attach to. transport() derives from the spec, so stdio is a safe
-            // neutral choice that yields a consistent status entry.
             let placeholder = UpstreamSpec::Stdio {
                 command: String::new(),
                 args: Vec::new(),
@@ -287,7 +276,6 @@ impl Default for Pool {
     }
 }
 
-/// Build the upstream specification from a configured server definition.
 pub fn upstream_spec_from_def(def: &ServerDef) -> UpstreamSpec {
     if def.is_remote() {
         UpstreamSpec::Http {
@@ -308,7 +296,6 @@ pub fn upstream_spec_from_def(def: &ServerDef) -> UpstreamSpec {
     }
 }
 
-/// Probe whether a socket endpoint has a live listener.
 pub fn socket_alive(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -322,9 +309,6 @@ pub fn socket_alive(path: &Path) -> bool {
     }
 }
 
-/// Inverse of `crate::config::server_socket_path`: turn a run-dir entry named
-/// `mcp-pool-<name>.sock` back into `<name>`. Returns None for anything that is
-/// not one of our socket files.
 pub fn socket_name_from_path(path: &Path) -> Option<String> {
     let file_name = path.file_name()?.to_string_lossy();
     file_name

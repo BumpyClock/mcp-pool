@@ -105,7 +105,7 @@ async fn concurrent_start_is_idempotent_and_readiness_is_genuine() -> io::Result
     assert_eq!(proxy.status(), ServerStatus::Running);
     assert!(proxy.readiness().upstream_transport_ready);
     assert!(!proxy.readiness().mcp_initialize_result_received);
-    // Idempotent start must not drop the sole handle or request its retirement.
+
     assert!(shutdown.try_recv().is_err());
     let stop = {
         let proxy = proxy.clone();

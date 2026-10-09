@@ -175,6 +175,7 @@ async fn run_subscription(
     while listener_tasks.join_next().await.is_some() {}
 }
 
+/// A queued invalidation subsumes later tool-list invalidations.
 async fn forward_notifications(
     bridge: std::sync::Arc<super::BridgeState>,
     server: String,
@@ -197,7 +198,6 @@ async fn forward_notifications(
                     if let Some(frame) = sse_message(&message) {
                         match sender.try_send(frame) {
                             Ok(()) => {}
-                            // One queued invalidation subsumes later tool-list invalidations.
                             Err(TrySendError::Full(_)) => {}
                             Err(TrySendError::Closed(_)) => return Ok(()),
                         }

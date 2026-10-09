@@ -53,8 +53,8 @@ impl OwnedProcess {
         }
     }
 
+    /// Terminates the owned process tree even if the immediate child has exited.
     pub(crate) async fn retire(&mut self) -> io::Result<()> {
-        // Terminate the ownership boundary even if the immediate child exited.
         self.ownership.terminate()?;
         tokio::time::timeout(Duration::from_secs(5), self.child.wait())
             .await

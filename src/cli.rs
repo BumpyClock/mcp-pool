@@ -211,7 +211,6 @@ fn build_server_def(
     command: Option<String>,
     trailing: Vec<String>,
 ) -> anyhow::Result<ServerDef> {
-    // Resolve the stdio command. Explicit --command is exclusive with trailing args.
     let (stdio_command, args) = match (command, trailing.split_first()) {
         (Some(command), None) => (command, Vec::new()),
         (Some(_), Some(_)) => {
@@ -229,7 +228,6 @@ fn build_server_def(
     };
     let has_stdio = !stdio_command.is_empty();
 
-    // Exactly one source allowed.
     match (url, has_stdio) {
         (Some(_), true) | (None, false) => Err(anyhow::anyhow!(
             "specify exactly one of: --url <URL>  OR  a stdio command (-- COMMAND...)"
@@ -311,7 +309,6 @@ fn remove_server(name: &str, yes: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read a y/N confirmation from stdin. Defaults to No on anything but explicit yes.
 fn confirm(prompt: &str) -> bool {
     print!("{prompt} [y/N] ");
     if io::stdout().flush().is_err() {
@@ -324,6 +321,7 @@ fn confirm(prompt: &str) -> bool {
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+/// Plain output is `name<TAB>status<TAB>transport<TAB>socket`; local config emits `-` for status.
 fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
     let pool_config = PoolConfig::load()?;
     let entries: Vec<(String, String, String)> = pool_config
@@ -359,8 +357,6 @@ fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
                 .collect();
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
-        // Plain format per contract: name<TAB>status<TAB>transport<TAB>socket. Local
-        // config has no runtime status, so emit "-" there.
         OutputMode::Plain => {
             for (name, transport, socket) in &entries {
                 println!("{name}\t-\t{transport}\t{socket}");
@@ -376,8 +372,6 @@ fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Send a control request to the daemon, auto-launching it if the control socket
-/// is not reachable. Prints the response per the active output mode.
 async fn control_round_trip(
     request: ControlRequest,
     mode: OutputMode,

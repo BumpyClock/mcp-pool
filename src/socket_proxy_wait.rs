@@ -1,7 +1,6 @@
 use super::*;
 
-/// Obtain the upstream request sender, waiting if the upstream is still starting.
-/// The generation owner signals shutdown on terminal setup failure.
+/// Registers readiness before rechecking the sender to prevent a lost wakeup.
 pub(super) async fn acquire_request_sender(
     request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
     upstream_ready: &Arc<Notify>,
@@ -14,8 +13,6 @@ pub(super) async fn acquire_request_sender(
 
     diagnostics::log(format!("pool_upstream_wait client_id={}", client_id));
     loop {
-        // Arm the waiter before re-checking the slot so a notify firing between
-        // the check and the await is not lost (lost-wakeup safe).
         let ready = upstream_ready.notified();
         tokio::pin!(ready);
         ready.as_mut().enable();

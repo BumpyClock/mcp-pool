@@ -1,5 +1,7 @@
 use super::*;
 
+/// Initialization establishes later request headers; only an explicit initial
+/// POST rejection permits fallback to legacy SSE.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run(
     client: reqwest::Client,
@@ -41,7 +43,6 @@ pub(super) async fn run(
                 let allow_fallback = first_request && request.initialize && workers.is_empty();
                 first_request = false;
                 if request.initialization_barrier {
-                    // Initialization establishes the headers every later request must use.
                     if request.initialize {
                         let worker_client = client.clone();
                         let worker_url = url.clone();
@@ -55,7 +56,6 @@ pub(super) async fn run(
                             ).await;
                         });
                         if let Some(request) = establishment.await.map_err(|_| "HTTP initialization worker stopped")? {
-                            // Only an explicit initial POST rejection permits sending initialize via legacy SSE.
                             let handle = match legacy::spawn(client.clone(), url.clone(), response_tx.clone(), options.clone(), request.budget.clone()).await {
                                 Ok(handle) => handle,
                                 Err(_) => {

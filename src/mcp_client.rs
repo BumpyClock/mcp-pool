@@ -14,19 +14,16 @@ mod wire;
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// A sequential MCP session on one shared pool connection, never a new upstream.
-///
-/// Notifications are consumed while waiting for responses. No sampling, roots,
-/// or elicitation capabilities are advertised. An interrupted request closes
-/// this connection: the pool does not translate cancellation `requestId`s, so
-/// sending cancellation could target another client's upstream request.
+/// A sequential MCP session over one shared pool connection.
+/// Cancellation closes the local connection because the pool does not translate
+/// request IDs, so cancellation could target another client's upstream request.
 pub struct McpClient {
     reader: Option<BufReader<LocalStream>>,
     next_id: u64,
     deadline: Duration,
 }
 
-/// A server's JSON-RPC error, kept distinct from transport/protocol failures.
+/// A server JSON-RPC error, distinct from transport and protocol failures.
 #[derive(Debug, thiserror::Error)]
 #[error("JSON-RPC error {code}: {message}")]
 pub struct McpRpcError {
@@ -36,12 +33,10 @@ pub struct McpRpcError {
 }
 
 impl McpClient {
-    /// Report whether a failed or interrupted operation retired this connection.
     pub fn is_closed(&self) -> bool {
         self.reader.is_none()
     }
 
-    /// Start or reuse the configured pool, then initialize the local session.
     /// The deadline covers pool startup, socket connection, and initialization.
     pub async fn connect(
         name: &str,
@@ -63,7 +58,6 @@ impl McpClient {
                                 | std::io::ErrorKind::WouldBlock
                         ) || (cfg!(windows) && error.raw_os_error() == Some(231)) =>
                     {
-                        // Named pipes can be busy between successive accepts.
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
                     Err(error) => return Err(error).context("connecting to MCP pool socket"),
@@ -108,8 +102,8 @@ impl McpClient {
         Ok(client)
     }
 
-    /// Return only the matched JSON-RPC result; server errors remain downcastable
-    /// to `McpRpcError`. Timeout, EOF, or malformed frames retire this connection.
+    /// Returns the matched JSON-RPC result; server errors remain downcastable to
+    /// `McpRpcError`. Timeout, EOF, or malformed frames retire this connection.
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
         validate_parameters(method, &params)?;
         let timeout_ms = timeout_milliseconds(self.deadline)?;
@@ -118,8 +112,6 @@ impl McpClient {
             .checked_add(1)
             .context("MCP request IDs exhausted")?;
         let mut reader = self.reader.take().context("MCP connection is closed")?;
-        // Keep ownership in this future so cancellation cannot leave a partial
-        // write/read or a late response on a reusable connection.
         let outcome = timeout(self.deadline, async {
             let message = json!({
                 "jsonrpc":"2.0", "id":request_id, "method":method, "params":params,
@@ -134,7 +126,6 @@ impl McpClient {
         outcome
     }
 
-    /// Send a notification without waiting for a response.
     pub async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
         validate_parameters(method, &params)?;
         let mut reader = self.reader.take().context("MCP connection is closed")?;
@@ -151,11 +142,9 @@ impl McpClient {
         Ok(())
     }
 
-    /// Wait without an idle deadline on a dedicated notification connection.
-    /// Return a validated notification or `None` on clean EOF. Requests consume
-    /// intervening notifications, so they must use a separate connection.
-    /// Connection initialization stays bounded. The caller must cancel this
-    /// future on disconnect or shutdown; cancellation retires the local socket.
+    /// Dedicated notification connections have no idle deadline; requests
+    /// consume intervening notifications and need a separate connection.
+    /// Cancellation retires this local socket.
     pub async fn wait_for_notification(&mut self) -> Result<Option<Value>> {
         let mut reader = self.reader.take().context("MCP connection is closed")?;
         let notification = wire::receive_notification(&mut reader).await?;
@@ -165,7 +154,7 @@ impl McpClient {
         Ok(notification)
     }
 
-    /// Gather every page without putting a cursor on the cacheable first page.
+    /// Collects every page while leaving the cacheable first page cursor-free.
     pub async fn list_tools(&mut self) -> Result<Vec<Value>> {
         self.list_entries("tools/list", "tools").await
     }
@@ -221,12 +210,11 @@ fn operation_expiry(deadline: Duration) -> Result<Instant> {
         .context("MCP operation deadline is too large")
 }
 
+/// Rounds up so a positive local deadline never becomes a zero backend timeout.
 fn timeout_milliseconds(deadline: Duration) -> Result<u64> {
     if deadline.is_zero() {
         bail!("MCP operation deadline must be positive");
     }
-    // Round upward so sub-millisecond client deadlines never become zero or
-    // shorten the backend budget. The client's exact local deadline is unchanged.
     u64::try_from(deadline.as_nanos().div_ceil(1_000_000))
         .context("MCP operation deadline exceeds supported milliseconds")
 }

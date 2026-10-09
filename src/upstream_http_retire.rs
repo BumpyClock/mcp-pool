@@ -5,6 +5,7 @@ pub(super) const DELETE_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
 pub(super) const DELETE_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Remote session cleanup does not determine verified local task retirement.
 pub(super) async fn terminate_session(
     client: &reqwest::Client,
     url: &reqwest::Url,
@@ -40,7 +41,6 @@ pub(super) async fn terminate_session(
             crate::diagnostics::log("upstream_http_session_delete_unsupported");
         }
         _ => {
-            // Remote cleanup cannot establish or invalidate verified local task retirement.
             crate::diagnostics::log("upstream_http_session_delete_failed");
         }
     }

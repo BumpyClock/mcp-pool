@@ -1,7 +1,6 @@
 use super::*;
 
-/// Sampling and roots callbacks require the capability advertised at initialize.
-/// Other callbacks prefer the last active client. Preserve the server's id.
+/// Preserves server request IDs and routes callbacks by capability or last activity.
 pub(super) async fn route_server_request(
     line: &str,
     value: &Value,
@@ -39,14 +38,11 @@ pub(super) async fn route_server_request(
     }
 
     diagnostics::log(format!("pool_server_request_fallback method={}", method));
-    // Snapshot last-active (releasing its lock) before locking clients, so the
-    // two parking_lot mutexes are never held nested.
     let last_active = last_active_client.lock().clone();
     let target = {
         let clients_guard = clients.lock();
         match last_active {
             Some(id) if clients_guard.contains_key(&id) => Some(id),
-            // Fall back to any one connected client (first by iteration order).
             _ => clients_guard.keys().next().cloned(),
         }
     };
@@ -142,12 +138,7 @@ async fn send_to_upstream(
     }
 }
 
-/// Deliver one already-serialized payload to a single client. Preserves the
-/// head-of-line-blocking-aware try_send-then-send pattern: the response router is
-/// a single task shared by every client, so when a client drains its bounded
-/// channel slower than messages arrive, `send().await` parks the *whole* router.
-/// try_send first records (and times) the stall instead of stalling silently. A
-/// payload for a vanished client is dropped, never rebroadcast.
+/// Delivers only to the addressed client; orphaned payloads are never broadcast.
 pub(super) async fn send_to_client(
     client_id: &str,
     payload: String,
@@ -204,16 +195,10 @@ pub(super) async fn broadcast_to_all(
     ));
 }
 
-/// True if the message carries a `method` field. JSON-RPC requests and
-/// notifications have `method`; responses (carrying `result`/`error`) do not, so
-/// this is the primary discriminator between the two families.
 pub(super) fn message_has_method(value: &Value) -> bool {
     value.get("method").is_some()
 }
 
-/// The message's `id` if present and non-null. A null/absent id marks a
-/// notification; a non-null id marks a request (with `method`) or a response
-/// (without `method`).
 pub(super) fn non_null_id(value: &Value) -> Option<&Value> {
     match value.get("id") {
         Some(id) if !id.is_null() => Some(id),

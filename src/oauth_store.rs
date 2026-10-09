@@ -124,6 +124,7 @@ fn filename_safe_label(label: &str) -> String {
         .collect()
 }
 
+/// Shares lock paths with mcporter so both processes serialize refreshes of the same token.
 pub(super) fn transaction(authentication: &HttpAuth) -> Result<Vec<files::Lock>> {
     let vault = vault(authentication)?;
     let mut identities = vec![(
@@ -158,7 +159,6 @@ pub(super) fn transaction(authentication: &HttpAuth) -> Result<Vec<files::Lock>>
         .join("refresh-locks");
     let mut paths = BTreeSet::new();
     for (label, identity) in identities {
-        // Both applications must derive one lock filename for a shared refresh token.
         let label = filename_safe_label(&label);
         let name = if label.is_empty() {
             files::digest(&identity)
@@ -279,6 +279,7 @@ pub(super) fn validate_resource(server: &str, resource: &str) -> Result<()> {
     Ok(())
 }
 
+/// Writes the vault first so reconciliation can recover if a secondary store fails.
 pub(super) fn save(
     authentication: &HttpAuth,
     patch: &Value,
@@ -349,7 +350,6 @@ pub(super) fn save(
             json!(authentication.server_url),
         );
     }
-    // Vault first: if a secondary store fails, reconciliation sees the newer generation.
     files::write_json(&authentication.vault_path, &vault)?;
     if authentication.directory_primary {
         for directory in &authentication.directory_stores {

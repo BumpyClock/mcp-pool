@@ -69,8 +69,7 @@ enum DiscoveryAction {
     Leader,
 }
 
-/// The lifecycle lock serializes mutations; each run owns isolated routing state.
-/// Completion means both backend retirement and local task retirement are verified.
+/// Serializes lifecycle changes and replaces generations only after verified retirement.
 pub struct SocketProxy {
     name: String,
     socket_path: PathBuf,
@@ -151,10 +150,10 @@ impl SocketProxy {
             .map_or(0, |generation| generation.clients.lock().len() as u32)
     }
 
+    /// Discovered endpoints confirm only that their local socket exists.
     pub fn readiness(&self) -> ServerReadiness {
         let generation = self.generation.lock().clone();
         let Some(generation) = generation else {
-            // A discovered socket proves only the local endpoint exists.
             return ServerReadiness {
                 local_socket_bound: !self.owned && self.status() == ServerStatus::Running,
                 ..ServerReadiness::default()
@@ -200,7 +199,6 @@ impl SocketProxy {
             if !previous.shutdown.load(Ordering::SeqCst) && previous.completion.borrow().is_none() {
                 return generation::wait_completion(previous.startup.clone()).await;
             }
-            // A stopped status alone cannot prove that an old process is gone.
             generation::wait_completion(previous.completion.clone()).await?;
         }
 
@@ -228,8 +226,8 @@ impl SocketProxy {
         generation::wait_completion(generation.startup.clone()).await
     }
 
+    /// Signals shutdown before waiting for the lifecycle lock.
     pub async fn stop(&self) -> io::Result<()> {
-        // Signal before acquiring the lock so a stop can retire an in-progress spawn.
         self.request_stop();
         let _operation = self.operation.lock().await;
         self.stop_locked().await

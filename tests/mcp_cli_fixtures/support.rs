@@ -224,7 +224,6 @@ impl Fixture {
         name: &str,
         environment: &[(&str, &str)],
     ) -> io::Result<()> {
-        // libtest's startup banner must drain before strict CLI clients attach.
         let mut proxy =
             RpcProcess::fixture_proxy(self.spawn_environment(&["proxy", name], environment)?)?;
         let response = proxy.exchange(initialize(1)).await?;

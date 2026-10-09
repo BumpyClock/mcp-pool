@@ -20,10 +20,9 @@ pub struct PendingRequestInfo {
     pub client_id: String,
     pub original_id: Value,
     pub method: Option<String>,
-    // Cursor pages share the method name, not the first-page cache.
+    /// Only cacheable first-page requests share a cache entry.
     pub cache_key: Option<CacheableMethod>,
-    /// Tool name for `tools/call` requests (`params.name`), used to enrich the
-    /// response route log. None for every other method. Never carries args.
+    /// Tool name for route logging only; never contains call arguments.
     pub tool: Option<String>,
     pub inserted_at: Instant,
     pub expires_after: Duration,
@@ -110,9 +109,6 @@ pub fn build_error_response(original_id: Value, code: i64, message: &str) -> Str
     Value::Object(object).to_string()
 }
 
-/// Extract the tool name from a `tools/call` request's `params.name`. Returns
-/// None when absent or not a string. Used for observability only; the helper
-/// never reads or exposes tool arguments.
 pub fn tool_name(value: &Value) -> Option<String> {
     value
         .get("params")

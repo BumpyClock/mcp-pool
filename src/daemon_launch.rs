@@ -66,6 +66,7 @@ pub(crate) fn spawn_detached(arguments: &[OsString]) -> Result<()> {
 }
 
 #[cfg(windows)]
+/// Starts the daemon without inheriting the caller's handles.
 pub(crate) fn spawn_detached(arguments: &[OsString]) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -93,7 +94,6 @@ pub(crate) fn spawn_detached(arguments: &[OsString]) -> Result<()> {
         ..unsafe { std::mem::zeroed() }
     };
     let mut process: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    // A daemon must not retain the caller's captured pipe handles after it exits.
     let created = unsafe {
         CreateProcessW(
             application.as_ptr(),

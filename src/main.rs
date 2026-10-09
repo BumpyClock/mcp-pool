@@ -1,6 +1,3 @@
-// mcp-pool: standalone MCP server pool CLI.
-// Modules are declared here (single binary crate, no mod.rs / lib.rs).
-
 mod cli;
 mod config;
 mod config_commands;

@@ -40,10 +40,10 @@ fn require_success(response: ControlResponse) -> anyhow::Result<()> {
     }
 }
 
+/// Retries once when the daemon closes the control connection without a response.
 pub(crate) async fn control_request(request: &ControlRequest) -> anyhow::Result<ControlResponse> {
     let mut request_line = serde_json::to_string(request)?;
     request_line.push('\n');
-    // Retirement can close a pipe before delivering its acknowledgement.
     let response_line = match send_request(&request_line).await? {
         Some(line) => line,
         None => {

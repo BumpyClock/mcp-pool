@@ -72,6 +72,7 @@ fn parse(arguments: Vec<String>) -> Result<Flags> {
     Ok(flags)
 }
 
+/// Preserves configured server order in output while discovering servers concurrently.
 pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> Result<()> {
     let mut flags = parse(arguments)?;
     let mut selected_url_tool = None;
@@ -121,7 +122,6 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     let detailed = (flags.target.is_some() || flags.ephemeral.present()) && !flags.status;
     let mut entries = Vec::new();
     let mut failure = false;
-    // Stable input order keeps machine output reproducible despite concurrent discovery.
     let mut pending = VecDeque::from(selected);
     let mut tasks = tokio::task::JoinSet::new();
     let mut completed = Vec::new();

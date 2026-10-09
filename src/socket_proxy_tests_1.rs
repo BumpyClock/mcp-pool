@@ -10,13 +10,10 @@ fn channel_client(
     rx
 }
 
-// Build a last-active-client slot for route_response, optionally pre-set to a
-// specific client (the heuristic target for server-initiated requests).
 fn last_active(client_id: Option<&str>) -> Arc<Mutex<Option<String>>> {
     Arc::new(Mutex::new(client_id.map(str::to_string)))
 }
 
-// Fresh, empty per-upstream handshake cache for route_response tests.
 fn empty_cache() -> HandshakeCacheRef {
     Arc::new(Mutex::new(HandshakeCache::default()))
 }
@@ -93,10 +90,6 @@ async fn route_response_with_capabilities(
     .await;
 }
 
-// The core multiplexing fix: two clients that independently used the same
-// raw id (1) are tracked under distinct pool ids, so their responses route
-// back to the right client with each client's original id restored — no
-// cross-wiring, no broadcast.
 #[tokio::test]
 async fn route_response_restores_ids_without_cross_wiring() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
@@ -139,23 +132,16 @@ async fn route_response_restores_ids_without_cross_wiring() {
     assert_eq!(b["id"], json!(1), "clientB original id restored");
     assert_eq!(b["result"], json!("B"));
 
-    // Each client received exactly one message: no cross-wiring.
     assert!(rx_a.try_recv().is_err());
     assert!(rx_b.try_recv().is_err());
 }
 
-// A server-initiated request (method + an id the pool never issued) must
-// route to exactly ONE client — the heuristic last-active client — not
-// broadcast. Broadcasting would make every client answer the same request,
-// sending duplicate/conflicting responses upstream. The server's id is
-// preserved verbatim so the client's response id matches.
 #[tokio::test]
 async fn route_response_routes_server_request_to_single_client() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
     let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut rx_a = channel_client(&clients, "clientA");
     let mut rx_b = channel_client(&clients, "clientB");
-    // clientA is the most-recently-active client → the heuristic target.
     let last_active = last_active(Some("clientA"));
 
     route_response(
@@ -172,7 +158,6 @@ async fn route_response_routes_server_request_to_single_client() {
             .expect("valid json");
     assert_eq!(received["id"], json!(42), "server id preserved verbatim");
     assert_eq!(received["method"], json!("sampling/createMessage"));
-    // Exactly one client answers: no broadcast.
     assert!(rx_b.try_recv().is_err(), "server request not broadcast");
 }
 
@@ -289,7 +274,6 @@ async fn no_capable_client_sends_error_response_upstream() {
     assert!(upstream_rx.try_recv().is_err(), "single upstream error");
 }
 
-// A pure notification (method, no id) fans out to every client.
 #[tokio::test]
 async fn route_response_broadcasts_notifications() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
@@ -310,8 +294,6 @@ async fn route_response_broadcasts_notifications() {
     assert!(rx_b.try_recv().is_ok(), "notification fans out to clientB");
 }
 
-// A response whose originating client has disconnected is dropped, never
-// rebroadcast (its restored id could collide with a live client's in-flight id).
 #[tokio::test]
 async fn route_response_drops_when_origin_client_gone() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));

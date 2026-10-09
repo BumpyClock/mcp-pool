@@ -1,7 +1,6 @@
 use super::*;
 use serde_json::json;
 
-// Fresh, empty per-upstream handshake cache for route_response tests.
 fn empty_cache() -> HandshakeCacheRef {
     Arc::new(Mutex::new(HandshakeCache::default()))
 }

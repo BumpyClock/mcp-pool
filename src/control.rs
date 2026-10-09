@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// Request envelope sent by the CLI to the daemon over the control socket.
-/// One JSON object per line.
+/// One newline-delimited JSON request on the daemon control socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum ControlRequest {
@@ -25,7 +24,6 @@ pub enum ControlRequest {
     Shutdown,
 }
 
-/// Response envelope returned by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ControlResponse {
     pub ok: bool,

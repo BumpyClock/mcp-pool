@@ -7,11 +7,10 @@ pub(super) struct Ownership {
 }
 
 impl Ownership {
+    /// On Linux, adopts orphaned descendants so they can be reaped with this group.
     pub(super) fn prepare(command: &mut Command) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
-            // Adopt orphaned descendants so a non-reaping container init cannot
-            // leave their zombies holding the process group indefinitely.
             if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -44,13 +43,12 @@ impl Ownership {
     }
 
     #[cfg(target_os = "linux")]
+    /// Reaps only descendants in this owned group, never unrelated daemon children.
     fn reap_adopted_descendants(&self) -> io::Result<()> {
         let process_group = self
             .process_group
             .ok_or_else(|| io::Error::other("upstream process group was not established"))?;
         loop {
-            // The direct child is already awaited. Reap only this owned group,
-            // never another upstream's children or unrelated daemon children.
             match unsafe { libc::waitpid(-process_group, std::ptr::null_mut(), libc::WNOHANG) } {
                 0 => return Ok(()),
                 value if value > 0 => {}
@@ -71,13 +69,13 @@ impl Ownership {
         self.process_group = None;
     }
 
+    /// Observes leader exit without reaping it, keeping its PID valid for group signaling.
     pub(super) async fn wait_for_exit(&self) -> io::Result<()> {
         let process_group = self
             .process_group
             .ok_or_else(|| io::Error::other("upstream process group was not established"))?;
         loop {
             let mut information: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            // Keep the leader unreaped until killpg, so its id cannot be reused.
             if unsafe {
                 libc::waitid(
                     libc::P_PID,
@@ -98,11 +96,11 @@ impl Ownership {
         }
     }
 
+    /// Signals only the process group created for this child.
     fn signal(&self, signal: libc::c_int) -> io::Result<bool> {
         let process_group = self
             .process_group
             .ok_or_else(|| io::Error::other("upstream process group was not established"))?;
-        // The group is created by the child's spawn, not discovered by name.
         if unsafe { libc::killpg(process_group, signal) } == 0 {
             return Ok(true);
         }

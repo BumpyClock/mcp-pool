@@ -5,11 +5,8 @@ type PendingForward = (
     std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send>>,
 );
 
-/// Pump one client connection: read newline-delimited JSON-RPC requests from the
-/// client, translate each request id to a pool-unique id, forward to the
-/// upstream, and write routed responses back as they arrive on `rx`. The
-/// (client_id, original_id) mapping is recorded under the pool id so responses
-/// route back to the right client with the id that client expects.
+/// Rewrites client request IDs for multiplexing; client responses retain server IDs.
+/// Deferred sends preserve input order and synchronize with route expiration.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_client(
     stream: LocalStream,
@@ -70,15 +67,6 @@ pub(super) async fn handle_client(
                     if line.is_empty() {
                         continue;
                     }
-                    // Classify by JSON-RPC message kind (presence of `method`
-                    // and a non-null `id`) rather than by id alone. Only a
-                    // REQUEST gets its id rewritten and stored; a client
-                    // RESPONSE (no `method`) answers a server-initiated request
-                    // and carries the SERVER's id, so it must pass through with
-                    // its id intact and unstored. Notifications and unparseable
-                    // lines forward verbatim. A cacheable handshake REQUEST whose
-                    // success response is already cached is answered directly,
-                    // skipping the upstream entirely.
                     let action = match serde_json::from_str::<Value>(&line) {
                         Ok(mut value) if value.is_object() => 'message: {
                             let timeout_ms = match crate::request_deadline::timeout_ms(&value) {
@@ -120,18 +108,13 @@ pub(super) async fn handle_client(
                             } else {
                                 line
                             };
-                            // Clone the original id (ending the borrow) before
-                            // moving the object into `with_id`.
                             let original_id = non_null_id(&value).cloned();
                             match (message_has_method(&value), original_id) {
-                                // REQUEST: method + non-null id.
                                 (true, Some(original_id)) => {
                                     let method = value
                                         .get("method")
                                         .and_then(Value::as_str)
                                         .map(str::to_string);
-                                    // Tool name only for tools/call, for log
-                                    // enrichment; never the call arguments.
                                     let tool = if method.as_deref() == Some("tools/call") {
                                         tool_name(&value)
                                     } else {
@@ -197,14 +180,6 @@ pub(super) async fn handle_client(
                                                 ));
                                             }
                                             let pool_id = id_allocator.allocate();
-                                            // Store the real method so the response
-                                            // route log reports the actual method
-                                            // (e.g. tools/call) rather than `?`.
-                                            // Key the pending request through the same
-                                            // canonical helper route_response uses to
-                                            // look it up, so the insert and lookup keys
-                                            // cannot drift (numeric id -> identical
-                                            // string).
                                             request_map.lock().insert(
                                                 jsonrpc::id_key(&Value::from(pool_id)),
                                                 PendingRequestInfo {
@@ -217,9 +192,6 @@ pub(super) async fn handle_client(
                                                     expires_after,
                                                 },
                                             );
-                                            // Record this client as most-recently-active
-                                            // so a server-initiated callback can route
-                                            // back to it (see route_server_request).
                                             *last_active_client.lock() = Some(client_id.clone());
                                             match value {
                                                 Value::Object(object) => ClientAction::Forward {
@@ -228,9 +200,6 @@ pub(super) async fn handle_client(
                                                     tool,
                                                     pool_id: Some(pool_id),
                                                 },
-                                                // Unreachable: guarded by is_object
-                                                // above, but match instead of unwrap to
-                                                // stay panic-free.
                                                 _ => ClientAction::Forward {
                                                     line,
                                                     method,
@@ -241,8 +210,6 @@ pub(super) async fn handle_client(
                                         }
                                     }
                                 }
-                                // NOTIFICATION (method, no id) or RESPONSE
-                                // (no method): forward verbatim, never store.
                                 _ => {
                                     if handshake_cache.lock().swallow_initialized(&value) {
                                         diagnostics::log(format!(
@@ -279,7 +246,6 @@ pub(super) async fn handle_client(
                         },
                         Err(_) => {
                             if parse_failures < 3 {
-                                // Throttle log spam from a chatty malformed sender.
                                 parse_failures += 1;
                                 diagnostics::log(format!(
                                     "pool_request_parse_failed client_id={} bytes={}",
@@ -297,9 +263,6 @@ pub(super) async fn handle_client(
 
                     expiration_changed.notify_one();
                     let (forward_line, forward_method, forward_tool, forward_pool_id) = match action {
-                        // Cache hit: reply directly to this client. handle_client
-                        // owns write_half and the select! arms never run
-                        // concurrently, so writing here is not re-entrant.
                         ClientAction::Cached(response) => {
                             let mut bytes = response.into_bytes();
                             bytes.push(b'\n');
@@ -337,7 +300,6 @@ pub(super) async fn handle_client(
                     let shutdown = shutdown.clone();
                     let request_map = request_map.clone();
                     let client_id = client_id.clone();
-                    // One deferred send preserves input order without blocking routed responses.
                     pending_forward = Some((forward_pool_id, Box::pin(async move {
                         let Some(sender) = acquire_request_sender(
                             &request_tx, &upstream_ready, &shutdown, &client_id,
@@ -352,7 +314,6 @@ pub(super) async fn handle_client(
                             return Ok(());
                         }
                         let bytes = forward_line.len();
-                        // Expiration and dispatch are atomic with respect to the request map.
                         permit.send(crate::upstream::UpstreamRequest {
                             line: forward_line,
                             deadline: forward_deadline,
@@ -432,8 +393,6 @@ pub(super) async fn handle_client(
         }
     }
 
-    // Drop this client's in-flight requests so responses are not routed to a
-    // (now closed) sender, then remove it from the client table.
     request_map
         .lock()
         .retain(|_, pending| pending.client_id != client_id || pending.cache_key.is_some());
