@@ -1,4 +1,5 @@
 mod cli;
+mod cli_progress;
 mod config;
 mod config_commands;
 mod control;
@@ -20,6 +21,7 @@ mod server_config;
 mod socket_proxy;
 mod tool_arguments;
 mod tool_discovery;
+mod tool_documentation;
 mod tool_filter;
 mod tool_output;
 mod transport;

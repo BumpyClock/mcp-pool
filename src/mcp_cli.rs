@@ -229,18 +229,31 @@ async fn resource(configuration: &ServerConfiguration, arguments: Vec<String>) -
     }
     let name = positional.first().context("Missing server")?;
     let selected = server(configuration, name, &AdHoc::default())?;
+    let mut progress =
+        crate::cli_progress::Progress::new(!matches!(output, Output::Json | Output::Raw));
     let outcome = async {
-        let mut client = connect(&selected, timeout, no_oauth).await?;
+        let mut client = progress
+            .wait(
+                "Connecting to MCP server",
+                connect(&selected, timeout, no_oauth),
+            )
+            .await?;
         if let Some(uri) = positional.get(1) {
-            client.request("resources/read", json!({"uri":uri})).await
+            progress
+                .wait(
+                    "Reading MCP resource",
+                    client.request("resources/read", json!({"uri":uri})),
+                )
+                .await
         } else {
-            client
-                .list_resources()
+            progress
+                .wait("Discovering MCP resources", client.list_resources())
                 .await
                 .map(|resources| json!({"resources":resources}))
         }
     }
     .await;
+    progress.finish();
     print_outcome(&selected, None, outcome, output)
 }
 

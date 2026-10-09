@@ -322,36 +322,6 @@ pub fn kebab(property: &str) -> String {
     }
 }
 
-pub fn signature(tool: &Value, all: bool) -> String {
-    let parameters = options(tool)
-        .iter()
-        .filter(|option| all || option.get("required") == Some(&json!(true)))
-        .map(|option| {
-            format!(
-                "{}{}: {}",
-                option
-                    .get("property")
-                    .and_then(Value::as_str)
-                    .unwrap_or("argument"),
-                if option.get("required") == Some(&json!(true)) {
-                    ""
-                } else {
-                    "?"
-                },
-                option
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "function {}({parameters});",
-        tool.get("name").and_then(Value::as_str).unwrap_or("tool")
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

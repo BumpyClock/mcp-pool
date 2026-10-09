@@ -22,8 +22,10 @@ fn tool(name: &str) -> Value {
     json!({
         "name": name, "description": format!("Fixture {name}"),
         "inputSchema": {"type":"object", "properties":{
-            "label":{"type":"string"}, "count":{"type":"integer"},
-            "enabled":{"type":"boolean"}, "delay_ms":{"type":"integer"}
+            "label":{"type":"string","description":"Label echoed in the result."},
+            "count":{"type":"integer","description":"Number of requested items.","default":1},
+            "enabled":{"type":"boolean","description":"Enable the fixture option.","default":false},
+            "delay_ms":{"type":"integer","description":"Delay before responding in milliseconds."}
         }, "required":["label"]}
     })
 }

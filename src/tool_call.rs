@@ -16,10 +16,21 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         &parsed.ephemeral,
     )?;
     persist_ad_hoc(&selected, &parsed.ephemeral).await?;
+    let mut progress = crate::cli_progress::Progress::new(!matches!(
+        parsed.output,
+        tool_arguments::Output::Json | tool_arguments::Output::Raw
+    ));
     let mut tool = parsed.tool.clone();
     let outcome: Result<Value> = async {
-        let mut client = connect(&selected, parsed.timeout, parsed.no_oauth).await?;
-        let tools = client.list_tools().await?;
+        let mut client = progress
+            .wait(
+                "Connecting to MCP server",
+                connect(&selected, parsed.timeout, parsed.no_oauth),
+            )
+            .await?;
+        let tools = progress
+            .wait("Discovering MCP tools", client.list_tools())
+            .await?;
         let resolved = select_tool(&selected, &tools, tool.as_deref())?;
         tool = Some(resolved.clone());
         if !tool_allowed(&selected, &resolved)? {
@@ -39,14 +50,18 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         } else if !parsed.generic_flags.is_empty() {
             bail!("Tool declares no schema options; use key=value or --args for named arguments");
         }
-        client
-            .request(
-                "tools/call",
-                json!({"name":resolved,"arguments":parsed.arguments}),
+        progress
+            .wait(
+                "Calling MCP tool",
+                client.request(
+                    "tools/call",
+                    json!({"name":resolved,"arguments":parsed.arguments}),
+                ),
             )
             .await
     }
     .await;
+    progress.finish();
     let log_result = outcome.as_ref().ok().cloned();
     let rendered = print_outcome(&selected, tool.as_deref(), outcome, parsed.output);
     if let Some(result) = &log_result

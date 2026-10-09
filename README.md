@@ -74,6 +74,25 @@ An all-server list reports failures but exits successfully unless `--exit-code`
 is set. `--quiet` suppresses output and enables that failure exit code. A failed
 single-server discovery exits unsuccessfully.
 
+`list SERVER` shows a formatted tool reference: wrapped descriptions, parameter
+documentation, typed signatures, examples, and a transport summary. Interactive
+output highlights tool names and parameters and dims explanatory text.
+`--no-color` or `NO_COLOR` disables colors; redirected output contains no color
+codes. The default shows up to five parameters plus any additional required
+ones. A notice identifies hidden optional fields; use `--all-parameters` to
+show them. `--brief` prints required-only signatures, and `--schema` adds the
+complete input schemas. `list SERVER.TOOL` selects one tool; a second positional
+argument is not accepted.
+
+Interactive discovery, calls, resources, and native pool-control commands show
+a waiting indicator on stderr with the current phase and elapsed time.
+Discovery also shows the number of completed servers.
+The indicator clears before results or errors are printed. JSON, raw, plain,
+quiet, redirected output, CI, and `TERM=dumb` remain free of progress output.
+Set `MCP_POOL_NO_PROGRESS=1` to disable the indicator; the existing
+`MCPORTER_NO_SPINNER=1` setting is also honored. Proxy and bridge streams are
+never decorated with progress output.
+
 `call` accepts `SERVER.TOOL`, `SERVER TOOL`, or `--server NAME --tool NAME`.
 Dotted tool selectors split at the first dot: `docs.search.v2` selects server
 `docs` and tool `search.v2`. This also applies to tool-specific discovery.

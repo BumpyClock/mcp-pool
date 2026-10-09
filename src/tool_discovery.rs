@@ -14,6 +14,7 @@ struct Flags {
     brief: bool,
     all: bool,
     quiet: bool,
+    no_color: bool,
     exit_code: bool,
     status: bool,
     timeout: Option<u64>,
@@ -32,6 +33,7 @@ fn parse(arguments: Vec<String>) -> Result<Flags> {
         }
         match argument.as_str() {
             "--json" => flags.json = true,
+            "--no-color" => flags.no_color = true,
             "--schema" => flags.schema = true,
             "--brief" | "--signatures" => flags.brief = true,
             "--all-parameters" => flags.all = true,
@@ -75,6 +77,7 @@ fn parse(arguments: Vec<String>) -> Result<Flags> {
 /// Preserves configured server order in output while discovering servers concurrently.
 pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> Result<()> {
     let mut flags = parse(arguments)?;
+    let mut progress = crate::cli_progress::Progress::new(!flags.json && !flags.quiet);
     let mut selected_url_tool = None;
     if let Some(target) = &flags.target
         && let Some((url, tool)) = crate::mcp_cli::selector::split_http(target)?
@@ -122,6 +125,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     let detailed = (flags.target.is_some() || flags.ephemeral.present()) && !flags.status;
     let mut entries = Vec::new();
     let mut failure = false;
+    let total = selected.len();
     let mut pending = VecDeque::from(selected);
     let mut tasks = tokio::task::JoinSet::new();
     let mut completed = Vec::new();
@@ -137,11 +141,14 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
             let no_oauth = flags.no_oauth;
             tasks.spawn(async move { (index, discover(server, timeout, no_oauth).await) });
         }
-        match tasks.join_next().await {
+        let message = format!("Discovering MCP servers: {}/{total}", completed.len());
+        match progress.wait(&message, tasks.join_next()).await {
             Some(result) => completed.push(result.context("Server discovery task failed")?),
             None => break,
         }
     }
+    progress.finish();
+    let style = crate::tool_documentation::Style::terminal(flags.no_color);
     completed.sort_by_key(|(index, _)| *index);
     for (_, (server, mut tools, duration, error)) in completed {
         let mut entry = base(&server, duration);
@@ -196,27 +203,47 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
             }
             if !flags.json && !flags.quiet {
                 if detailed {
-                    println!("{}", server.name);
+                    if server.definition.description.is_empty() {
+                        println!("{}", style.heading(&server.name));
+                    } else {
+                        println!(
+                            "{} - {}",
+                            style.heading(&server.name),
+                            style.muted(&server.definition.description)
+                        );
+                    }
+                    println!();
+                    let mut optional_hidden = false;
                     for tool in &tools {
-                        if !flags.brief
-                            && let Some(description) =
-                                tool.get("description").and_then(Value::as_str)
-                        {
-                            for line in description.lines() {
-                                println!("  {line}");
-                            }
+                        if flags.brief {
+                            println!("  {}", style.brief(tool));
+                        } else {
+                            let documentation = style.render(tool, flags.all);
+                            optional_hidden |= documentation.hidden_parameters;
+                            println!("{}", documentation.text);
                         }
-                        println!("  {}", crate::tool_output::signature(tool, flags.all));
                         if flags.schema
                             && let Some(schema) = tool.get("inputSchema")
                         {
                             println!("{}", serde_json::to_string_pretty(schema)?);
                         }
                     }
+                    if !flags.brief
+                        && let Some(tool) = tools.first()
+                    {
+                        println!("  {}", style.heading("Examples:"));
+                        println!("    {}\n", style.example(&server.name, tool));
+                    }
+                    if optional_hidden {
+                        println!("{}\n", style.muted("  Optional parameters hidden; run with --all-parameters to view all fields."));
+                    }
                     println!(
-                        "  {} tools · {duration}ms · {}",
-                        tools.len(),
-                        server.definition.transport_kind()
+                        "{}",
+                        style.muted(&format!(
+                            "  {} tools · {duration}ms · {}",
+                            tools.len(),
+                            transport(&server)
+                        ))
                     );
                 } else {
                     println!("{} ({} tools; {duration}ms)", server.name, tools.len());

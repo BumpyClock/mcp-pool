@@ -377,7 +377,18 @@ async fn control_round_trip(
     mode: OutputMode,
     color: bool,
 ) -> anyhow::Result<()> {
-    let response = control_request(&request).await?;
+    let message = match &request {
+        ControlRequest::Start { .. }
+        | ControlRequest::StartDefinition { .. }
+        | ControlRequest::StartAll => "Starting pooled MCP servers",
+        ControlRequest::Stop { .. } => "Stopping pooled MCP server",
+        ControlRequest::Restart { .. } => "Restarting pooled MCP server",
+        ControlRequest::Status { .. } => "Checking MCP pool status",
+        ControlRequest::Shutdown => "Stopping MCP pool daemon",
+    };
+    let mut progress = crate::cli_progress::Progress::new(mode == OutputMode::Table);
+    let response = progress.wait(message, control_request(&request)).await?;
+    progress.finish();
 
     if !response.ok {
         let message = response

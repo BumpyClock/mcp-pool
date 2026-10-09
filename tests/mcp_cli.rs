@@ -10,6 +10,8 @@ mod bridge_notifications;
 mod http;
 #[path = "mcp_cli_fixtures/identity.rs"]
 mod identity;
+#[path = "mcp_cli_fixtures/presentation.rs"]
+mod presentation;
 #[path = "mcp_cli_fixtures/stdio.rs"]
 mod stdio;
 #[path = "mcp_cli_fixtures/support.rs"]

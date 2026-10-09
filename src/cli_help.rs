@@ -4,7 +4,7 @@ pub(crate) fn command_help(command: &str) {
             "call SERVER.TOOL [key=value|key:value ...] [--args JSON|-] [--server NAME --tool NAME]\n  --output auto|text|markdown|json|raw --timeout MILLISECONDS --no-oauth\n  --raw-strings/--no-coerce --save-images DIRECTORY --tail-log\n  Named @FILE values read UTF-8 text; @@TEXT escapes a literal @."
         }
         "list" | "describe" | "list-tools" => {
-            "list [SERVER[.TOOL]] [--schema|--signatures|--brief] [--all-parameters]\n  --status --exit-code --quiet --json --timeout MILLISECONDS --no-oauth"
+            "list [SERVER[.TOOL]] [--schema|--signatures|--brief] [--all-parameters]\n  --status --exit-code --quiet --json --no-color --timeout MILLISECONDS --no-oauth"
         }
         "resource" | "resources" => {
             "resource SERVER [URI] [--output auto|text|markdown|json|raw] [--json] [--no-oauth]"

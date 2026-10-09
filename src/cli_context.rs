@@ -20,7 +20,7 @@ pub(crate) fn command_index(arguments: &[String]) -> Option<usize> {
             "--config" | "--root" | "--log-level" | "--oauth-timeout"
         ) {
             index += 2;
-        } else if matches!(argument.as_str(), "--json" | "--debug")
+        } else if matches!(argument.as_str(), "--json" | "--debug" | "--no-color")
             || ["--config=", "--root=", "--log-level=", "--oauth-timeout="]
                 .iter()
                 .any(|prefix| argument.starts_with(prefix))
@@ -80,6 +80,12 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
             }
             if argument == "--debug" {
                 level = Some("debug".to_owned());
+                continue;
+            }
+            if argument == "--no-color" && index < command_position {
+                if matches!(command.as_str(), "list" | "describe" | "list-tools") {
+                    retained.push(argument);
+                }
                 continue;
             }
             if argument == "--json" && index < command_position {
@@ -181,6 +187,9 @@ mod tests {
 
     #[test]
     fn leading_globals_do_not_become_commands_or_call_payloads() -> Result<()> {
+        let no_color = parse(vec!["--no-color".into(), "list".into(), "fixture".into()])?;
+        assert_eq!(no_color.command, "list");
+        assert_eq!(no_color.arguments, vec!["--no-color", "fixture"]);
         let parsed = parse(vec!["--json".into(), "list".into()])?;
         assert_eq!(parsed.command, "list");
         assert_eq!(parsed.arguments, vec!["--json"]);
