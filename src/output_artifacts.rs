@@ -138,13 +138,8 @@ fn read_tail(path: &Path) -> Result<String> {
         lines.remove(0);
     }
     Ok(lines
-        .into_iter()
-        .rev()
-        .take(20)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
+        .get(lines.len().saturating_sub(20)..)
+        .unwrap_or_default()
         .join("\n"))
 }
 
@@ -178,6 +173,12 @@ mod tests {
             let tail = read_tail(&log)?;
             assert_eq!(tail.lines().count(), 20);
             assert!(tail.starts_with("10\n"));
+            for contents in ["", "one", "one\ntwo\n"] {
+                std::fs::write(&log, contents)?;
+                assert_eq!(read_tail(&log)?, contents.trim_end_matches('\n'));
+            }
+            std::fs::write(&log, format!("{}partial\nlast\n", "x".repeat(1024 * 1024)))?;
+            assert_eq!(read_tail(&log)?, "last");
             assert!(read_tail(Path::new("relative.log")).is_err());
             Ok(())
         })();

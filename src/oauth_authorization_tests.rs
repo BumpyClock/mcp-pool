@@ -358,3 +358,73 @@ async fn zero_oauth_timeout_fails_before_any_credential_mutation() -> Result<()>
     assert!(!path.exists());
     Ok(())
 }
+
+#[tokio::test]
+async fn cached_reads_reject_resource_binding_before_reuse_or_refresh() -> Result<()> {
+    let fixture = Fixture::new("https://synthetic.invalid/mcp")?;
+    fixture.valid()?;
+    let authentication = context(&fixture.server)?;
+    let mut vault = files::read_json(&authentication.vault_path)?
+        .ok_or_else(|| anyhow::anyhow!("fixture vault missing"))?;
+    let entry = vault
+        .get_mut("entries")
+        .and_then(|entries| entries.get_mut(&authentication.identity_key))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow::anyhow!("fixture entry missing"))?;
+    entry.insert("resourceUrl".to_owned(), json!("https://other.invalid/mcp"));
+    files::write_json(&authentication.vault_path, &vault)?;
+    let before = std::fs::read(&authentication.vault_path)?;
+    let expected = "protected resource does not match configured MCP endpoint";
+    let errors = [
+        super::prepare(&fixture.server, false).await.err(),
+        authorization_header(&authentication).await.err(),
+        super::authorize(
+            &fixture.server,
+            AuthOptions {
+                reset: false,
+                no_browser: true,
+                json: true,
+            },
+        )
+        .await
+        .err(),
+        super::protocol::refresh(&authentication).await.err(),
+    ];
+    for error in errors {
+        assert_eq!(
+            error.map(|error| error.to_string()).as_deref(),
+            Some(expected)
+        );
+    }
+    assert_eq!(std::fs::read(&authentication.vault_path)?, before);
+    Ok(())
+}
+
+#[test]
+fn stored_client_secret_precedes_environment_and_public_client_needs_neither() -> Result<()> {
+    let fixture = Fixture::new("https://synthetic.invalid/mcp")?;
+    let mut authentication = context(&fixture.server)?;
+    authentication.client_secret_env = Some(format!(
+        "OAUTH_SYNTHETIC_MISSING_{}",
+        oauth2::CsrfToken::new_random().secret()
+    ));
+    let discovery = json!({
+        "authorizationServerMetadata":{
+            "authorization_endpoint":"https://issuer.invalid/authorize",
+            "token_endpoint":"https://issuer.invalid/token",
+            "token_endpoint_auth_methods_supported":["none","client_secret_basic"]
+        }
+    });
+    let info = json!({"client_id":"synthetic-client","client_secret":"synthetic-secret"});
+    assert!(super::protocol::client(&authentication, &info, &discovery).is_ok());
+    let public = json!({"client_id":"synthetic-client"});
+    assert!(
+        super::protocol::client(&authentication, &public, &discovery)
+            .err()
+            .is_some_and(|error| error.to_string()
+                == "configured OAuth client-secret environment variable missing")
+    );
+    authentication.client_secret_env = None;
+    assert!(super::protocol::client(&authentication, &public, &discovery).is_ok());
+    Ok(())
+}

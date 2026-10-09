@@ -30,6 +30,8 @@ async fn configured_headers_reach_streamable_post() -> TestResult {
         let (mut stream, _) = listener.accept().await?;
         let request = incoming(&mut stream).await?;
         assert_headers(&request);
+        assert!(!request.headers.contains_key("mcp-session-id"));
+        assert!(!request.headers.contains_key("mcp-protocol-version"));
         reply(
             &mut stream,
             200,
@@ -40,7 +42,10 @@ async fn configured_headers_reach_streamable_post() -> TestResult {
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle = spawn_configured(url, false, headers(), None, None, responses).await?;
+    let mut configured = headers();
+    configured.insert("McP-SeSsIoN-Id".into(), "configured-session".into());
+    configured.insert("MCP-Protocol-Version".into(), "configured-version".into());
+    let mut handle = spawn_configured(url, false, configured, None, None, responses).await?;
     handle
         .request_tx
         .send(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#.into())

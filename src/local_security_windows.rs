@@ -105,12 +105,10 @@ fn verify_named_pipe_server(client: &NamedPipeClient) -> io::Result<()> {
         }
         process = OwnedHandle::new(process_handle);
 
-        let server_token_handle = open_process_token(process.get())?;
-        server_token = server_token_handle;
+        server_token = open_process_token(process.get())?;
         let server_user = token_user_information(server_token.get())?;
 
-        let current_token_handle = open_process_token(unsafe { GetCurrentProcess() })?;
-        current_token = current_token_handle;
+        current_token = open_process_token(unsafe { GetCurrentProcess() })?;
         let current_user = token_user_information(current_token.get())?;
 
         let server_sid = token_user_sid(&server_user)?;

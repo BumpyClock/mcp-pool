@@ -258,7 +258,7 @@ pub(super) fn client(
             anyhow::anyhow!("configured OAuth client-secret environment variable missing")
         })?)
     } else {
-        string(info, "client_secret").map(str::to_owned)
+        None
     };
     let method = authentication
         .token_auth_method
@@ -340,7 +340,6 @@ pub(super) async fn refresh(authentication: &HttpAuth) -> Result<String> {
     }
     let transaction = files::AsyncLocks::new(store::transaction_async(authentication).await?);
     let snapshot = read_snapshot(authentication).await?;
-    store::validate_binding(authentication, &snapshot)?;
     let tokens = snapshot
         .get("tokens")
         .ok_or_else(|| missing(authentication))?;

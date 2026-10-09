@@ -99,8 +99,7 @@ async fn read_input(sender: mpsc::Sender<InputFrame>) {
     loop {
         match read_limited_line(&mut input).await {
             Ok(Some(frame)) => {
-                let finished = matches!(frame, InputFrame::End);
-                if sender.send(frame).await.is_err() || finished {
+                if sender.send(frame).await.is_err() {
                     return;
                 }
             }

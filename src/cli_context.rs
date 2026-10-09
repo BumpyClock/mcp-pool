@@ -12,7 +12,7 @@ pub(super) struct ContextOptions {
     pub oauth_timeout: Option<u64>,
 }
 
-pub(super) fn command_index(arguments: &[String]) -> Option<usize> {
+pub(crate) fn command_index(arguments: &[String]) -> Option<usize> {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if matches!(

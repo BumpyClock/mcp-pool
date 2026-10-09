@@ -18,31 +18,22 @@ pub(crate) struct ServeOptions {
 }
 
 pub(crate) fn parse(arguments: Vec<String>) -> Result<ServeOptions> {
-    let mut mode = ServeMode::Stdio;
     let mut host = None;
     let mut port = None;
     let mut servers = None;
     let mut explicit_stdio = false;
-    let mut explicit_http = false;
     let mut arguments = arguments.into_iter();
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--stdio" => {
                 explicit_stdio = true;
-                mode = ServeMode::Stdio;
             }
             "--http" => {
-                explicit_http = true;
                 let value = arguments
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("Flag '--http' requires a port."))?;
-                let parsed_port = parse_port(&value)?;
-                port = Some(parsed_port);
-                mode = ServeMode::Http {
-                    host: DEFAULT_HTTP_HOST.to_owned(),
-                    port: parsed_port,
-                };
+                port = Some(parse_port(&value)?);
             }
             "--host" => {
                 host = Some(non_empty(
@@ -57,13 +48,7 @@ pub(crate) fn parse(arguments: Vec<String>) -> Result<ServeOptions> {
                 servers = Some(parse_servers(&value)?);
             }
             _ if argument.starts_with("--http=") => {
-                explicit_http = true;
-                let parsed_port = parse_port(argument.trim_start_matches("--http="))?;
-                port = Some(parsed_port);
-                mode = ServeMode::Http {
-                    host: DEFAULT_HTTP_HOST.to_owned(),
-                    port: parsed_port,
-                };
+                port = Some(parse_port(argument.trim_start_matches("--http="))?);
             }
             _ if argument.starts_with("--host=") => {
                 host = Some(non_empty(
@@ -78,19 +63,19 @@ pub(crate) fn parse(arguments: Vec<String>) -> Result<ServeOptions> {
         }
     }
 
-    if explicit_stdio && explicit_http {
+    if explicit_stdio && port.is_some() {
         bail!("Flags '--stdio' and '--http' cannot be used together.");
     }
-    if host.is_some() && !explicit_http {
+    if host.is_some() && port.is_none() {
         bail!("Flag '--host' can only be used with '--http'.");
     }
-    if explicit_http {
-        let parsed_port = port.ok_or_else(|| anyhow::anyhow!("Flag '--http' requires a port."))?;
-        mode = ServeMode::Http {
+    let mode = match port {
+        Some(port) => ServeMode::Http {
             host: host.unwrap_or_else(|| DEFAULT_HTTP_HOST.to_owned()),
-            port: parsed_port,
-        };
-    }
+            port,
+        },
+        None => ServeMode::Stdio,
+    };
 
     Ok(ServeOptions { mode, servers })
 }

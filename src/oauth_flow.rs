@@ -57,7 +57,6 @@ where
         json!({})
     } else {
         let snapshot = read_snapshot(&authentication).await?;
-        store::validate_binding(&authentication, &snapshot)?;
         if let Some(tokens) = snapshot.get("tokens")
             && store::validate_tokens(tokens).is_ok()
             && !store::expired(tokens)

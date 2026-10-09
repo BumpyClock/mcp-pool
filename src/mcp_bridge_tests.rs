@@ -228,6 +228,58 @@ async fn aggregate_tool_list_preserves_schemas_and_namespaces_tools() -> Result<
 }
 
 #[tokio::test]
+async fn exposed_tools_normalize_invalid_schemas_and_preserve_extensions() -> Result<()> {
+    let state = BridgeState::with_clients(vec![(
+        "alpha".to_owned(),
+        Box::new(client(
+            "alpha",
+            vec![
+                json!({"name":"", "inputSchema":{"type":"object"}}),
+                json!({"description":"missing name"}),
+                json!({
+                    "name":"normalize", "description":"", "inputSchema":{"type":"array"},
+                    "outputSchema":null, "annotations":{"readOnlyHint":true}
+                }),
+                json!({
+                    "name":"preserve", "description":"kept",
+                    "inputSchema":{"type":"object","required":["query"],"additionalProperties":false},
+                    "outputSchema":{}, "_meta":{"fixture":"extension"}
+                }),
+            ],
+        )),
+    )])?;
+    assert_eq!(
+        state
+            .list_tools(None, false)
+            .await
+            .map_err(|_| anyhow::anyhow!("listing failed"))?,
+        vec![
+            json!({
+                "name":"alpha__normalize", "description":"Tool from MCP server 'alpha'.",
+                "inputSchema":{"type":"object"}, "annotations":{"readOnlyHint":true}
+            }),
+            json!({
+                "name":"alpha__preserve", "description":"[alpha] kept",
+                "inputSchema":{"type":"object","required":["query"],"additionalProperties":false},
+                "outputSchema":{}, "_meta":{"fixture":"extension"}
+            }),
+        ]
+    );
+    let bare = state
+        .list_tools(Some("alpha"), true)
+        .await
+        .map_err(|_| anyhow::anyhow!("listing failed"))?;
+    assert_eq!(
+        bare.first(),
+        Some(&json!({
+            "name":"normalize", "description":"", "inputSchema":{"type":"object"},
+            "annotations":{"readOnlyHint":true}
+        }))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn tool_call_routes_original_name_and_arguments_and_preserves_id() -> Result<()> {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let state = BridgeState::with_clients(vec![(
@@ -459,6 +511,51 @@ fn serve_flags_default_to_stdio_and_parse_http_and_server_selection() -> Result<
     );
     assert!(parse(vec!["--http=65536".to_owned()]).is_err());
     assert!(parse(vec!["--host=localhost".to_owned()]).is_err());
+    Ok(())
+}
+
+#[test]
+fn serve_flags_keep_last_values_and_validate_conflicts_after_parsing() -> Result<()> {
+    assert_eq!(
+        parse(
+            [
+                "--host=localhost",
+                "--http=0",
+                "--http",
+                "3210",
+                "--host=127.0.0.2"
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        )?,
+        super::options::ServeOptions {
+            mode: ServeMode::Http {
+                host: "127.0.0.2".to_owned(),
+                port: 3210,
+            },
+            servers: None,
+        }
+    );
+    for (arguments, error) in [
+        (
+            vec!["--http=1", "--stdio"],
+            "Flags '--stdio' and '--http' cannot be used together.",
+        ),
+        (vec!["--stdio", "--http="], "Flag '--http' requires a port."),
+        (vec!["--http"], "Flag '--http' requires a port."),
+        (
+            vec!["--host=localhost"],
+            "Flag '--host' can only be used with '--http'.",
+        ),
+    ] {
+        assert_eq!(
+            parse(arguments.into_iter().map(str::to_owned).collect())
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("invalid flags were accepted"))?
+                .to_string(),
+            error
+        );
+    }
     Ok(())
 }
 

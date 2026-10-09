@@ -352,9 +352,7 @@ async fn execute(
                     ),
                 ]));
             if let Session::Ready { protocol, .. } = state {
-                let mut headers = HeaderMap::new();
-                headers.insert("MCP-Protocol-Version", protocol);
-                builder = builder.headers(headers);
+                builder = builder.header("MCP-Protocol-Version", protocol);
             }
             let response = builder
                 .body(request.line.clone())

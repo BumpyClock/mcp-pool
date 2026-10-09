@@ -21,7 +21,7 @@ pub(crate) async fn persist(server: &ConfiguredServer, options: &AdHoc) -> Resul
     }
     let path = destination(path)?;
     let name = server.name.clone();
-    let entry = persisted_entry(server)?;
+    let entry = persisted_entry(server);
     let source = path.clone();
     let previous_name = name.clone();
     crate::config_commands::write::write_checked_mutation(
@@ -47,7 +47,7 @@ pub(crate) async fn persist(server: &ConfiguredServer, options: &AdHoc) -> Resul
     Ok(())
 }
 
-fn persisted_entry(server: &ConfiguredServer) -> Result<Value> {
+fn persisted_entry(server: &ConfiguredServer) -> Value {
     let mut entry = server.raw.clone();
     if let Some(object) = entry.as_object_mut()
         && !server.definition.is_remote()
@@ -67,7 +67,7 @@ fn persisted_entry(server: &ConfiguredServer) -> Result<Value> {
             object.insert("cwd".to_owned(), serde_json::json!(cwd));
         }
     }
-    Ok(entry)
+    entry
 }
 
 #[cfg(test)]
@@ -98,7 +98,7 @@ mod tests {
                 ..AdHoc::default()
             },
         )?;
-        let persisted = persisted_entry(&selected)?;
+        let persisted = persisted_entry(&selected);
         let reloaded = crate::server_config::parse_config(
             &selected.source,
             &serde_json::to_string(
@@ -134,7 +134,7 @@ mod tests {
                 ..crate::config::ServerDef::default()
             },
         };
-        let persisted = persisted_entry(&selected)?;
+        let persisted = persisted_entry(&selected);
         assert_eq!(persisted.get("args"), Some(&json!(["${CALLER_BINDING}"])));
         let output = serde_json::to_string(&persisted)?;
         assert!(!output.contains("resolved-private") && !output.contains("ambient-private"));

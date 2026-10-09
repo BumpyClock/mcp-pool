@@ -44,23 +44,10 @@ pub async fn spawn_configured(
     response_tx: mpsc::Sender<String>,
 ) -> io::Result<UpstreamHandle> {
     #[cfg(windows)]
-    let mut launch = {
-        // Rust selects cmd.exe and its batch-specific encoder only for .cmd/.bat.
-        let mut launch = Command::new(resolve_windows_command(
-            &command,
-            &env,
-            cwd.as_deref(),
-            clear_env,
-        )?);
-        launch.args(args);
-        launch
-    };
-    #[cfg(unix)]
-    let mut launch = {
-        let mut launch = Command::new(command);
-        launch.args(args);
-        launch
-    };
+    // Rust selects cmd.exe and its batch-specific encoder only for .cmd/.bat.
+    let command = resolve_windows_command(&command, &env, cwd.as_deref(), clear_env)?;
+    let mut launch = Command::new(command);
+    launch.args(args);
     if clear_env {
         launch.env_clear();
     }

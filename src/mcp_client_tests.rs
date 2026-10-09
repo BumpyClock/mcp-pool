@@ -215,7 +215,7 @@ async fn dropped_request_future_retires_socket() -> Result<()> {
     let client_work = async {
         tokio::select! {
             result = client.request("tools/call", json!({})) => {
-                bail_unexpected(result)?;
+                anyhow::bail!("request unexpectedly completed: {result:?}");
             }
             () = tokio::time::sleep(Duration::from_millis(20)) => {}
         }
@@ -231,10 +231,6 @@ async fn dropped_request_future_retires_socket() -> Result<()> {
     let (result, served) = tokio::join!(client_work, server_work);
     served?;
     result
-}
-
-fn bail_unexpected(result: Result<Value>) -> Result<()> {
-    anyhow::bail!("request unexpectedly completed: {result:?}")
 }
 
 #[tokio::test]

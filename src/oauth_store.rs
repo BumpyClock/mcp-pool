@@ -41,19 +41,17 @@ fn matching<'a>(authentication: &HttpAuth, vault: &'a Value) -> Vec<(String, &'a
     let Some(entries) = vault.get("entries").and_then(Value::as_object) else {
         return Vec::new();
     };
+    let alias_name = format!("{}-oauth", authentication.server_name);
     let mut found: Vec<_> = entries
         .iter()
         .filter(|(key, entry)| {
             let exact = *key == &authentication.identity_key;
-            let alias = string(entry, "serverName")
-                .is_some_and(|name| name == format!("{}-oauth", authentication.server_name))
+            let alias = string(entry, "serverName").is_some_and(|name| name == alias_name)
                 && string(entry, "serverUrl") == Some(authentication.server_url.as_str());
             (exact || alias)
                 && string(entry, "serverUrl").is_none_or(|url| url == authentication.server_url)
-                && string(entry, "serverName").is_some_and(|name| {
-                    name == authentication.server_name
-                        || name == format!("{}-oauth", authentication.server_name)
-                })
+                && string(entry, "serverName")
+                    .is_some_and(|name| name == authentication.server_name || name == alias_name)
         })
         .map(|(key, entry)| (key.clone(), entry))
         .collect();
@@ -198,17 +196,13 @@ pub(super) fn validate_tokens(tokens: &Value) -> Result<()> {
     Ok(())
 }
 
-fn expiry(tokens: &Value) -> u64 {
-    tokens
+pub(super) fn expired(tokens: &Value) -> bool {
+    let expiration = tokens
         .get("expires_at")
         .or_else(|| tokens.get("expiresAt"))
         .and_then(Value::as_f64)
         .map(|value| value as u64)
-        .unwrap_or_default()
-}
-
-pub(super) fn expired(tokens: &Value) -> bool {
-    let expiration = expiry(tokens);
+        .unwrap_or_default();
     if expiration > 0 {
         return expiration <= files::now().saturating_add(60);
     }

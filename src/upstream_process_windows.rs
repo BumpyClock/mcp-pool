@@ -106,8 +106,6 @@ impl Ownership {
         Ok(true)
     }
 
-    pub(super) fn disarm(&mut self) {}
-
     fn handle(&self) -> HANDLE {
         self.job.as_raw_handle().cast()
     }

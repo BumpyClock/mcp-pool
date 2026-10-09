@@ -155,7 +155,7 @@ pub(super) fn complete_tools_list_response(
     }
 
     let mut responses = Vec::with_capacity(waiters.len() + 1);
-    if let Value::Object(object) = value.clone() {
+    if let Value::Object(object) = value {
         diagnostics::log(format!(
             "pool_response_routed client_id={} method=tools/list elapsed_ms={} outcome={} waiters={}",
             leader.client_id,
@@ -232,15 +232,11 @@ pub(super) fn request_recovery_if_session_not_found(
     value: &Value,
     cache: &HandshakeCacheRef,
     recovery_tx: &mpsc::Sender<RecoveryReason>,
-    recovery_requested: &Arc<AtomicBool>,
 ) {
     if !is_session_not_found_error(value) {
         return;
     }
     cache.lock().clear_all();
-    if recovery_requested.load(Ordering::SeqCst) {
-        return;
-    }
     if recovery_tx
         .try_send(RecoveryReason::SessionNotFound)
         .is_err()

@@ -62,6 +62,39 @@ fn paths_route_aggregate_and_decode_single_server_names() {
     ));
 }
 
+#[test]
+fn accept_headers_preserve_media_ranges_and_zero_quality_exclusion() -> Result<()> {
+    for (value, streamable_json, event_stream) in [
+        ("application/json, text/event-stream", true, true),
+        ("application/*, text/*", true, true),
+        ("*/*", true, true),
+        (" APPLICATION/JSON ; q=0.5, TEXT/EVENT-STREAM ", true, true),
+        ("application/json;q=0, text/event-stream", false, true),
+        ("application/json, text/event-stream;q=0.0", false, false),
+        ("text/event-stream;q=0, text/*;q=1", false, true),
+        ("application/json", false, false),
+        ("text/event-stream", false, true),
+        ("application/json;q=invalid, text/event-stream", true, true),
+    ] {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("accept", value.parse()?);
+        assert_eq!(
+            super::accepts_streamable_json(&headers),
+            streamable_json,
+            "{value}"
+        );
+        assert_eq!(
+            super::accepts_event_stream(&headers),
+            event_stream,
+            "{value}"
+        );
+    }
+    let headers = axum::http::HeaderMap::new();
+    assert!(!super::accepts_streamable_json(&headers));
+    assert!(!super::accepts_event_stream(&headers));
+    Ok(())
+}
+
 #[tokio::test]
 async fn malformed_json_and_unknown_routes_return_client_errors() -> Result<()> {
     let state = state()?;

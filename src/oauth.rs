@@ -80,10 +80,9 @@ pub async fn prepare(server: &ConfiguredServer, no_oauth: bool) -> Result<Server
     let mut authentication = context(server)?;
     authentication.cached_only = no_oauth;
     let snapshot = read_snapshot(&authentication).await?;
-    let configured = setting(&server.raw, "auth", "auth")
-        .is_some_and(|method| method.eq_ignore_ascii_case("oauth"));
+    let configured =
+        string(&server.raw, "auth").is_some_and(|method| method.eq_ignore_ascii_case("oauth"));
     if configured || snapshot.get("tokens").is_some() {
-        store::validate_binding(&authentication, &snapshot)?;
         let tokens = snapshot
             .get("tokens")
             .ok_or_else(|| missing(&authentication))?;
@@ -103,7 +102,6 @@ pub async fn prepare(server: &ConfiguredServer, no_oauth: bool) -> Result<Server
 
 pub async fn authorization_header(authentication: &HttpAuth) -> Result<Option<String>> {
     let snapshot = read_snapshot(authentication).await?;
-    store::validate_binding(authentication, &snapshot)?;
     let tokens = snapshot
         .get("tokens")
         .ok_or_else(|| missing(authentication))?;
@@ -260,8 +258,9 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
     };
     let serialized = serde_json::to_string(&identity)?;
     let identity_key = format!("{}|{}", server.name, files::digest(&serialized));
+    let token_cache_directory = setting(&server.raw, "tokenCacheDir", "token_cache_dir");
     let mut directory_stores = Vec::new();
-    if let Some(directory) = setting(&server.raw, "tokenCacheDir", "token_cache_dir") {
+    if let Some(directory) = token_cache_directory {
         let path = if directory == "~" {
             home
         } else if let Some(suffix) = directory
@@ -290,7 +289,7 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
         vault_path: vault_root.join("credentials.json"),
         directory_stores,
         identity_key,
-        directory_primary: setting(&server.raw, "tokenCacheDir", "token_cache_dir").is_some(),
+        directory_primary: token_cache_directory.is_some(),
         client_name: setting(&server.raw, "clientName", "client_name")
             .unwrap_or("mcp-pool")
             .to_owned(),

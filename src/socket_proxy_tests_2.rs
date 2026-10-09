@@ -45,7 +45,6 @@ async fn route_response(
     last_active_client: &Arc<Mutex<Option<String>>>,
 ) -> mpsc::Receiver<RecoveryReason> {
     let (recovery_tx, recovery_rx) = mpsc::channel::<RecoveryReason>(8);
-    let recovery_requested = Arc::new(AtomicBool::new(false));
     let client_capabilities = Arc::new(Mutex::new(HashMap::new()));
     if let Some(client_id) = last_active_client.lock().clone() {
         client_capabilities.lock().insert(
@@ -66,7 +65,6 @@ async fn route_response(
         &client_capabilities,
         &request_tx,
         &recovery_tx,
-        &recovery_requested,
     )
     .await;
     recovery_rx

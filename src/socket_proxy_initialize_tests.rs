@@ -213,7 +213,8 @@ async fn concurrent_socket_initialize_has_one_leader_and_one_shared_lifecycle() 
     fixture.stop().await
 }
 
-async fn initialize_error() -> io::Result<()> {
+#[tokio::test]
+async fn initialize_error_fans_out_and_explicit_retry_coalesces() -> io::Result<()> {
     let mut fixture = Fixture::start().await?;
     let (mut first, mut second, leader) = two_clients(&mut fixture).await?;
     let error = json!({"code":-32602,"message":"initialization rejected"});
@@ -261,11 +262,6 @@ async fn initialize_error() -> io::Result<()> {
     assert_eq!(read(&mut first).await?.get("id"), Some(&json!(2)));
     assert_eq!(read(&mut second).await?.get("id"), Some(&json!("retry")));
     fixture.stop().await
-}
-
-#[tokio::test]
-async fn initialize_error_fans_out_and_explicit_retry_coalesces() -> io::Result<()> {
-    initialize_error().await
 }
 
 #[tokio::test]

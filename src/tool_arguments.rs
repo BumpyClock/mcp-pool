@@ -156,9 +156,6 @@ pub fn positive_milliseconds(content: &str) -> Result<u64> {
     let result: u64 = content
         .parse()
         .context("--timeout must be a positive integer (milliseconds)")?;
-    if result == 0 {
-        bail!("--timeout must be a positive integer (milliseconds)");
-    }
     if std::time::Instant::now()
         .checked_add(std::time::Duration::from_millis(result))
         .is_none()
@@ -353,13 +350,9 @@ pub fn call(arguments: Vec<String>) -> Result<Call> {
     inputs.prepare(&result)?;
     inputs.apply(&mut result, None)?;
     result.inputs = inputs;
-    result.positionals.extend(literal.iter().map(|content| {
-        if result.no_coerce {
-            Value::String(content.trim().to_owned())
-        } else {
-            coerce(content, result.raw_strings)
-        }
-    }));
+    for content in literal {
+        result.positionals.push(call_value(&content, &result));
+    }
     if result.tool.as_deref() == Some("") {
         bail!("Tool name cannot be empty");
     }

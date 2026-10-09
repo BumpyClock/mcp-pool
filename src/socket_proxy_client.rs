@@ -89,8 +89,9 @@ pub(super) async fn handle_client(
                                     &error,
                                 )),
                             };
+                            let cache_key = cacheable_request(&value);
                             let floor = Duration::from_secs(REQUEST_TTL_SECS).max(
-                                if cacheable_request(&value).is_some() { shared_timeout } else { Duration::ZERO }
+                                if cache_key.is_some() { shared_timeout } else { Duration::ZERO }
                             );
                             let expires_after = timeout_ms
                                 .map(Duration::from_millis)
@@ -117,7 +118,7 @@ pub(super) async fn handle_client(
                                 }
                                 value.to_string()
                             } else {
-                                line.clone()
+                                line
                             };
                             // Clone the original id (ending the borrow) before
                             // moving the object into `with_id`.
@@ -151,168 +152,92 @@ pub(super) async fn handle_client(
                                             parse_client_capabilities(&value),
                                         );
                                     }
-                                    let cache_key = cacheable_request(&value);
-                                    match cache_key {
-                                        Some(CacheableMethod::Initialize) => {
-                                            match prepare_initialize_request(
+                                    let (discovery, coalesced_event) = match cache_key {
+                                        Some(CacheableMethod::Initialize) => (
+                                            prepare_initialize_request(
                                                 &handshake_cache,
                                                 &client_id,
                                                 original_id.clone(),
                                                 expires_after,
                                                 transport_deadline,
-                                            ) {
-                                            DiscoveryAction::Cached(response) => {
-                                                diagnostics::log(format!(
-                                                    "pool_cache_hit method=initialize client_id={}",
-                                                    client_id
-                                                ));
-                                                ClientAction::Cached(response)
-                                            }
-                                            DiscoveryAction::Coalesced => {
-                                                diagnostics::log(format!(
-                                                    "pool_initialize_coalesced client_id={}", client_id
-                                                ));
-                                                ClientAction::Drop
-                                            }
-                                            DiscoveryAction::Leader => {
-                                                diagnostics::log(format!(
-                                                    "pool_cache_miss method=initialize client_id={}",
-                                                    client_id
-                                                ));
-                                                let pool_id = id_allocator.allocate();
-                                                request_map.lock().insert(
-                                                    jsonrpc::id_key(&Value::from(pool_id)),
-                                                    PendingRequestInfo {
-                                                        client_id: client_id.clone(),
-                                                        original_id,
-                                                        method: Some("initialize".to_string()),
-                                                        cache_key,
-                                                        tool: None,
-                                                        inserted_at: Instant::now(),
-                                                        expires_after,
-                                                    },
-                                                );
-                                                *last_active_client.lock() = Some(client_id.clone());
-                                                match value.clone() {
-                                                    Value::Object(object) => ClientAction::Forward {
-                                                        line: jsonrpc::with_id(object, Value::from(pool_id)),
-                                                        method: Some("initialize".to_string()),
-                                                        tool: None,
-                                                        pool_id: Some(pool_id),
-                                                    },
-                                                    _ => ClientAction::Forward {
-                                                        line: line.clone(),
-                                                        method: Some("initialize".to_string()),
-                                                        tool: None,
-                                                        pool_id: Some(pool_id),
-                                                    },
-                                                }
-                                                }
-                                            }
-                                        }
-                                        Some(CacheableMethod::ToolsList) => {
-                                            match prepare_tools_list_request(
+                                            ),
+                                            "pool_initialize_coalesced",
+                                        ),
+                                        Some(CacheableMethod::ToolsList) => (
+                                            prepare_tools_list_request(
                                                 &handshake_cache,
                                                 &client_id,
                                                 original_id.clone(),
                                                 expires_after,
                                                 transport_deadline,
-                                            ) {
-                                                DiscoveryAction::Cached(response) => {
-                                                    diagnostics::log(format!(
-                                                        "pool_cache_hit method=tools/list client_id={}",
-                                                        client_id
-                                                    ));
-                                                    ClientAction::Cached(response)
-                                                }
-                                                DiscoveryAction::Coalesced => {
-                                                    diagnostics::log(format!(
-                                                        "pool_tools_list_coalesced client_id={}",
-                                                        client_id
-                                                    ));
-                                                    ClientAction::Drop
-                                                }
-                                                DiscoveryAction::Leader => {
+                                            ),
+                                            "pool_tools_list_coalesced",
+                                        ),
+                                        None => (DiscoveryAction::Leader, ""),
+                                    };
+                                    match discovery {
+                                        DiscoveryAction::Cached(response) => {
+                                            diagnostics::log(format!(
+                                                "pool_cache_hit method={} client_id={}",
+                                                method.as_deref().unwrap_or("?"), client_id
+                                            ));
+                                            ClientAction::Cached(response)
+                                        }
+                                        DiscoveryAction::Coalesced => {
+                                            diagnostics::log(format!(
+                                                "{coalesced_event} client_id={client_id}"
+                                            ));
+                                            ClientAction::Drop
+                                        }
+                                        DiscoveryAction::Leader => {
+                                            if cache_key.is_some() {
                                                 diagnostics::log(format!(
-                                                    "pool_cache_miss method=tools/list client_id={}",
-                                                    client_id
+                                                    "pool_cache_miss method={} client_id={}",
+                                                    method.as_deref().unwrap_or("?"), client_id
                                                 ));
-                                                let pool_id = id_allocator.allocate();
-                                                request_map.lock().insert(
-                                                    jsonrpc::id_key(&Value::from(pool_id)),
-                                                    PendingRequestInfo {
-                                                        client_id: client_id.clone(),
-                                                        original_id,
-                                                        method: Some("tools/list".to_string()),
-                                                        cache_key,
-                                                        tool: None,
-                                                        inserted_at: Instant::now(),
-                                                        expires_after,
-                                                    },
-                                                );
-                                                *last_active_client.lock() = Some(client_id.clone());
-                                                match value.clone() {
-                                                    Value::Object(object) => ClientAction::Forward {
-                                                        line: jsonrpc::with_id(object, Value::from(pool_id)),
-                                                        method: Some("tools/list".to_string()),
-                                                        tool: None,
-                                                        pool_id: Some(pool_id),
-                                                    },
-                                                    _ => ClientAction::Forward {
-                                                        line: line.clone(),
-                                                        method: Some("tools/list".to_string()),
-                                                        tool: None,
-                                                        pool_id: Some(pool_id),
-                                                    },
-                                                }
-                                                }
                                             }
-                                        }
-                                        None => {
-                                        let pool_id = id_allocator.allocate();
-                                        let forward_method = method.clone();
-                                        // Store the real method so the response
-                                        // route log reports the actual method
-                                        // (e.g. tools/call) rather than `?`.
-                                        let pending_method = method.clone();
-                                        // Key the pending request through the same
-                                        // canonical helper route_response uses to
-                                        // look it up, so the insert and lookup keys
-                                        // cannot drift (numeric id -> identical
-                                        // string).
-                                        request_map.lock().insert(
-                                            jsonrpc::id_key(&Value::from(pool_id)),
-                                            PendingRequestInfo {
-                                                client_id: client_id.clone(),
-                                                original_id,
-                                                method: pending_method,
-                                                cache_key,
-                                                tool: tool.clone(),
-                                                inserted_at: Instant::now(),
-                                                expires_after,
-                                            },
-                                        );
-                                        // Record this client as most-recently-active
-                                        // so a server-initiated callback can route
-                                        // back to it (see route_server_request).
-                                        *last_active_client.lock() = Some(client_id.clone());
-                                        match value.clone() {
-                                            Value::Object(object) => ClientAction::Forward {
-                                                line: jsonrpc::with_id(object, Value::from(pool_id)),
-                                                method: forward_method,
-                                                tool: tool.clone(),
-                                                pool_id: Some(pool_id),
-                                            },
-                                            // Unreachable: guarded by is_object
-                                            // above, but match instead of unwrap to
-                                            // stay panic-free.
-                                            _ => ClientAction::Forward {
-                                                line: line.clone(),
-                                                method: forward_method,
-                                                tool: tool.clone(),
-                                                pool_id: Some(pool_id),
-                                            },
-                                        }
+                                            let pool_id = id_allocator.allocate();
+                                            // Store the real method so the response
+                                            // route log reports the actual method
+                                            // (e.g. tools/call) rather than `?`.
+                                            // Key the pending request through the same
+                                            // canonical helper route_response uses to
+                                            // look it up, so the insert and lookup keys
+                                            // cannot drift (numeric id -> identical
+                                            // string).
+                                            request_map.lock().insert(
+                                                jsonrpc::id_key(&Value::from(pool_id)),
+                                                PendingRequestInfo {
+                                                    client_id: client_id.clone(),
+                                                    original_id,
+                                                    method: method.clone(),
+                                                    cache_key,
+                                                    tool: tool.clone(),
+                                                    inserted_at: Instant::now(),
+                                                    expires_after,
+                                                },
+                                            );
+                                            // Record this client as most-recently-active
+                                            // so a server-initiated callback can route
+                                            // back to it (see route_server_request).
+                                            *last_active_client.lock() = Some(client_id.clone());
+                                            match value {
+                                                Value::Object(object) => ClientAction::Forward {
+                                                    line: jsonrpc::with_id(object, Value::from(pool_id)),
+                                                    method,
+                                                    tool,
+                                                    pool_id: Some(pool_id),
+                                                },
+                                                // Unreachable: guarded by is_object
+                                                // above, but match instead of unwrap to
+                                                // stay panic-free.
+                                                _ => ClientAction::Forward {
+                                                    line,
+                                                    method,
+                                                    tool,
+                                                    pool_id: Some(pool_id),
+                                                },
+                                            }
                                         }
                                     }
                                 }
@@ -337,7 +262,7 @@ pub(super) async fn handle_client(
                                             line.len()
                                         ));
                                         ClientAction::Forward {
-                                            line: line.clone(),
+                                            line,
                                             method,
                                             tool: None,
                                             pool_id: None,
@@ -347,7 +272,7 @@ pub(super) async fn handle_client(
                             }
                         }
                         Ok(_) => ClientAction::Forward {
-                            line: line.clone(),
+                            line,
                             method: None,
                             tool: None,
                             pool_id: None,
@@ -362,7 +287,7 @@ pub(super) async fn handle_client(
                                 ));
                             }
                             ClientAction::Forward {
-                                line: line.clone(),
+                                line,
                                 method: None,
                                 tool: None,
                                 pool_id: None,

@@ -10,11 +10,11 @@ pub(crate) fn encode_tool_name(server: &str, tool: &str) -> String {
 }
 
 pub(crate) fn decode_tool_name(name: &str, servers: &[String]) -> Option<(String, String)> {
-    let mut candidates: Vec<(String, String)> = servers
+    let mut candidates: Vec<(&String, String)> = servers
         .iter()
         .map(|server| {
             (
-                server.clone(),
+                server,
                 format!(
                     "{}{}",
                     encode_tool_name_part(server, true, false),
@@ -31,7 +31,7 @@ pub(crate) fn decode_tool_name(name: &str, servers: &[String]) -> Option<(String
         };
         let tool = decode_tool_name_part(encoded_tool);
         if !tool.is_empty() {
-            return Some((server, tool));
+            return Some((server.clone(), tool));
         }
     }
     None

@@ -254,8 +254,9 @@ fn build_server_def(
 }
 
 fn normalize_transport(value: &str) -> anyhow::Result<String> {
-    match value.to_ascii_lowercase().as_str() {
-        "http" | "sse" => Ok(value.to_ascii_lowercase()),
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "http" | "sse" => Ok(normalized),
         other => Err(anyhow::anyhow!(
             "invalid --transport '{other}': expected 'http' or 'sse'"
         )),
@@ -303,15 +304,10 @@ fn remove_server(name: &str, yes: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let removed = pool_config.remove(name);
+    pool_config.remove(name);
     pool_config.save()?;
 
-    if removed {
-        println!("removed server '{name}'");
-    } else {
-        eprintln!("mcp-pool: '{name}' is not configured");
-        std::process::exit(1);
-    }
+    println!("removed server '{name}'");
     Ok(())
 }
 
@@ -399,4 +395,31 @@ async fn control_round_trip(
 
     print_response_data(&request, response.data, mode, color);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_transport_normalization_preserves_values_and_errors() -> anyhow::Result<()> {
+        assert_eq!(normalize_transport("HTTP")?, "http");
+        assert_eq!(normalize_transport("sSe")?, "sse");
+        assert_eq!(
+            normalize_transport("StDiO")
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("invalid transport accepted"))?
+                .to_string(),
+            "invalid --transport 'stdio': expected 'http' or 'sse'"
+        );
+        let definition = build_server_def(
+            Some("https://example.test/mcp".to_owned()),
+            Some("SSE".to_owned()),
+            None,
+            Vec::new(),
+        )?;
+        assert_eq!(definition.transport, "sse");
+        assert_eq!(definition.url, "https://example.test/mcp");
+        Ok(())
+    }
 }

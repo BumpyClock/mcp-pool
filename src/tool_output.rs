@@ -81,9 +81,9 @@ pub fn render(result: &Value, output: Output) -> Result<String> {
                 .and_then(|text| serde_json::from_str(text).ok())
         });
     let extracted_text = match output {
-        Output::Text => text.or_else(|| markdown.clone()),
-        Output::Markdown => markdown.or_else(|| text.clone()),
-        Output::Auto if json.is_none() => markdown.or_else(|| text.clone()),
+        Output::Text => text.or(markdown),
+        Output::Markdown => markdown.or(text),
+        Output::Auto if json.is_none() => markdown.or(text),
         _ => None,
     };
     if let Some(text) = extracted_text {
@@ -395,6 +395,10 @@ mod tests {
             render(&json!({"structuredContent":"plain"}), Output::Auto)?,
             "plain"
         );
+        let markdown = json!({"structuredContent":{"markdown":"# fallback"}});
+        assert_eq!(render(&markdown, Output::Text)?, "# fallback");
+        let text = json!({"content":[{"type":"text","text":"fallback"}]});
+        assert_eq!(render(&text, Output::Markdown)?, "fallback");
         Ok(())
     }
 

@@ -218,16 +218,11 @@ async fn handle_connection(
 /// Map a control request to its response. Pure translation: all pool mutations
 /// go through the shared `Arc<Pool>` and complete before their response is sent.
 async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse {
-    match request {
+    let result = match request {
         ControlRequest::StartDefinition { name, definition } => {
             let spec = upstream_spec_from_def(definition);
-            match pool
-                .start(name, spec, definition.configuration_entry.clone())
+            pool.start(name, spec, definition.configuration_entry.clone())
                 .await
-            {
-                Ok(()) => ControlResponse::ok(),
-                Err(error) => ControlResponse::err(error.to_string()),
-            }
         }
         ControlRequest::Start { name } => {
             // Always reload config so a freshly-added server is startable without
@@ -240,48 +235,42 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
                 return ControlResponse::err(format!("unknown server: {name}"));
             };
             let spec = upstream_spec_from_def(definition);
-            match pool.start(name, spec, None).await {
-                Ok(()) => ControlResponse::ok(),
-                Err(error) => ControlResponse::err(error.to_string()),
-            }
+            pool.start(name, spec, None).await
         }
-        ControlRequest::StartAll => match pool.start_all().await {
-            Ok(results) => {
-                let servers: Vec<serde_json::Value> = results
-                    .into_iter()
-                    .map(|(name, error)| match error {
-                        Some(error) => {
-                            serde_json::json!({ "name": name, "ok": false, "error": error })
-                        }
-                        None => serde_json::json!({ "name": name, "ok": true }),
-                    })
-                    .collect();
-                ControlResponse::data(serde_json::json!({ "servers": servers }))
-            }
-            Err(error) => ControlResponse::err(error.to_string()),
-        },
-        ControlRequest::Stop { name } => match pool.stop_server(name).await {
-            Ok(_stopped) => ControlResponse::ok(),
-            Err(error) => ControlResponse::err(error.to_string()),
-        },
-        ControlRequest::Restart { name } => match pool.restart(name).await {
-            Ok(_restarted) => ControlResponse::ok(),
-            Err(error) => ControlResponse::err(error.to_string()),
-        },
+        ControlRequest::StartAll => {
+            return match pool.start_all().await {
+                Ok(results) => {
+                    let servers: Vec<serde_json::Value> = results
+                        .into_iter()
+                        .map(|(name, error)| match error {
+                            Some(error) => {
+                                serde_json::json!({ "name": name, "ok": false, "error": error })
+                            }
+                            None => serde_json::json!({ "name": name, "ok": true }),
+                        })
+                        .collect();
+                    ControlResponse::data(serde_json::json!({ "servers": servers }))
+                }
+                Err(error) => ControlResponse::err(error.to_string()),
+            };
+        }
+        ControlRequest::Stop { name } => pool.stop_server(name).await.map(|_| ()),
+        ControlRequest::Restart { name } => pool.restart(name).await.map(|_| ()),
         ControlRequest::Status { name } => {
             let mut status = pool.get_status();
             if let Some(filter_name) = name {
                 status.servers.retain(|server| &server.name == filter_name);
             }
-            match serde_json::to_value(&status) {
+            return match serde_json::to_value(&status) {
                 Ok(value) => ControlResponse::data(value),
                 Err(error) => ControlResponse::err(error.to_string()),
-            }
+            };
         }
-        ControlRequest::Shutdown => match pool.shutdown().await {
-            Ok(()) => ControlResponse::ok(),
-            Err(error) => ControlResponse::err(error.to_string()),
-        },
+        ControlRequest::Shutdown => pool.shutdown().await,
+    };
+    match result {
+        Ok(()) => ControlResponse::ok(),
+        Err(error) => ControlResponse::err(error.to_string()),
     }
 }
 
@@ -289,6 +278,25 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
 mod tests {
     use super::*;
     use crate::socket_proxy::retirement_tests::{RETIREMENT_ERROR, failed_retirement_pool};
+
+    #[tokio::test]
+    async fn absent_servers_and_empty_pool_shutdown_preserve_success_envelopes() {
+        let pool = Arc::new(Pool::new());
+        for request in [
+            ControlRequest::Stop {
+                name: "absent-server".into(),
+            },
+            ControlRequest::Restart {
+                name: "absent-server".into(),
+            },
+            ControlRequest::Shutdown,
+        ] {
+            let response = dispatch(&request, &pool).await;
+            assert!(response.ok);
+            assert!(response.error.is_none());
+            assert!(response.data.is_none());
+        }
+    }
 
     #[tokio::test]
     async fn stop_restart_and_shutdown_return_retirement_errors_to_control_clients()

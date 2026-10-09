@@ -326,22 +326,36 @@ pub fn socket_alive(path: &Path) -> bool {
 /// `mcp-pool-<name>.sock` back into `<name>`. Returns None for anything that is
 /// not one of our socket files.
 pub fn socket_name_from_path(path: &Path) -> Option<String> {
-    let file_name = path.file_name()?.to_string_lossy().into_owned();
-    const PREFIX: &str = "mcp-pool-";
-    const SUFFIX: &str = ".sock";
-    if !file_name.starts_with(PREFIX) || !file_name.ends_with(SUFFIX) {
-        return None;
-    }
-    let trimmed = &file_name[PREFIX.len()..file_name.len() - SUFFIX.len()];
-    if trimmed.is_empty() {
-        return None;
-    }
-    Some(trimmed.to_string())
+    let file_name = path.file_name()?.to_string_lossy();
+    file_name
+        .strip_prefix("mcp-pool-")?
+        .strip_suffix(".sock")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
 mod options_tests {
     use super::*;
+
+    #[test]
+    fn socket_names_require_the_complete_nonempty_endpoint_pattern() {
+        for (filename, expected) in [
+            ("mcp-pool-echo.sock", Some("echo")),
+            ("mcp-pool-name.sock.sock", Some("name.sock")),
+            ("mcp-pool-écho.sock", Some("écho")),
+            ("mcp-pool-.sock", None),
+            ("mcp-pool-echo", None),
+            ("other-echo.sock", None),
+            ("mcp-pool-echo.sock.backup", None),
+        ] {
+            assert_eq!(
+                socket_name_from_path(Path::new(filename)).as_deref(),
+                expected,
+                "{filename}"
+            );
+        }
+    }
 
     #[test]
     fn status_preserves_configuration_entry_ownership() -> std::io::Result<()> {

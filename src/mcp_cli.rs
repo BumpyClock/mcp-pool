@@ -5,7 +5,6 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
-use crate::config::ServerDef;
 use crate::mcp_client::McpClient;
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 use crate::tool_arguments::{self, AdHoc, Output};
@@ -13,8 +12,10 @@ use crate::{config_commands, daemon_commands, tool_discovery, tool_output};
 
 #[path = "cli_context.rs"]
 pub(crate) mod context;
+pub(crate) use context::command_index as command_position;
 #[path = "pool_identity.rs"]
 mod identity;
+pub(crate) use identity::pool_name;
 #[path = "server_selector.rs"]
 pub(crate) mod selector;
 #[path = "stdio_tokens.rs"]
@@ -49,10 +50,6 @@ pub fn handles(arguments: &[String]) -> bool {
     context::command_index(arguments)
         .and_then(|index| arguments.get(index))
         .is_some_and(|command| COMMANDS.contains(&command.as_str()))
-}
-
-pub(crate) fn command_position(arguments: &[String]) -> Option<usize> {
-    context::command_index(arguments)
 }
 
 pub async fn run(arguments: Vec<String>) -> Result<()> {
@@ -109,10 +106,6 @@ pub(crate) fn load(path: Option<PathBuf>) -> Result<ServerConfiguration> {
     Ok(configuration)
 }
 
-pub fn pool_name(server: &ConfiguredServer, definition: &ServerDef) -> Result<String> {
-    identity::pool_name(server, definition)
-}
-
 pub(crate) fn server(
     configuration: &ServerConfiguration,
     name: &str,
@@ -162,7 +155,7 @@ pub(crate) fn server(
         }
         if let Some(command) = &ephemeral.command {
             let mut tokens = command_tokens(command)?;
-            tokens.extend(ephemeral.arguments.clone());
+            tokens.extend(ephemeral.arguments.iter().cloned());
             object.insert("command".to_owned(), json!(tokens));
         }
         if let Some(cwd) = &ephemeral.cwd {
@@ -173,7 +166,7 @@ pub(crate) fn server(
         }
     }
     let source = std::env::current_dir()?.join(".mcporter-adhoc.json");
-    let configuration = crate::server_config::parse_config(
+    let mut configuration = crate::server_config::parse_config(
         &source,
         &serde_json::to_string(&json!({
             "mcpServers":{label:entry},"imports":[]
@@ -181,8 +174,7 @@ pub(crate) fn server(
     )?;
     let mut selected = configuration
         .servers
-        .get(label)
-        .cloned()
+        .remove(label)
         .context("Ad-hoc definition was not created")?;
     if let Some(path) = &ephemeral.persist {
         selected.source = persistence::destination(path)?;
@@ -291,6 +283,7 @@ pub(crate) fn safe_error(server: &ConfiguredServer, error: &anyhow::Error) -> St
         .env
         .iter()
         .filter(|(name, value)| {
+            let uppercase_name = name.to_ascii_uppercase();
             let sensitive_name = [
                 "TOKEN",
                 "SECRET",
@@ -300,7 +293,7 @@ pub(crate) fn safe_error(server: &ConfiguredServer, error: &anyhow::Error) -> St
                 "ACCESS_KEY",
             ]
             .iter()
-            .any(|pattern| name.to_ascii_uppercase().contains(pattern));
+            .any(|pattern| uppercase_name.contains(pattern));
             sensitive_name
                 || (value.len() >= 4 && configured.is_some_and(|values| values.contains_key(*name)))
         })

@@ -72,12 +72,7 @@ impl Generation {
         *self.last_active_client.lock() = None;
     }
 
-    async fn route(
-        &self,
-        message: &str,
-        recovery_tx: &mpsc::Sender<RecoveryReason>,
-        recovery_requested: &Arc<AtomicBool>,
-    ) {
+    async fn route(&self, message: &str, recovery_tx: &mpsc::Sender<RecoveryReason>) {
         route_response(
             message,
             &self.clients,
@@ -87,7 +82,6 @@ impl Generation {
             &self.client_capabilities,
             &self.request_tx,
             recovery_tx,
-            recovery_requested,
         )
         .await;
     }
@@ -167,7 +161,6 @@ fn spawn_owner_with(
             let started_at = backend_started_at;
             let name = backend_name;
             let (recovery_tx, mut recovery_rx) = mpsc::channel(8);
-            let recovery_requested = Arc::new(AtomicBool::new(false));
             // Never cancel spawn: it can already own a child that must be retired.
             let spawned = setup.await;
             let mut recover = false;
@@ -206,7 +199,7 @@ fn spawn_owner_with(
                                     _ = &mut shutdown => {}
                                     drained = tokio::time::timeout(Duration::from_millis(250), async {
                                         while let Ok(message) = response_rx.try_recv() {
-                                            generation.route(&message, &recovery_tx, &recovery_requested).await;
+                                            generation.route(&message, &recovery_tx).await;
                                         }
                                     }) => {
                                         if drained.is_err() {
@@ -232,7 +225,7 @@ fn spawn_owner_with(
                                 // Slow client channels must not delay backend retirement.
                                 tokio::select! {
                                     _ = &mut shutdown => break,
-                                    _ = generation.route(&message, &recovery_tx, &recovery_requested) => {}
+                                    _ = generation.route(&message, &recovery_tx) => {}
                                 }
                             }
                         }

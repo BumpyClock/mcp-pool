@@ -121,16 +121,10 @@ impl McpClient {
         // Keep ownership in this future so cancellation cannot leave a partial
         // write/read or a late response on a reusable connection.
         let outcome = timeout(self.deadline, async {
-            let mut message = json!({
-                "jsonrpc":"2.0", "id":request_id, "method":method, "params":params
+            let message = json!({
+                "jsonrpc":"2.0", "id":request_id, "method":method, "params":params,
+                crate::request_deadline::TIMEOUT_FIELD:timeout_ms
             });
-            message
-                .as_object_mut()
-                .context("MCP request is not an object")?
-                .insert(
-                    crate::request_deadline::TIMEOUT_FIELD.into(),
-                    Value::from(timeout_ms),
-                );
             wire::write_message(&mut reader, &message).await?;
             wire::receive_result(&mut reader, request_id).await
         })

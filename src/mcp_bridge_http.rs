@@ -269,8 +269,17 @@ fn has_json_content_type(headers: &HeaderMap) -> bool {
 }
 
 fn accepts_streamable_json(headers: &HeaderMap) -> bool {
+    let (accepts_json, accepts_sse) = accepted_media_types(headers);
+    accepts_json && accepts_sse
+}
+
+fn accepts_event_stream(headers: &HeaderMap) -> bool {
+    accepted_media_types(headers).1
+}
+
+fn accepted_media_types(headers: &HeaderMap) -> (bool, bool) {
     let Some(value) = headers.get(ACCEPT).and_then(|value| value.to_str().ok()) else {
-        return false;
+        return (false, false);
     };
     let mut accepts_json = false;
     let mut accepts_sse = false;
@@ -294,26 +303,7 @@ fn accepts_streamable_json(headers: &HeaderMap) -> bool {
         );
         accepts_sse |= matches!(media_type.as_str(), "text/event-stream" | "text/*" | "*/*");
     }
-    accepts_json && accepts_sse
-}
-
-fn accepts_event_stream(headers: &HeaderMap) -> bool {
-    let Some(value) = headers.get(ACCEPT).and_then(|value| value.to_str().ok()) else {
-        return false;
-    };
-    value.split(',').any(|item| {
-        let mut parts = item.split(';');
-        let media_type = parts.next().unwrap_or_default().trim().to_ascii_lowercase();
-        let quality_zero = parts.any(|parameter| {
-            parameter.trim().strip_prefix("q=").is_some_and(|quality| {
-                quality
-                    .trim()
-                    .parse::<f32>()
-                    .is_ok_and(|value| value == 0.0)
-            })
-        });
-        !quality_zero && matches!(media_type.as_str(), "text/event-stream" | "text/*" | "*/*")
-    })
+    (accepts_json, accepts_sse)
 }
 
 fn valid_modern_headers(headers: &HeaderMap, message: &Value) -> bool {

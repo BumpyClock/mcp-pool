@@ -433,14 +433,13 @@ fn request_timeout(definition: &crate::config::ServerDef) -> Duration {
     Duration::from_millis(milliseconds)
 }
 
-fn expose_tool(server: &str, tool: Value, bare_names: bool) -> Option<Value> {
-    let source = tool.as_object()?;
-    let name = source.get("name")?.as_str()?;
+fn expose_tool(server: &str, mut tool: Value, bare_names: bool) -> Option<Value> {
+    let exposed = tool.as_object_mut()?;
+    let name = exposed.get("name")?.as_str()?;
     if name.is_empty() {
         return None;
     }
 
-    let mut exposed = source.clone();
     exposed.insert(
         "name".to_owned(),
         Value::String(if bare_names {
@@ -450,28 +449,25 @@ fn expose_tool(server: &str, tool: Value, bare_names: bool) -> Option<Value> {
         }),
     );
     if !bare_names {
-        let description = source.get("description").and_then(Value::as_str);
+        let description = exposed.get("description").and_then(Value::as_str);
         exposed.insert(
             "description".to_owned(),
             Value::String(names::describe_tool(server, description)),
         );
     }
-    let input_schema = exposed
-        .get("inputSchema")
-        .filter(|schema| {
-            schema
-                .as_object()
-                .and_then(|schema| schema.get("type"))
-                .and_then(Value::as_str)
-                == Some("object")
-        })
-        .cloned()
-        .unwrap_or_else(|| json!({"type":"object"}));
-    exposed.insert("inputSchema".to_owned(), input_schema);
+    if !exposed.get("inputSchema").is_some_and(|schema| {
+        schema
+            .as_object()
+            .and_then(|schema| schema.get("type"))
+            .and_then(Value::as_str)
+            == Some("object")
+    }) {
+        exposed.insert("inputSchema".to_owned(), json!({"type":"object"}));
+    }
     if !exposed.get("outputSchema").is_some_and(Value::is_object) {
         exposed.remove("outputSchema");
     }
-    Some(Value::Object(exposed))
+    Some(tool)
 }
 
 pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> anyhow::Result<()> {

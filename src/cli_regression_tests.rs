@@ -168,3 +168,25 @@ fn tool_filter_aliases_apply_to_calls_discovery_and_single_tool_inference() -> R
     }
     Ok(())
 }
+
+#[test]
+fn error_redaction_preserves_configured_and_sensitive_environment_rules() -> Result<()> {
+    let configuration = configuration()?;
+    let mut selected = configuration.servers.get("docs").context("docs")?.clone();
+    selected.raw = json!({"env":{"DECLARED":"declared-private","SHORT":"abc"}});
+    selected.definition.env = std::collections::BTreeMap::from([
+        ("DECLARED".to_owned(), "declared-private".to_owned()),
+        ("SHORT".to_owned(), "abc".to_owned()),
+        ("mixedCaseToKeN".to_owned(), "token-private".to_owned()),
+        ("AMBIENT".to_owned(), "ambient-value".to_owned()),
+    ]);
+    selected.definition.headers =
+        std::collections::BTreeMap::from([("X-Fixture".to_owned(), "header-private".to_owned())]);
+    let error = anyhow::anyhow!("declared-private token-private header-private abc ambient-value")
+        .context("outer");
+    assert_eq!(
+        safe_error(&selected, &error),
+        "outer: [redacted] [redacted] [redacted] abc ambient-value"
+    );
+    Ok(())
+}

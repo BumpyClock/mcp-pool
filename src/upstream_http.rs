@@ -252,12 +252,10 @@ async fn post(
             if request.initialize {
                 return Err("MCP HTTP upstream is already initialized".into());
             }
-            let mut headers = HeaderMap::new();
-            headers.insert("MCP-Protocol-Version", protocol);
+            builder = builder.header("MCP-Protocol-Version", protocol);
             if let Some(identifier) = identifier {
-                headers.insert("Mcp-Session-Id", identifier);
+                builder = builder.header("Mcp-Session-Id", identifier);
             }
-            builder = builder.headers(headers);
         }
         Session::Fresh => {}
     }

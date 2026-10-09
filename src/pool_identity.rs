@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use crate::config::ServerDef;
 use crate::server_config::ConfiguredServer;
 
-pub(super) fn pool_name(server: &ConfiguredServer, definition: &ServerDef) -> Result<String> {
+pub(crate) fn pool_name(server: &ConfiguredServer, definition: &ServerDef) -> Result<String> {
     let mut definition = serde_json::to_value(definition)?;
     if let Some(object) = definition.as_object_mut() {
         object.remove("configuration_entry");

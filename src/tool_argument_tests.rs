@@ -403,3 +403,22 @@ fn ad_hoc_function_calls_and_single_tool_inference_reach_discovery() -> Result<(
     assert_eq!(parsed.arguments.get("query"), Some(&json!("hello")));
     Ok(())
 }
+
+#[test]
+fn timeout_validation_and_literal_coercion_keep_existing_boundaries() -> Result<()> {
+    assert_eq!(positive_milliseconds("1")?, 1);
+    for invalid in ["", "0", "01", "-1", "+1", "1.0", "18446744073709551616"] {
+        assert!(positive_milliseconds(invalid).is_err());
+    }
+    let parsed = parse(&["docs.search", "--", "3", "true", "none", "001"])?;
+    assert_eq!(
+        parsed.positionals,
+        vec![json!(3), json!(true), Value::Null, json!("001")]
+    );
+    let parsed = parse(&["docs.search", "--no-coerce", "--", " 3 ", "true", "none"])?;
+    assert_eq!(
+        parsed.positionals,
+        vec![json!("3"), json!("true"), json!("none")]
+    );
+    Ok(())
+}

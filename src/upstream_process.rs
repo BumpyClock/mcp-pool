@@ -62,6 +62,7 @@ impl OwnedProcess {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             if self.ownership.is_empty()? {
+                #[cfg(unix)]
                 self.ownership.disarm();
                 return Ok(());
             }
