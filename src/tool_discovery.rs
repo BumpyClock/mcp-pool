@@ -148,7 +148,8 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
         }
     }
     progress.finish();
-    let style = crate::tool_documentation::Style::terminal(flags.no_color);
+    let style =
+        crate::tool_documentation::Style::terminal(flags.no_color || flags.json || flags.quiet);
     completed.sort_by_key(|(index, _)| *index);
     for (_, (server, mut tools, duration, error)) in completed {
         let mut entry = base(&server, duration);

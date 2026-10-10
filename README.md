@@ -78,11 +78,16 @@ single-server discovery exits unsuccessfully.
 documentation, typed signatures, examples, and a transport summary. Interactive
 output highlights tool names and parameters and dims explanatory text.
 `--no-color` or `NO_COLOR` disables colors; redirected output contains no color
-codes. The default shows up to five parameters plus any additional required
-ones. A notice identifies hidden optional fields; use `--all-parameters` to
-show them. `--brief` prints required-only signatures, and `--schema` adds the
-complete input schemas. `list SERVER.TOOL` selects one tool; a second positional
-argument is not accepted.
+codes. On Windows, listing colors require virtual-terminal support. The command
+enables it without clearing other console mode flags; if this fails, it reports
+the error and prints plain text. JSON and quiet listings do not change console
+modes. Examples preserve enum value types through local schema references,
+including array items. Cyclic or unresolved references use generic placeholders,
+not validated argument values. The default shows up to five parameters plus any
+additional required ones. A notice identifies hidden optional fields; use
+`--all-parameters` to show them. `--brief` prints required-only signatures, and
+`--schema` adds the complete input schemas. `list SERVER.TOOL` selects one tool;
+a second positional argument is not accepted.
 
 Interactive discovery, calls, resources, and native pool-control commands show
 a waiting indicator on stderr with the current phase and elapsed time.
