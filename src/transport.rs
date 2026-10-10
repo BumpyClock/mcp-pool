@@ -161,4 +161,41 @@ mod tests {
         drop(listener);
         Ok(())
     }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn abandoned_client_does_not_poison_later_accepts() -> io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let path = unique_endpoint();
+        let listener = bind(&path)?;
+        let abandoned = connect(&path).await?;
+        drop(abandoned);
+
+        let mut abandoned_server = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+        let mut buffer = [0; 1];
+        let received =
+            tokio::time::timeout(Duration::from_secs(5), abandoned_server.read(&mut buffer))
+                .await
+                .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+        assert_eq!(received, 0);
+        assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+        drop(abandoned_server);
+        assert_eq!(
+            bind(&path).err().map(|error| error.kind()),
+            Some(io::ErrorKind::PermissionDenied)
+        );
+
+        let mut client = connect(&path).await?;
+        let mut server = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
+        client.write_all(b"recovered").await?;
+        let mut received = [0; 9];
+        server.read_exact(&mut received).await?;
+        assert_eq!(&received, b"recovered");
+        Ok(())
+    }
 }

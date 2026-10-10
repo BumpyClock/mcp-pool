@@ -184,7 +184,7 @@ fn create_private_directories(path: &Path) -> io::Result<PathBuf> {
         std::env::current_dir()?.join(path)
     };
 
-    let mut existing = absolute.clone();
+    let mut existing = absolute;
     let mut missing = Vec::new();
     loop {
         match fs::symlink_metadata(&existing) {
@@ -318,6 +318,20 @@ fn app_owned_directories(path: &Path) -> Vec<PathBuf> {
 }
 
 fn bind_with_private_mode(path: &Path) -> io::Result<tokio::net::UnixListener> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "local socket path has no parent")
+    })?;
+    let metadata = fs::symlink_metadata(parent)?;
+    if metadata.file_type().is_dir()
+        && metadata.uid() == unsafe { libc::geteuid() }
+        && metadata.permissions().mode() & 0o077 == 0
+    {
+        // The private parent prevents other users from reaching the socket before chmod.
+        let listener = tokio::net::UnixListener::bind(path)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        return Ok(listener);
+    }
+
     let _lock = UMASK_LOCK.lock();
     let umask = PrivateUmask::set();
     let result = tokio::net::UnixListener::bind(path);
