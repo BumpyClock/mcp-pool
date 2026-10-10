@@ -2,12 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
-/// Monotonic source of pool-unique JSON-RPC request ids.
-///
-/// Each pooled upstream multiplexes many clients onto one connection. Clients
-/// independently number their requests (1, 2, 3, ...), so raw ids collide across
-/// clients. The pool rewrites every client request id to a unique pool id before
-/// forwarding and restores the client's original id on the matching response.
+/// Allocates request IDs shared by all clients of one upstream.
 #[derive(Debug)]
 pub struct IdAllocator {
     next: AtomicU64,
@@ -15,8 +10,6 @@ pub struct IdAllocator {
 
 impl IdAllocator {
     pub fn new() -> Self {
-        // Start at 1: id 0 is legal JSON-RPC but starting at 1 keeps logs and any
-        // id-sensitive upstream tooling conventional.
         Self {
             next: AtomicU64::new(1),
         }
@@ -33,15 +26,11 @@ impl Default for IdAllocator {
     }
 }
 
-/// Canonical request-map key for a JSON-RPC id. Uses the serialized form so a
-/// numeric id (`1` -> `"1"`) and a string id (`"1"` -> `"\"1\""`) never collide.
+/// Keeps numeric and string JSON-RPC IDs distinct in routing maps.
 pub fn id_key(id: &Value) -> String {
     id.to_string()
 }
 
-/// Rewrite an object message's `id` field, returning the serialized line. Falls
-/// back to a clone-free re-serialization of the whole object. Panic-free: only
-/// mutates when the message is an object (every JSON-RPC frame is).
 pub fn with_id(mut object: serde_json::Map<String, Value>, new_id: Value) -> String {
     object.insert("id".to_string(), new_id);
     Value::Object(object).to_string()

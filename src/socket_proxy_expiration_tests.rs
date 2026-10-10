@@ -13,12 +13,33 @@ async fn age_registered_requests(proxy: &SocketProxy, count: usize) -> io::Resul
     })
     .await
     .map_err(io::Error::other)?;
-    for request in generation.request_map.lock().values_mut() {
-        request.inserted_at =
-            Instant::now() - Duration::from_secs(REQUEST_TTL_SECS) + Duration::from_millis(50);
-    }
+    age_pending_requests(&generation, false, Duration::from_millis(50));
     generation.expiration_changed.notify_one();
     Ok(())
+}
+
+fn age_pending_requests(generation: &Generation, keep_tools: bool, remaining: Duration) {
+    let expiry = Instant::now() + remaining;
+    let mut requests = generation.request_map.lock();
+    let mut cache = generation.handshake_cache.lock();
+    for request in requests.values_mut() {
+        if keep_tools && request.cache_key == Some(CacheableMethod::ToolsList) {
+            continue;
+        }
+        request.inserted_at = expiry - request.expires_after;
+        match request.cache_key {
+            Some(CacheableMethod::Initialize) => {
+                if let Initialization::InFlight { deadline, .. } = &mut cache.initialize {
+                    *deadline = crate::request_deadline::SharedDeadline::new(expiry);
+                }
+            }
+            Some(CacheableMethod::ToolsList) => {
+                cache.tools_list.in_flight =
+                    Some(crate::request_deadline::SharedDeadline::new(expiry));
+            }
+            None => {}
+        }
+    }
 }
 
 #[tokio::test]
@@ -230,16 +251,14 @@ async fn disconnected_initialize_leader_still_expires_followers() -> io::Result<
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     {
-        let mut pending = generation.request_map.lock();
+        let pending = generation.request_map.lock();
         assert_eq!(
             pending.len(),
             1,
             "disconnected leader retains the shared deadline"
         );
-        for request in pending.values_mut() {
-            request.inserted_at = Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1);
-        }
     }
+    age_pending_requests(&generation, false, Duration::ZERO);
     generation.expiration_changed.notify_one();
     assert_eq!(
         read(&mut second).await?,
@@ -294,12 +313,7 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
     let near_deadline =
         Instant::now() - Duration::from_secs(REQUEST_TTL_SECS) + Duration::from_millis(100);
     {
-        let mut pending = generation.request_map.lock();
-        for request in pending.values_mut() {
-            if request.cache_key != Some(CacheableMethod::ToolsList) {
-                request.inserted_at = near_deadline;
-            }
-        }
+        age_pending_requests(&generation, true, Duration::from_millis(100));
         let mut cache = generation.handshake_cache.lock();
         for waiter in &mut cache.tools_list.waiters {
             waiter.inserted_at = near_deadline;
@@ -327,7 +341,14 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
         1,
         "tools leader remains live"
     );
-    assert!(generation.handshake_cache.lock().tools_list.in_flight);
+    assert!(
+        generation
+            .handshake_cache
+            .lock()
+            .tools_list
+            .in_flight
+            .is_some()
+    );
     assert!(fixture.requests.try_recv().is_err(), "no automatic replay");
     send(
         second.get_mut(),
@@ -341,10 +362,7 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
     })
     .await
     .map_err(io::Error::other)?;
-    for request in generation.request_map.lock().values_mut() {
-        request.inserted_at =
-            Instant::now() - Duration::from_secs(REQUEST_TTL_SECS) + Duration::from_millis(50);
-    }
+    age_pending_requests(&generation, false, Duration::from_millis(50));
     generation.expiration_changed.notify_one();
     let tools_timeout = read(&mut first).await?;
     assert_eq!(tools_timeout.get("id"), Some(&json!("tools-a")));
@@ -353,7 +371,14 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
         read(&mut second).await?.get("id"),
         Some(&json!("tools-new"))
     );
-    assert!(!generation.handshake_cache.lock().tools_list.in_flight);
+    assert!(
+        generation
+            .handshake_cache
+            .lock()
+            .tools_list
+            .in_flight
+            .is_none()
+    );
     send(
         first.get_mut(),
         json!({"jsonrpc":"2.0","id":"tools-retry","method":"tools/list"}),

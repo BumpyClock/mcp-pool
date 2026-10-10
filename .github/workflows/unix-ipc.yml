@@ -1,0 +1,16 @@
+name: Unix IPC
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unix-ipc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Test local security and transport
+        run: cargo test --locked --bin mcp-pool -- local_security transport::tests --test-threads=1

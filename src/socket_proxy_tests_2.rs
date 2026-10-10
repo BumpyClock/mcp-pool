@@ -10,13 +10,10 @@ fn channel_client(
     rx
 }
 
-// Build a last-active-client slot for route_response, optionally pre-set to a
-// specific client (the heuristic target for server-initiated requests).
 fn last_active(client_id: Option<&str>) -> Arc<Mutex<Option<String>>> {
     Arc::new(Mutex::new(client_id.map(str::to_string)))
 }
 
-// Fresh, empty per-upstream handshake cache for route_response tests.
 fn empty_cache() -> HandshakeCacheRef {
     Arc::new(Mutex::new(HandshakeCache::default()))
 }
@@ -33,6 +30,7 @@ fn pending_request(
         cache_key: method.and_then(cacheable_method),
         tool: None,
         inserted_at: Instant::now(),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     }
 }
 
@@ -44,7 +42,6 @@ async fn route_response(
     last_active_client: &Arc<Mutex<Option<String>>>,
 ) -> mpsc::Receiver<RecoveryReason> {
     let (recovery_tx, recovery_rx) = mpsc::channel::<RecoveryReason>(8);
-    let recovery_requested = Arc::new(AtomicBool::new(false));
     let client_capabilities = Arc::new(Mutex::new(HashMap::new()));
     if let Some(client_id) = last_active_client.lock().clone() {
         client_capabilities.lock().insert(
@@ -65,7 +62,6 @@ async fn route_response(
         &client_capabilities,
         &request_tx,
         &recovery_tx,
-        &recovery_requested,
     )
     .await;
     recovery_rx
@@ -160,8 +156,6 @@ async fn tool_call_session_not_found_is_returned_to_client() {
     assert_eq!(routed["error"]["message"], json!("Session not found"));
 }
 
-// The classifier helpers distinguish the three JSON-RPC message kinds by the
-// presence of `method` and a non-null `id`.
 #[test]
 fn classifier_helpers_distinguish_message_kinds() {
     let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
@@ -176,19 +170,13 @@ fn classifier_helpers_distinguish_message_kinds() {
     assert!(!message_has_method(&response));
     assert_eq!(non_null_id(&response), Some(&json!(7)));
 
-    // A null id is treated as absent (notification semantics).
     let null_id = json!({"jsonrpc":"2.0","id":null,"method":"x"});
     assert_eq!(non_null_id(&null_id), None);
 }
 
-// A cacheable handshake success response (result, no error) is cached when it
-// is routed back; an error response for the same method is not. Caching keys
-// off the method remembered in the pending request.
 #[tokio::test]
 async fn route_response_caches_success_not_error() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    // Pending tools/list (id 10) and initialize (id 11) successes, plus a
-    // tools/list (id 12) that comes back as an error.
     request_map.lock().insert(
         "10".into(),
         pending_request("clientA", json!(1), Some("tools/list")),
@@ -223,7 +211,6 @@ async fn route_response_caches_success_not_error() {
         &last_active,
     )
     .await;
-    // Error response must NOT overwrite/populate the cache.
     route_response(
         r#"{"jsonrpc":"2.0","id":12,"error":{"code":-32001,"message":"rate limited"}}"#,
         &clients,
@@ -244,7 +231,6 @@ async fn route_response_caches_success_not_error() {
         Some(json!({"capabilities":{}})),
         "initialize success cached"
     );
-    // The error did not replace the earlier cached tools/list success.
     assert_eq!(
         guard.get("tools/list"),
         Some(json!({"tools":["t1"]})),
@@ -252,8 +238,6 @@ async fn route_response_caches_success_not_error() {
     );
 }
 
-// An error response for a method with an EMPTY cache leaves the cache empty —
-// errors (429, auth, -32001) are never cached.
 #[tokio::test]
 async fn route_response_does_not_cache_error_into_empty_cache() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
@@ -278,8 +262,6 @@ async fn route_response_does_not_cache_error_into_empty_cache() {
     assert_eq!(cache.lock().get("tools/list"), None, "error not cached");
 }
 
-// An upstream notifications/tools/list_changed invalidates ONLY the tools/list
-// cache; initialize stays cached. The notification is still broadcast.
 #[tokio::test]
 async fn tools_list_cache_invalidated_on_list_changed() {
     let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
@@ -310,13 +292,9 @@ async fn tools_list_cache_invalidated_on_list_changed() {
         Some(json!({"capabilities":{}})),
         "initialize not invalidated"
     );
-    // The notification is still broadcast to clients.
     assert!(rx_a.try_recv().is_ok(), "list_changed still broadcast");
 }
 
-// The cache-hit path builds a fresh JSON-RPC response stamped with the new
-// client's original id (not the id used when the entry was first discovered),
-// so a second client is served from cache without going upstream.
 #[test]
 fn cached_response_restored_with_new_client_id() {
     let cache = Arc::new(Mutex::new(HandshakeCache::default()));
@@ -324,7 +302,6 @@ fn cached_response_restored_with_new_client_id() {
         .lock()
         .store("tools/list", json!({"tools":["t1","t2"]}));
 
-    // Simulate a new client whose original request id is 99.
     let result = cache.lock().get("tools/list").expect("tools/list cached");
     let line = build_success_response(json!(99), result);
     let parsed: Value = serde_json::from_str(&line).expect("valid json");
@@ -382,13 +359,28 @@ async fn only_eligible_discovery_success_is_cached() {
 fn concurrent_tools_list_misses_create_one_leader_and_one_waiter() {
     let cache = empty_cache();
 
-    let first = prepare_tools_list_request(&cache, "clientA", json!(1));
-    let second = prepare_tools_list_request(&cache, "clientB", json!(2));
+    let first = prepare_tools_list_request(
+        &cache,
+        "clientA",
+        json!(1),
+        Duration::from_secs(REQUEST_TTL_SECS),
+        Instant::now(),
+    );
+    let second = prepare_tools_list_request(
+        &cache,
+        "clientB",
+        json!(2),
+        Duration::from_secs(REQUEST_TTL_SECS),
+        Instant::now(),
+    );
 
     assert!(matches!(first, DiscoveryAction::Leader));
     assert!(matches!(second, DiscoveryAction::Coalesced));
     let guard = cache.lock();
-    assert!(guard.tools_list.in_flight, "leader owns upstream discovery");
+    assert!(
+        guard.tools_list.in_flight.is_some(),
+        "leader owns upstream discovery"
+    );
     assert_eq!(guard.tools_list.waiters.len(), 1, "follower waits");
     assert_eq!(guard.tools_list.waiters[0].client_id, "clientB");
 }

@@ -1,13 +1,11 @@
 use std::io::{self, IsTerminal, Write};
-use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::config::{self, PoolConfig, ServerDef};
-use crate::control::{ControlRequest, ControlResponse};
+use crate::control::ControlRequest;
+use crate::daemon_client::control_request;
 use crate::diagnostics;
-use crate::transport;
 
 #[path = "cli_output.rs"]
 mod output;
@@ -100,19 +98,61 @@ pub enum Cmd {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let arguments: Vec<String> = std::env::args_os()
+        .map(|argument| {
+            argument
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("command-line arguments must be valid Unicode"))
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let command_position = crate::mcp_cli::command_position(arguments.get(1..).unwrap_or_default())
+        .map(|position| position + 1);
+    let native_namespace = command_position
+        .and_then(|position| arguments.get(position))
+        .is_some_and(|argument| argument == "pool");
+    if !native_namespace && crate::mcp_cli::handles(arguments.get(1..).unwrap_or_default()) {
+        diagnostics::init_from_env();
+        return crate::mcp_cli::run(arguments.into_iter().skip(1).collect()).await;
+    }
+    let native_arguments = if native_namespace {
+        arguments
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != command_position)
+            .map(|(_, argument)| argument.clone())
+            .collect()
+    } else {
+        arguments
+    };
+    let cli = Cli::parse_from(native_arguments);
 
+    diagnostics::init_from_env();
     if cli.debug {
         diagnostics::set_enabled(true);
     }
-    diagnostics::init_from_env();
 
     let mode = output_mode(&cli);
     let color = use_color(&cli);
 
     match cli.cmd {
         Cmd::Serve => crate::daemon::serve().await,
-        Cmd::Proxy { name } => crate::proxy::run(&name).await,
+        Cmd::Proxy { name } => {
+            let native_config = PoolConfig::load()?;
+            let allow_reference = std::env::var_os("MCP_POOL_HOME").is_none()
+                || std::env::var_os("MCPORTER_CONFIG").is_some();
+            if !native_namespace && allow_reference && !native_config.server.contains_key(&name) {
+                let configuration = crate::server_config::load(None)?;
+                let server = configuration
+                    .servers
+                    .get(&name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown server: {name}"))?;
+                let definition = crate::oauth::prepare(server, false).await?;
+                let pool_name = crate::mcp_cli::pool_name(server, &definition)?;
+                crate::proxy::run_resolved(&pool_name, &definition).await
+            } else {
+                crate::proxy::run(&name).await
+            }
+        }
         Cmd::Add {
             name,
             url,
@@ -171,7 +211,6 @@ fn build_server_def(
     command: Option<String>,
     trailing: Vec<String>,
 ) -> anyhow::Result<ServerDef> {
-    // Resolve the stdio command. Explicit --command is exclusive with trailing args.
     let (stdio_command, args) = match (command, trailing.split_first()) {
         (Some(command), None) => (command, Vec::new()),
         (Some(_), Some(_)) => {
@@ -189,7 +228,6 @@ fn build_server_def(
     };
     let has_stdio = !stdio_command.is_empty();
 
-    // Exactly one source allowed.
     match (url, has_stdio) {
         (Some(_), true) | (None, false) => Err(anyhow::anyhow!(
             "specify exactly one of: --url <URL>  OR  a stdio command (-- COMMAND...)"
@@ -214,8 +252,9 @@ fn build_server_def(
 }
 
 fn normalize_transport(value: &str) -> anyhow::Result<String> {
-    match value.to_ascii_lowercase().as_str() {
-        "http" | "sse" => Ok(value.to_ascii_lowercase()),
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "http" | "sse" => Ok(normalized),
         other => Err(anyhow::anyhow!(
             "invalid --transport '{other}': expected 'http' or 'sse'"
         )),
@@ -263,19 +302,13 @@ fn remove_server(name: &str, yes: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let removed = pool_config.remove(name);
+    pool_config.remove(name);
     pool_config.save()?;
 
-    if removed {
-        println!("removed server '{name}'");
-    } else {
-        eprintln!("mcp-pool: '{name}' is not configured");
-        std::process::exit(1);
-    }
+    println!("removed server '{name}'");
     Ok(())
 }
 
-/// Read a y/N confirmation from stdin. Defaults to No on anything but explicit yes.
 fn confirm(prompt: &str) -> bool {
     print!("{prompt} [y/N] ");
     if io::stdout().flush().is_err() {
@@ -288,6 +321,7 @@ fn confirm(prompt: &str) -> bool {
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
+/// Plain output is `name<TAB>status<TAB>transport<TAB>socket`; local config emits `-` for status.
 fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
     let pool_config = PoolConfig::load()?;
     let entries: Vec<(String, String, String)> = pool_config
@@ -323,8 +357,6 @@ fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
                 .collect();
             println!("{}", serde_json::to_string_pretty(&value)?);
         }
-        // Plain format per contract: name<TAB>status<TAB>transport<TAB>socket. Local
-        // config has no runtime status, so emit "-" there.
         OutputMode::Plain => {
             for (name, transport, socket) in &entries {
                 println!("{name}\t-\t{transport}\t{socket}");
@@ -340,14 +372,23 @@ fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Send a control request to the daemon, auto-launching it if the control socket
-/// is not reachable. Prints the response per the active output mode.
 async fn control_round_trip(
     request: ControlRequest,
     mode: OutputMode,
     color: bool,
 ) -> anyhow::Result<()> {
-    let response = send_control(&request).await?;
+    let message = match &request {
+        ControlRequest::Start { .. }
+        | ControlRequest::StartDefinition { .. }
+        | ControlRequest::StartAll => "Starting pooled MCP servers",
+        ControlRequest::Stop { .. } => "Stopping pooled MCP server",
+        ControlRequest::Restart { .. } => "Restarting pooled MCP server",
+        ControlRequest::Status { .. } => "Checking MCP pool status",
+        ControlRequest::Shutdown => "Stopping MCP pool daemon",
+    };
+    let mut progress = crate::cli_progress::Progress::new(mode == OutputMode::Table);
+    let response = progress.wait(message, control_request(&request)).await?;
+    progress.finish();
 
     if !response.ok {
         let message = response
@@ -361,131 +402,29 @@ async fn control_round_trip(
     Ok(())
 }
 
-/// Ensure a named server's upstream is started, auto-launching the daemon if
-/// needed. Idempotent (a no-op when already running) and writes nothing to
-/// stdout, so the `proxy` bridge can call it without corrupting its byte stream.
-pub(crate) async fn ensure_started(name: &str) -> anyhow::Result<()> {
-    let response = send_control(&ControlRequest::Start {
-        name: name.to_string(),
-    })
-    .await?;
-    if response.ok {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_transport_normalization_preserves_values_and_errors() -> anyhow::Result<()> {
+        assert_eq!(normalize_transport("HTTP")?, "http");
+        assert_eq!(normalize_transport("sSe")?, "sse");
+        assert_eq!(
+            normalize_transport("StDiO")
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("invalid transport accepted"))?
+                .to_string(),
+            "invalid --transport 'stdio': expected 'http' or 'sse'"
+        );
+        let definition = build_server_def(
+            Some("https://example.test/mcp".to_owned()),
+            Some("SSE".to_owned()),
+            None,
+            Vec::new(),
+        )?;
+        assert_eq!(definition.transport, "sse");
+        assert_eq!(definition.url, "https://example.test/mcp");
         Ok(())
-    } else {
-        Err(anyhow::anyhow!(
-            response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        ))
     }
-}
-
-/// Serialize a control request, send it (retrying once on an empty teardown
-/// response), and parse the daemon's reply.
-async fn send_control(request: &ControlRequest) -> anyhow::Result<ControlResponse> {
-    let mut request_line = serde_json::to_string(request)?;
-    request_line.push('\n');
-
-    // The control socket can briefly hand a connection to a tearing-down daemon
-    // (notably Windows named pipes right after shutdown/restart). Retry once
-    // before treating an empty response as a hard failure.
-    let response_line = match send_request(&request_line).await? {
-        Some(line) => line,
-        None => {
-            diagnostics::log("control response empty; retrying once");
-            send_request(&request_line)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("daemon closed control socket without responding"))?
-        }
-    };
-
-    serde_json::from_str(response_line.trim())
-        .map_err(|error| anyhow::anyhow!("parse control response: {error}"))
-}
-
-/// Send one framed request line and read one response line. Returns `None` when
-/// the daemon accepted the connection but closed it without responding — a
-/// teardown race the caller retries once.
-async fn send_request(request_line: &str) -> anyhow::Result<Option<String>> {
-    let mut stream = ensure_daemon().await?;
-    stream.write_all(request_line.as_bytes()).await?;
-    stream.flush().await?;
-    let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    let bytes = reader.read_line(&mut response_line).await?;
-    Ok(if bytes == 0 {
-        None
-    } else {
-        Some(response_line)
-    })
-}
-
-/// Connect to the control socket. If unreachable, spawn the daemon detached and
-/// retry for a short window before giving up.
-async fn ensure_daemon() -> anyhow::Result<transport::LocalStream> {
-    let socket_path = config::control_socket_path();
-    match transport::connect(&socket_path).await {
-        Ok(stream) => Ok(stream),
-        Err(_) => {
-            spawn_daemon_detached()?;
-            retry_connect(&socket_path).await
-        }
-    }
-}
-
-async fn retry_connect(socket_path: &std::path::Path) -> anyhow::Result<transport::LocalStream> {
-    let mut last_error: Option<std::io::Error> = None;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        match transport::connect(socket_path).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    let error = last_error.unwrap_or_else(|| std::io::Error::other("control socket unreachable"));
-    Err(anyhow::anyhow!(
-        "could not reach daemon after launch ({}). Try `mcp-pool serve` manually.",
-        error
-    ))
-}
-
-// The daemon is spawned fire-and-forget as a detached process, not an
-// async-managed child, so std::process::Command (not tokio's) is correct here.
-#[allow(clippy::disallowed_methods)]
-fn spawn_daemon_detached() -> anyhow::Result<()> {
-    let executable = std::env::current_exe()?;
-    let mut command = std::process::Command::new(&executable);
-    command.arg("serve");
-    configure_detached(&mut command);
-    command.spawn()?;
-    diagnostics::log(format!("spawned daemon: {} serve", executable.display()));
-    Ok(())
-}
-
-#[cfg(windows)]
-#[allow(clippy::disallowed_methods)]
-fn configure_detached(command: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    // DETACHED_PROCESS (0x8): the daemon must NOT attach to the launching shell's
-    // console. CREATE_NO_WINDOW only hides the window — the child stays attached to
-    // the parent console, so the shell (and any pipe) waits for the long-lived
-    // daemon (and its upstream children, e.g. agency mid-auth) to exit, which it
-    // never does. DETACHED_PROCESS gives the daemon no console at all, so the
-    // launching command returns as soon as the short-lived CLI exits.
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    command.creation_flags(DETACHED_PROCESS);
-    command.stdin(std::process::Stdio::null());
-    command.stdout(std::process::Stdio::null());
-    command.stderr(std::process::Stdio::null());
-}
-
-#[cfg(unix)]
-#[allow(clippy::disallowed_methods)]
-fn configure_detached(command: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-    // New process group so the daemon survives the CLI's controlling terminal.
-    command.process_group(0);
-    command.stdin(std::process::Stdio::null());
-    command.stdout(std::process::Stdio::null());
-    command.stderr(std::process::Stdio::null());
 }

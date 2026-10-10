@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) struct Generation {
-    pub request_tx: Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    pub request_tx: Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
     pub clients: Arc<Mutex<HashMap<String, ClientSender>>>,
     pub request_map: RequestMap,
     pub handshake_cache: HandshakeCacheRef,
@@ -50,10 +50,10 @@ impl Generation {
         self.close();
     }
 
+    /// Confirms retirement without unlinking a socket this generation failed to bind.
     pub fn fail_binding(&self, error: &io::Error) {
         self.startup_tx.send_replace(Some(Err(error.to_string())));
         self.close();
-        // Binding acquired no backend or local tasks, and must not unlink another owner's socket.
         self.completion_tx.send_replace(Some(Ok(())));
     }
 
@@ -72,12 +72,7 @@ impl Generation {
         *self.last_active_client.lock() = None;
     }
 
-    async fn route(
-        &self,
-        message: &str,
-        recovery_tx: &mpsc::Sender<RecoveryReason>,
-        recovery_requested: &Arc<AtomicBool>,
-    ) {
+    async fn route(&self, message: &str, recovery_tx: &mpsc::Sender<RecoveryReason>) {
         route_response(
             message,
             &self.clients,
@@ -87,7 +82,6 @@ impl Generation {
             &self.client_capabilities,
             &self.request_tx,
             recovery_tx,
-            recovery_requested,
         )
         .await;
     }
@@ -129,6 +123,8 @@ pub(super) type TestSetup = (
     mpsc::Receiver<String>,
 );
 
+/// Owns setup through retirement, including children created before shutdown.
+/// `ResourceBusy` leaves retirement unverified; shutdown can cancel slow client delivery.
 fn spawn_owner_with(
     proxy: &Arc<SocketProxy>,
     generation: Arc<Generation>,
@@ -140,9 +136,22 @@ fn spawn_owner_with(
     let started_at = proxy.started_at.clone();
     let name = proxy.name.clone();
     let socket_path = proxy.socket_path.clone();
+    let (remote, shared_timeout) = match &proxy.spec {
+        UpstreamSpec::Stdio { .. } => (false, Duration::from_secs(REQUEST_TTL_SECS)),
+        UpstreamSpec::Http { timeout_ms, .. } => (
+            true,
+            crate::upstream_http::configured_request_timeout(*timeout_ms),
+        ),
+    };
     let weak_proxy = Arc::downgrade(proxy);
     tokio::spawn(async move {
-        let accept = tokio::spawn(accept_loop(listener, generation.clone(), name.clone()));
+        let accept = tokio::spawn(accept_loop(
+            listener,
+            generation.clone(),
+            name.clone(),
+            remote,
+            shared_timeout,
+        ));
         let expiration = tokio::spawn(expiration_loop(generation.clone()));
         let backend_generation = generation.clone();
         let backend_status = status.clone();
@@ -154,8 +163,6 @@ fn spawn_owner_with(
             let started_at = backend_started_at;
             let name = backend_name;
             let (recovery_tx, mut recovery_rx) = mpsc::channel(8);
-            let recovery_requested = Arc::new(AtomicBool::new(false));
-            // Never cancel spawn: it can already own a child that must be retired.
             let spawned = setup.await;
             let mut recover = false;
             let retirement = match spawned {
@@ -188,12 +195,11 @@ fn spawn_owner_with(
                                 }
                                 *status.lock() = ServerStatus::Stopping;
                                 generation.request_tx.lock().take();
-                                // Terminal completion can precede routing buffered final responses.
                                 tokio::select! {
                                     _ = &mut shutdown => {}
                                     drained = tokio::time::timeout(Duration::from_millis(250), async {
                                         while let Ok(message) = response_rx.try_recv() {
-                                            generation.route(&message, &recovery_tx, &recovery_requested).await;
+                                            generation.route(&message, &recovery_tx).await;
                                         }
                                     }) => {
                                         if drained.is_err() {
@@ -216,10 +222,9 @@ fn spawn_owner_with(
                             }
                             message = response_rx.recv() => {
                                 let Some(message) = message else { break };
-                                // Slow client channels must not delay backend retirement.
                                 tokio::select! {
                                     _ = &mut shutdown => break,
-                                    _ = generation.route(&message, &recovery_tx, &recovery_requested) => {}
+                                    _ = generation.route(&message, &recovery_tx) => {}
                                 }
                             }
                         }
@@ -236,7 +241,6 @@ fn spawn_owner_with(
                         .startup_tx
                         .send_replace(Some(Err(error.to_string())));
                     generation.close();
-                    // ResourceBusy explicitly means partial setup could not be retired.
                     if error.kind() == io::ErrorKind::ResourceBusy {
                         Err(error.to_string())
                     } else {
@@ -296,7 +300,13 @@ fn spawn_owner_with(
     });
 }
 
-async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, name: String) {
+async fn accept_loop(
+    listener: Arc<LocalListener>,
+    generation: Arc<Generation>,
+    name: String,
+    remote: bool,
+    shared_timeout: Duration,
+) {
     let mut tasks = tokio::task::JoinSet::new();
     let mut counter = 0u64;
     loop {
@@ -327,7 +337,8 @@ async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, 
                             state.request_map.clone(), state.handshake_cache.clone(),
                             state.client_capabilities.clone(), state.last_active_client.clone(),
                             state.clients.clone(), state.shutdown.clone(),
-                            state.shutdown_notify.clone(), state.expiration_changed.clone(), receiver,
+                            state.shutdown_notify.clone(), state.expiration_changed.clone(),
+                            remote, shared_timeout, receiver,
                         ).await;
                     });
                 }
@@ -341,7 +352,6 @@ async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, 
             }
         }
     }
-    // Flush queued terminal errors, but do not let slow clients block retirement.
     if tokio::time::timeout(
         Duration::from_millis(250),
         drain_client_tasks(&mut tasks, &name),
@@ -358,6 +368,7 @@ async fn accept_loop(listener: Arc<LocalListener>, generation: Arc<Generation>, 
     }
 }
 
+/// Bounds timeout delivery so one stalled client cannot block later deadlines or shutdown.
 pub(super) async fn expiration_loop(generation: Arc<Generation>) {
     loop {
         let shutdown = generation.shutdown_notify.notified();
@@ -368,20 +379,26 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
         if generation.shutdown.load(Ordering::SeqCst) {
             break;
         }
-        // Initialize followers share the leader's deadline, even after its client disconnects.
-        let request_deadline = generation
-            .request_map
-            .lock()
-            .values()
-            .map(|pending| pending.inserted_at + Duration::from_secs(REQUEST_TTL_SECS))
-            .min();
+        let request_deadline = {
+            let requests = generation.request_map.lock();
+            let cache = generation.handshake_cache.lock();
+            requests
+                .values()
+                .map(|pending| pending_expiration(pending, &cache))
+                .min()
+        };
         let waiter_deadline = generation
             .handshake_cache
             .lock()
             .tools_list
             .waiters
             .iter()
-            .map(|waiter| waiter.inserted_at + Duration::from_secs(REQUEST_TTL_SECS))
+            .map(|waiter| {
+                waiter
+                    .inserted_at
+                    .checked_add(waiter.expires_after)
+                    .unwrap_or_else(Instant::now)
+            })
             .min();
         let deadline = request_deadline.into_iter().chain(waiter_deadline).min();
         let wait_deadline = async {
@@ -397,7 +414,6 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
                 let responses = expire_pending_requests(
                     &generation.request_map, &generation.handshake_cache,
                 );
-                // A stalled client must not prevent the next deadline or retirement.
                 for (client_id, payload) in responses {
                     tokio::select! {
                         _ = &mut shutdown => return,

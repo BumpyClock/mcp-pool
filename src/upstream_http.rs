@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -12,8 +13,25 @@ use crate::upstream::UpstreamHandle;
 
 #[path = "upstream_http_legacy.rs"]
 mod legacy;
+#[path = "upstream_http_options.rs"]
+mod options;
+use options::Options;
+#[path = "upstream_http_request.rs"]
+mod request;
+use request::Request;
+#[cfg(test)]
+#[path = "upstream_http_auth_tests.rs"]
+mod auth_tests;
+#[cfg(test)]
+#[path = "upstream_http_deadline_tests.rs"]
+mod deadline_tests;
+#[cfg(test)]
+#[path = "upstream_http_options_tests.rs"]
+mod options_tests;
 #[path = "upstream_http_retire.rs"]
 mod retire;
+#[path = "upstream_http_runtime.rs"]
+mod runtime;
 #[path = "upstream_http_sse.rs"]
 mod sse_parser;
 #[cfg(test)]
@@ -36,6 +54,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_REQUESTS: usize = 32;
 
+pub(crate) fn configured_request_timeout(timeout_ms: Option<u64>) -> Duration {
+    timeout_ms
+        .map(Duration::from_millis)
+        .unwrap_or(REQUEST_TIMEOUT)
+}
+
 #[derive(Clone, Default)]
 enum Session {
     #[default]
@@ -47,46 +71,31 @@ enum Session {
     Expired,
 }
 
-struct Request {
-    line: String,
-    identifier: Option<Value>,
-    initialize: bool,
-    initialization_barrier: bool,
+enum PostOutcome {
+    Complete,
+    LegacyMismatch,
 }
 
-impl Request {
-    fn parse(line: String) -> Result<Self, String> {
-        if line.len() > sse_parser::FRAME_LIMIT {
-            return Err("HTTP request exceeds size limit".into());
-        }
-        let value: Value =
-            serde_json::from_str(&line).map_err(|_| "HTTP request is not valid JSON")?;
-        if !value.is_object() {
-            return Err("HTTP transport requires a JSON-RPC object".into());
-        }
-        let method = value.get("method").and_then(Value::as_str);
-        let identifier = method.and_then(|_| {
-            value
-                .get("id")
-                .filter(|identifier| !identifier.is_null())
-                .cloned()
-        });
-        let initialize = method == Some("initialize");
-        let initialization_barrier = initialize || method == Some("notifications/initialized");
-        Ok(Self {
-            line,
-            identifier,
-            initialize,
-            initialization_barrier,
-        })
-    }
-}
-
+#[cfg(test)]
 pub async fn spawn(
     url: String,
     sse: bool,
     response_tx: mpsc::Sender<String>,
 ) -> io::Result<UpstreamHandle> {
+    spawn_configured(url, sse, BTreeMap::new(), None, None, response_tx).await
+}
+
+/// Private caller deadlines include authorization refresh; shared requests retain the configured floor.
+/// MCP session/version and content headers remain transport-owned.
+pub async fn spawn_configured(
+    url: String,
+    sse: bool,
+    headers: BTreeMap<String, String>,
+    timeout_ms: Option<u64>,
+    auth: Option<crate::oauth::HttpAuth>,
+    response_tx: mpsc::Sender<String>,
+) -> io::Result<UpstreamHandle> {
+    let options = Options::new(headers, timeout_ms, auth)?;
     let url = reqwest::Url::parse(&url)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid HTTP upstream URL"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -95,30 +104,39 @@ pub async fn spawn(
             "HTTP upstream requires an HTTP or HTTPS URL",
         ));
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "HTTP upstream URL must not contain credentials",
+        ));
+    }
+    options.validate_origin(&url)?;
     let client = reqwest::Client::builder()
         .use_rustls_tls()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
-        .connect_timeout(Duration::from_secs(10))
         .build()
         .map_err(|_| io::Error::other("Could not build HTTP upstream client"))?;
     if sse {
-        return legacy::spawn(client, url, response_tx).await;
+        return legacy::spawn(client, url, response_tx, options, None).await;
     }
     let (request_tx, request_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (completion_tx, completion) = watch::channel(None);
     tokio::spawn(async move {
         let mut workers = JoinSet::new();
+        let mut fallback = None;
         let session = Arc::new(Mutex::new(Session::Fresh));
         let (result, deliberate) = {
-            let work = run(
+            let work = runtime::run(
                 client.clone(),
                 url.clone(),
                 request_rx,
                 response_tx,
                 session.clone(),
                 &mut workers,
+                &options,
+                &mut fallback,
             );
             tokio::pin!(work);
             tokio::select! {
@@ -128,92 +146,47 @@ pub async fn spawn(
         };
         workers.abort_all();
         while workers.join_next().await.is_some() {}
+        let retirement = if let Some(mut handle) = fallback {
+            handle.shutdown().await.map_err(|error| error.to_string())
+        } else {
+            Ok(())
+        };
         if result.is_err() {
             crate::diagnostics::log("upstream_http_transport_stopped");
         }
         if deliberate {
-            retire::terminate_session(&client, &url, &session).await;
+            retire::terminate_session(&client, &url, &session, &options).await;
         }
         drop(client);
-        completion_tx.send_replace(Some(Ok(())));
+        completion_tx.send_replace(Some(retirement));
     });
     Ok(UpstreamHandle::new(request_tx, shutdown_tx, completion))
 }
 
-async fn run(
-    client: reqwest::Client,
-    url: reqwest::Url,
-    mut request_rx: mpsc::Receiver<String>,
-    response_tx: mpsc::Sender<String>,
-    session: Arc<Mutex<Session>>,
-    workers: &mut JoinSet<()>,
-) -> Result<(), String> {
-    loop {
-        tokio::select! {
-            biased;
-            _ = response_tx.closed() => return Ok(()),
-            result = workers.join_next(), if !workers.is_empty() => {
-                if result.is_some_and(|result| result.is_err()) {
-                    return Err("HTTP request worker failed".into());
-                }
-            }
-            line = request_rx.recv(), if workers.len() < MAX_CONCURRENT_REQUESTS => {
-                let Some(line) = line else {
-                    while workers.join_next().await.is_some() {}
-                    return Ok(());
-                };
-                let request = match Request::parse(line.clone()) {
-                    Ok(request) => request,
-                    Err(error) => {
-                        let value = serde_json::from_str::<Value>(&line).ok();
-                        let identifier = value.as_ref().and_then(|value| value.get("id"));
-                        send_error(&response_tx, identifier, &error).await;
-                        continue;
-                    }
-                };
-                if request.initialization_barrier {
-                    // Initialization establishes the headers every later request must use.
-                    if request.initialize {
-                        let client = client.clone();
-                        let url = url.clone();
-                        let response_tx = response_tx.clone();
-                        let session = session.clone();
-                        let (established, establishment) = oneshot::channel();
-                        workers.spawn(async move {
-                            execute(
-                                &client, &url, request, &response_tx, &session, Some(established),
-                            ).await;
-                        });
-                        establishment.await.map_err(|_| "HTTP initialization worker stopped")?;
-                    } else {
-                        execute(&client, &url, request, &response_tx, &session, None).await;
-                    }
-                } else {
-                    let client = client.clone();
-                    let url = url.clone();
-                    let response_tx = response_tx.clone();
-                    let session = session.clone();
-                    workers.spawn(async move {
-                        execute(&client, &url, request, &response_tx, &session, None).await;
-                    });
-                }
-            }
-        }
-    }
-}
-
+#[allow(clippy::too_many_arguments)]
 async fn execute(
     client: &reqwest::Client,
     url: &reqwest::Url,
     request: Request,
     response_tx: &mpsc::Sender<String>,
     session: &Arc<Mutex<Session>>,
-    mut established: Option<oneshot::Sender<()>>,
+    mut established: Option<oneshot::Sender<Option<Request>>>,
+    options: &Options,
+    allow_fallback: bool,
 ) {
     let mut answered = false;
-    let result = timeout(
-        REQUEST_TIMEOUT,
-        post(
+    let Some(budget) = &request.budget else {
+        send_error(
+            response_tx,
+            request.identifier.as_ref(),
+            "HTTP request budget missing",
+        )
+        .await;
+        release_initialization(&mut established);
+        return;
+    };
+    let result = budget
+        .wait(post(
             client,
             url,
             &request,
@@ -221,11 +194,18 @@ async fn execute(
             session,
             &mut answered,
             &mut established,
-        ),
-    )
-    .await
-    .unwrap_or_else(|_| Err("HTTP request deadline exceeded; request was not replayed".into()));
-    if let Err(error) = result {
+            options,
+            allow_fallback,
+        ))
+        .await
+        .unwrap_or_else(|_| Err("HTTP request deadline exceeded; request was not replayed".into()));
+    if matches!(result, Ok(PostOutcome::LegacyMismatch)) {
+        if let Some(established) = established.take()
+            && established.send(Some(request)).is_err()
+        {
+            crate::diagnostics::log("upstream_http_fallback_waiter_closed");
+        }
+    } else if let Err(error) = result {
         crate::diagnostics::log(format!("upstream_http_request_failed: {error}"));
         if !answered {
             send_error(response_tx, request.identifier.as_ref(), &error).await;
@@ -242,13 +222,23 @@ async fn post(
     response_tx: &mpsc::Sender<String>,
     session: &Arc<Mutex<Session>>,
     answered: &mut bool,
-    established: &mut Option<oneshot::Sender<()>>,
-) -> Result<(), String> {
+    established: &mut Option<oneshot::Sender<Option<Request>>>,
+    options: &Options,
+    allow_fallback: bool,
+) -> Result<PostOutcome, String> {
     let state = session.lock().await.clone();
-    let mut builder = client
-        .post(url.clone())
-        .header(CONTENT_TYPE, "application/json")
-        .header(ACCEPT, "application/json, text/event-stream");
+    let fresh = matches!(state, Session::Fresh);
+    let mut builder =
+        options
+            .authorize(client.post(url.clone()))
+            .await?
+            .headers(HeaderMap::from_iter([
+                (CONTENT_TYPE, HeaderValue::from_static("application/json")),
+                (
+                    ACCEPT,
+                    HeaderValue::from_static("application/json, text/event-stream"),
+                ),
+            ]));
     match state {
         Session::Expired => {
             return Err(
@@ -275,6 +265,15 @@ async fn post(
         .await
         .map_err(|_| "HTTP request failed; request was not replayed")?;
     let status = response.status();
+    if allow_fallback
+        && fresh
+        && matches!(
+            status,
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
+        )
+    {
+        return Ok(PostOutcome::LegacyMismatch);
+    }
     if status == reqwest::StatusCode::NOT_FOUND
         && matches!(
             &*session.lock().await,
@@ -295,7 +294,7 @@ async fn post(
     }
     if status == reqwest::StatusCode::ACCEPTED || status == reqwest::StatusCode::NO_CONTENT {
         return if request.identifier.is_none() {
-            Ok(())
+            Ok(PostOutcome::Complete)
         } else {
             Err("HTTP upstream returned no JSON-RPC response".into())
         };
@@ -304,7 +303,7 @@ async fn post(
     match content_type(&response).as_str() {
         "text/event-stream" => {
             let mut decoder = sse_parser::Decoder::new();
-            while let Some(chunk) = read_chunk(&mut response).await? {
+            while let Some(chunk) = request.read_chunk(&mut response, options).await? {
                 let feed = decoder.feed(&chunk);
                 for event in feed.events {
                     if event.name.is_empty() || event.name == "message" {
@@ -327,12 +326,12 @@ async fn post(
             if request.identifier.is_some() && !*answered {
                 Err("HTTP SSE ended before the JSON-RPC response".into())
             } else {
-                Ok(())
+                Ok(PostOutcome::Complete)
             }
         }
         "application/json" => {
             let mut body = Vec::new();
-            while let Some(chunk) = read_chunk(&mut response).await? {
+            while let Some(chunk) = request.read_chunk(&mut response, options).await? {
                 if body.len() + chunk.len() > sse_parser::FRAME_LIMIT {
                     return Err("HTTP JSON response exceeds size limit".into());
                 }
@@ -353,7 +352,7 @@ async fn post(
             if request.identifier.is_some() && !*answered {
                 return Err("HTTP response did not match the JSON-RPC request ID".into());
             }
-            Ok(())
+            Ok(PostOutcome::Complete)
         }
         _ => Err("HTTP upstream returned an unsupported content type".into()),
     }
@@ -367,7 +366,7 @@ async fn deliver(
     session: &Arc<Mutex<Session>>,
     response_tx: &mpsc::Sender<String>,
     answered: &mut bool,
-    established: &mut Option<oneshot::Sender<()>>,
+    established: &mut Option<oneshot::Sender<Option<Request>>>,
 ) -> Result<(), String> {
     let value = parse_message(body)?;
     let matches = request.identifier.as_ref().is_some_and(|identifier| {
@@ -409,9 +408,9 @@ async fn deliver(
     Ok(())
 }
 
-fn release_initialization(established: &mut Option<oneshot::Sender<()>>) {
+fn release_initialization(established: &mut Option<oneshot::Sender<Option<Request>>>) {
     if let Some(established) = established.take()
-        && established.send(()).is_err()
+        && established.send(None).is_err()
     {
         crate::diagnostics::log("upstream_http_initialization_waiter_closed");
     }
@@ -457,8 +456,23 @@ fn content_type(response: &reqwest::Response) -> String {
         .to_ascii_lowercase()
 }
 
-async fn read_chunk(response: &mut reqwest::Response) -> Result<Option<Vec<u8>>, String> {
-    timeout(READ_TIMEOUT, response.chunk())
+async fn read_chunk_with_timeout(
+    response: &mut reqwest::Response,
+    deadline: Duration,
+) -> Result<Option<Vec<u8>>, String> {
+    timeout(deadline, response.chunk())
+        .await
+        .map_err(|_| "HTTP response read deadline exceeded")?
+        .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+        .map_err(|_| "HTTP response read failed; request was not replayed".into())
+}
+
+async fn read_chunk_with_deadline(
+    response: &mut reqwest::Response,
+    deadline: &crate::request_deadline::SharedDeadline,
+) -> Result<Option<Vec<u8>>, String> {
+    deadline
+        .wait(response.chunk())
         .await
         .map_err(|_| "HTTP response read deadline exceeded")?
         .map(|chunk| chunk.map(|bytes| bytes.to_vec()))

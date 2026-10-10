@@ -1,32 +1,85 @@
 use std::collections::BTreeMap;
 use std::io;
+use std::path::PathBuf;
 
 use tokio::sync::{mpsc, oneshot, watch};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum UpstreamSpec {
     Stdio {
         command: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
+        cwd: Option<PathBuf>,
+        clear_env: bool,
     },
     Http {
         url: String,
         sse: bool,
+        headers: BTreeMap<String, String>,
+        timeout_ms: Option<u64>,
+        auth: Option<Box<crate::oauth::HttpAuth>>,
     },
+}
+
+impl std::fmt::Debug for UpstreamSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stdio { cwd, .. } => formatter
+                .debug_struct("Stdio")
+                .field("cwd", cwd)
+                .finish_non_exhaustive(),
+            Self::Http {
+                sse, timeout_ms, ..
+            } => formatter
+                .debug_struct("Http")
+                .field("sse", sse)
+                .field("timeout_ms", timeout_ms)
+                .finish_non_exhaustive(),
+        }
+    }
 }
 
 pub(crate) type Completion = Option<Result<(), String>>;
 
+#[derive(Debug, Clone)]
+pub struct UpstreamRequest {
+    pub line: String,
+    pub deadline: Option<crate::request_deadline::SharedDeadline>,
+}
+
+impl From<String> for UpstreamRequest {
+    fn from(line: String) -> Self {
+        Self {
+            line,
+            deadline: None,
+        }
+    }
+}
+
+impl From<&str> for UpstreamRequest {
+    fn from(line: &str) -> Self {
+        line.to_string().into()
+    }
+}
+
+impl std::ops::Deref for UpstreamRequest {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.line
+    }
+}
+
 pub struct UpstreamHandle {
-    pub request_tx: mpsc::Sender<String>,
+    pub request_tx: mpsc::Sender<UpstreamRequest>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     completion: watch::Receiver<Completion>,
 }
 
 impl UpstreamHandle {
     pub(crate) fn new(
-        request_tx: mpsc::Sender<String>,
+        request_tx: mpsc::Sender<UpstreamRequest>,
         shutdown_tx: oneshot::Sender<()>,
         completion: watch::Receiver<Completion>,
     ) -> Self {
@@ -39,11 +92,39 @@ impl UpstreamHandle {
 
     pub async fn spawn(spec: UpstreamSpec, response_tx: mpsc::Sender<String>) -> io::Result<Self> {
         match spec {
-            UpstreamSpec::Stdio { command, args, env } => {
-                crate::upstream_stdio::spawn(command, args, env, response_tx).await
+            UpstreamSpec::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+                clear_env,
+            } => {
+                crate::upstream_stdio::spawn_configured(
+                    command,
+                    args,
+                    env,
+                    cwd,
+                    clear_env,
+                    response_tx,
+                )
+                .await
             }
-            UpstreamSpec::Http { url, sse } => {
-                crate::upstream_http::spawn(url, sse, response_tx).await
+            UpstreamSpec::Http {
+                url,
+                sse,
+                headers,
+                timeout_ms,
+                auth,
+            } => {
+                crate::upstream_http::spawn_configured(
+                    url,
+                    sse,
+                    headers,
+                    timeout_ms,
+                    auth.map(|auth| *auth),
+                    response_tx,
+                )
+                .await
             }
         }
     }

@@ -76,9 +76,11 @@ async fn failed_retirement_propagates_and_registry_entry_blocks_replacement() ->
         command: "replacement-must-not-launch".to_string(),
         args: Vec::new(),
         env: Default::default(),
+        cwd: None,
+        clear_env: false,
     };
     assert_eq!(
-        pool.start("failed-server", replacement)
+        pool.start("failed-server", replacement, None)
             .await
             .err()
             .map(|error| error.to_string()),
@@ -116,10 +118,14 @@ async fn failed_shutdown_preserves_poison_and_allows_unrelated_pool_operations()
     let unused_spec = UpstreamSpec::Http {
         url: "http://127.0.0.1:1/not-used".to_string(),
         sse: false,
+        headers: Default::default(),
+        timeout_ms: None,
+        auth: None,
     };
-    pool.start("healthy-server", unused_spec.clone()).await?;
+    pool.start("healthy-server", unused_spec.clone(), None)
+        .await?;
     assert_eq!(
-        pool.start("failed-server", unused_spec)
+        pool.start("failed-server", unused_spec, None)
             .await
             .err()
             .map(|error| error.to_string()),

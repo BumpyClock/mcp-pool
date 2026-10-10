@@ -5,6 +5,9 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, oneshot};
 
+#[path = "socket_proxy_shared_deadline_tests.rs"]
+mod shared_deadline_tests;
+
 async fn serve_connection(
     stream: TcpStream,
     initialize_count: Arc<AtomicU32>,
@@ -126,8 +129,12 @@ async fn real_http_empty_id_error_fails_only_its_post_not_held_client() -> io::R
         UpstreamSpec::Http {
             url: format!("http://{address}/mcp"),
             sse: false,
+            headers: Default::default(),
+            timeout_ms: None,
+            auth: None,
         },
         true,
+        None,
     ));
     proxy.start().await?;
     let mut first = BufReader::new(connect(&proxy).await?);
@@ -239,8 +246,12 @@ async fn real_http_backend_receives_one_initialize_from_two_concurrent_socket_cl
         UpstreamSpec::Http {
             url: format!("http://{address}/mcp"),
             sse: false,
+            headers: Default::default(),
+            timeout_ms: None,
+            auth: None,
         },
         true,
+        None,
     ));
     drop(identity);
     proxy.start().await?;

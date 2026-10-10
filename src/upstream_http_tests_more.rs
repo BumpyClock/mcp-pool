@@ -45,7 +45,6 @@ async fn null_id_notifications_release_workers_without_responses() -> TestResult
                 .send(r#"{"jsonrpc":"2.0","id":null,"method":"notifications/test"}"#.into())
                 .await?;
         }
-        // A barrier cannot run until all earlier workers finish; null IDs must not await SSE replies.
         handle
             .request_tx
             .send(r#"{"jsonrpc":"2.0","id":null,"method":"notifications/initialized"}"#.into())
@@ -141,7 +140,6 @@ async fn legacy_discovery_delivers_complete_message_before_terminal_frame_error(
     });
     let (response_tx, mut responses) = mpsc::channel(16);
     let result = spawn(url, true, response_tx).await;
-    // A network chunk may end at the endpoint. Either discovery or receive owns the error.
     if let Ok(mut handle) = result {
         timeout(Duration::from_secs(1), handle.wait_for_exit()).await??;
         stop(&mut handle).await?;
@@ -486,7 +484,8 @@ async fn legacy_expired_endpoint_rejects_later_posts_without_replay() -> TestRes
             .request_tx
             .send(
                 serde_json::json!({"jsonrpc":"2.0","id":identifier,"method":"tools/call"})
-                    .to_string(),
+                    .to_string()
+                    .into(),
             )
             .await?;
         let response = message(&mut responses).await?;

@@ -4,23 +4,28 @@ pub(super) fn prepare_initialize_request(
     cache: &HandshakeCacheRef,
     client_id: &str,
     original_id: Value,
+    expires_after: Duration,
+    transport_deadline: Instant,
 ) -> DiscoveryAction {
     let mut cache = cache.lock();
     match &mut cache.initialize {
         Initialization::Ready { result, .. } => {
             DiscoveryAction::Cached(build_success_response(original_id, result.clone()))
         }
-        Initialization::InFlight { waiters } => {
+        Initialization::InFlight { waiters, deadline } => {
+            deadline.extend(transport_deadline);
             waiters.push(PendingWaiter {
                 client_id: client_id.to_string(),
                 original_id,
                 inserted_at: Instant::now(),
+                expires_after,
             });
             DiscoveryAction::Coalesced
         }
         Initialization::Empty => {
             cache.initialize = Initialization::InFlight {
                 waiters: Vec::new(),
+                deadline: crate::request_deadline::SharedDeadline::new(transport_deadline),
             };
             DiscoveryAction::Leader
         }
@@ -34,7 +39,7 @@ pub(super) fn complete_initialize_response(
 ) -> Vec<(String, String)> {
     let mut cache = cache.lock();
     let waiters = match std::mem::take(&mut cache.initialize) {
-        Initialization::InFlight { waiters } => waiters,
+        Initialization::InFlight { waiters, .. } => waiters,
         state => {
             cache.initialize = state;
             Vec::new()
@@ -82,7 +87,7 @@ pub(super) fn cleanup_initialize_after_stale_requests(
     }
     let mut cache = cache.lock();
     let waiters = match std::mem::take(&mut cache.initialize) {
-        Initialization::InFlight { waiters } => waiters,
+        Initialization::InFlight { waiters, .. } => waiters,
         state => {
             cache.initialize = state;
             Vec::new()
@@ -110,20 +115,26 @@ pub(super) fn prepare_tools_list_request(
     cache: &HandshakeCacheRef,
     client_id: &str,
     original_id: Value,
+    expires_after: Duration,
+    transport_deadline: Instant,
 ) -> DiscoveryAction {
     let mut cache = cache.lock();
     if let Some(result) = cache.get("tools/list") {
         return DiscoveryAction::Cached(build_success_response(original_id, result));
     }
-    if cache.tools_list.in_flight {
+    if let Some(deadline) = &cache.tools_list.in_flight {
+        deadline.extend(transport_deadline);
         cache.tools_list.waiters.push(PendingWaiter {
             client_id: client_id.to_string(),
             original_id,
             inserted_at: Instant::now(),
+            expires_after,
         });
         return DiscoveryAction::Coalesced;
     }
-    cache.tools_list.in_flight = true;
+    cache.tools_list.in_flight = Some(crate::request_deadline::SharedDeadline::new(
+        transport_deadline,
+    ));
     DiscoveryAction::Leader
 }
 
@@ -133,7 +144,7 @@ pub(super) fn complete_tools_list_response(
     cache: &HandshakeCacheRef,
 ) -> Vec<(String, String)> {
     let mut cache = cache.lock();
-    cache.tools_list.in_flight = false;
+    cache.tools_list.in_flight = None;
     let waiters = std::mem::take(&mut cache.tools_list.waiters);
 
     if value.get("error").is_none()
@@ -144,7 +155,7 @@ pub(super) fn complete_tools_list_response(
     }
 
     let mut responses = Vec::with_capacity(waiters.len() + 1);
-    if let Value::Object(object) = value.clone() {
+    if let Value::Object(object) = value {
         diagnostics::log(format!(
             "pool_response_routed client_id={} method=tools/list elapsed_ms={} outcome={} waiters={}",
             leader.client_id,
@@ -172,7 +183,7 @@ pub(super) fn cleanup_stale_tools_list_waiters(cache: &HandshakeCacheRef) -> Vec
     let mut stale = Vec::new();
     let mut kept = Vec::with_capacity(cache.tools_list.waiters.len());
     for waiter in cache.tools_list.waiters.drain(..) {
-        if now.duration_since(waiter.inserted_at) >= Duration::from_secs(REQUEST_TTL_SECS) {
+        if now.duration_since(waiter.inserted_at) >= waiter.expires_after {
             stale.push((
                 waiter.client_id,
                 build_error_response(waiter.original_id, -32001, "tools/list discovery timed out"),
@@ -197,7 +208,7 @@ pub(super) fn cleanup_tools_list_after_stale_requests(
     }
 
     let mut cache = cache.lock();
-    cache.tools_list.in_flight = false;
+    cache.tools_list.in_flight = None;
     let waiters = std::mem::take(&mut cache.tools_list.waiters);
     if !waiters.is_empty() {
         diagnostics::log(format!(
@@ -221,15 +232,11 @@ pub(super) fn request_recovery_if_session_not_found(
     value: &Value,
     cache: &HandshakeCacheRef,
     recovery_tx: &mpsc::Sender<RecoveryReason>,
-    recovery_requested: &Arc<AtomicBool>,
 ) {
     if !is_session_not_found_error(value) {
         return;
     }
     cache.lock().clear_all();
-    if recovery_requested.load(Ordering::SeqCst) {
-        return;
-    }
     if recovery_tx
         .try_send(RecoveryReason::SessionNotFound)
         .is_err()
@@ -252,13 +259,28 @@ pub(super) fn recovery_reason_label(reason: RecoveryReason) -> &'static str {
     }
 }
 
-pub(super) fn cleanup_stale_requests(request_map: &RequestMap) -> Vec<PendingRequestInfo> {
+pub(super) fn pending_expiration(pending: &PendingRequestInfo, cache: &HandshakeCache) -> Instant {
+    let deadline = pending
+        .inserted_at
+        .checked_add(pending.expires_after)
+        .unwrap_or_else(Instant::now);
+    pending
+        .cache_key
+        .and_then(|method| cache.deadline(method))
+        .map_or(deadline, |shared| deadline.max(shared.current()))
+}
+
+pub(super) fn cleanup_stale_requests(
+    request_map: &RequestMap,
+    cache: &HandshakeCacheRef,
+) -> Vec<PendingRequestInfo> {
     let now = Instant::now();
     let mut pending = request_map.lock();
+    let cache = cache.lock();
     let stale_keys: Vec<String> = pending
         .iter()
         .filter_map(|(key, pending)| {
-            if now.duration_since(pending.inserted_at) >= Duration::from_secs(REQUEST_TTL_SECS) {
+            if now >= pending_expiration(pending, &cache) {
                 Some(key.clone())
             } else {
                 None
@@ -286,7 +308,7 @@ pub(super) fn expire_pending_requests(
     request_map: &RequestMap,
     cache: &HandshakeCacheRef,
 ) -> Vec<(String, String)> {
-    let stale = cleanup_stale_requests(request_map);
+    let stale = cleanup_stale_requests(request_map, cache);
     cleanup_tools_list_after_stale_requests(cache, &stale)
         .into_iter()
         .chain(cleanup_stale_tools_list_waiters(cache))

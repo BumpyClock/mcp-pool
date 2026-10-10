@@ -311,7 +311,6 @@ async fn dropping_handle_retires_process_tree() -> io::Result<()> {
     })
     .await
     .map_err(io::Error::other)?;
-    // Pipe closure happens before verified retirement, so observe the processes.
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let mut alive = false;
@@ -378,7 +377,7 @@ async fn request_response_round_trip_is_preserved() -> io::Result<()> {
     let expected = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
     handle
         .request_tx
-        .send(expected.to_string())
+        .send(expected.to_string().into())
         .await
         .map_err(io::Error::other)?;
     let response = tokio::time::timeout(Duration::from_secs(15), responses.recv())
@@ -475,7 +474,7 @@ async fn windows_cmd_launcher_preserves_stdio() -> io::Result<()> {
     .map_err(io::Error::other)??;
     handle
         .request_tx
-        .send("launcher-response".to_string())
+        .send("launcher-response".to_string().into())
         .await
         .map_err(io::Error::other)?;
     let response = tokio::time::timeout(Duration::from_secs(15), receiver.recv())

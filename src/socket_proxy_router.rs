@@ -8,13 +8,12 @@ pub(super) async fn route_response(
     handshake_cache: &HandshakeCacheRef,
     last_active_client: &Arc<Mutex<Option<String>>>,
     client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
     recovery_tx: &mpsc::Sender<RecoveryReason>,
-    recovery_requested: &Arc<AtomicBool>,
 ) {
     match serde_json::from_str::<Value>(line) {
         Ok(value) if value.is_object() => {
-            let id = non_null_id(&value).cloned();
+            let id = non_null_id(&value);
             match (message_has_method(&value), id) {
                 (true, Some(_)) => {
                     route_server_request(
@@ -28,7 +27,7 @@ pub(super) async fn route_response(
                     .await;
                 }
                 (false, Some(id)) => {
-                    let key = jsonrpc::id_key(&id);
+                    let key = jsonrpc::id_key(id);
                     let pending = request_map.lock().remove(&key);
                     if let Some(pending) = pending {
                         for (client_id, payload) in
@@ -36,12 +35,7 @@ pub(super) async fn route_response(
                         {
                             send_to_client(&client_id, payload, clients).await;
                         }
-                        request_recovery_if_session_not_found(
-                            &value,
-                            handshake_cache,
-                            recovery_tx,
-                            recovery_requested,
-                        );
+                        request_recovery_if_session_not_found(&value, handshake_cache, recovery_tx);
                     } else {
                         diagnostics::log(format!(
                             "pool_response_orphaned id={key} reason=no_pending_request"

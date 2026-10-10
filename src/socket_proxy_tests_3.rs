@@ -1,7 +1,6 @@
 use super::*;
 use serde_json::json;
 
-// Fresh, empty per-upstream handshake cache for route_response tests.
 fn empty_cache() -> HandshakeCacheRef {
     Arc::new(Mutex::new(HandshakeCache::default()))
 }
@@ -18,6 +17,7 @@ fn pending_request(
         cache_key: method.and_then(cacheable_method),
         tool: None,
         inserted_at: Instant::now(),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     }
 }
 
@@ -33,17 +33,20 @@ fn stale_pending_request(
         cache_key: method.and_then(cacheable_method),
         tool: None,
         inserted_at: Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     }
 }
 
 #[test]
 fn successful_tools_list_leader_fans_out_and_populates_cache() {
     let cache = empty_cache();
-    cache.lock().tools_list.in_flight = true;
+    cache.lock().tools_list.in_flight =
+        Some(crate::request_deadline::SharedDeadline::new(Instant::now()));
     cache.lock().tools_list.waiters.push(PendingWaiter {
         client_id: "clientB".to_string(),
         original_id: json!(2),
         inserted_at: Instant::now(),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     });
     let leader = pending_request("clientA", json!(1), Some("tools/list"));
 
@@ -59,7 +62,7 @@ fn successful_tools_list_leader_fans_out_and_populates_cache() {
     assert_eq!(leader_response["id"], json!(1));
     assert_eq!(waiter_response["id"], json!(2));
     let guard = cache.lock();
-    assert!(!guard.tools_list.in_flight);
+    assert!(guard.tools_list.in_flight.is_none());
     assert!(guard.tools_list.waiters.is_empty());
     assert_eq!(
         guard.tools_list.cached_result,
@@ -75,14 +78,16 @@ fn stale_tools_list_leader_clears_in_flight_and_drains_waiters() {
         stale_pending_request("leader", json!(1), Some("tools/list")),
     );
     let cache = empty_cache();
-    cache.lock().tools_list.in_flight = true;
+    cache.lock().tools_list.in_flight =
+        Some(crate::request_deadline::SharedDeadline::new(Instant::now()));
     cache.lock().tools_list.waiters.push(PendingWaiter {
         client_id: "waiter".to_string(),
         original_id: json!(2),
         inserted_at: Instant::now(),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     });
 
-    let stale_requests = cleanup_stale_requests(&request_map);
+    let stale_requests = cleanup_stale_requests(&request_map, &cache);
     let responses = cleanup_tools_list_after_stale_requests(&cache, &stale_requests);
 
     assert!(request_map.lock().is_empty(), "stale leader removed");
@@ -95,20 +100,29 @@ fn stale_tools_list_leader_clears_in_flight_and_drains_waiters() {
         timeout["error"]["message"],
         json!("tools/list discovery timed out")
     );
-    assert!(!cache.lock().tools_list.in_flight, "in-flight cleared");
+    assert!(
+        cache.lock().tools_list.in_flight.is_none(),
+        "in-flight cleared"
+    );
     assert!(
         cache.lock().tools_list.waiters.is_empty(),
         "waiters drained"
     );
 
-    let next = prepare_tools_list_request(&cache, "next", json!(3));
+    let next = prepare_tools_list_request(
+        &cache,
+        "next",
+        json!(3),
+        Duration::from_secs(REQUEST_TTL_SECS),
+        Instant::now(),
+    );
 
     assert!(
         matches!(next, DiscoveryAction::Leader),
         "future miss can elect a new leader"
     );
     assert!(
-        cache.lock().tools_list.in_flight,
+        cache.lock().tools_list.in_flight.is_some(),
         "new leader owns discovery"
     );
 }
@@ -118,11 +132,13 @@ fn failed_tools_list_leader_fans_out_without_caching_error() {
     let cache = empty_cache();
     cache.lock().store("tools/list", json!({"tools":["old"]}));
     cache.lock().invalidate_tools_list();
-    cache.lock().tools_list.in_flight = true;
+    cache.lock().tools_list.in_flight =
+        Some(crate::request_deadline::SharedDeadline::new(Instant::now()));
     cache.lock().tools_list.waiters.push(PendingWaiter {
         client_id: "clientB".to_string(),
         original_id: json!(2),
         inserted_at: Instant::now(),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     });
     let leader = pending_request("clientA", json!(1), Some("tools/list"));
 
@@ -145,14 +161,16 @@ fn failed_tools_list_leader_fans_out_without_caching_error() {
 #[test]
 fn later_success_repopulates_tools_list_cache_after_failure() {
     let cache = empty_cache();
-    cache.lock().tools_list.in_flight = true;
+    cache.lock().tools_list.in_flight =
+        Some(crate::request_deadline::SharedDeadline::new(Instant::now()));
     let failed_leader = pending_request("clientA", json!(1), Some("tools/list"));
     let _responses = complete_tools_list_response(
         &json!({"jsonrpc":"2.0","id":10,"error":{"code":429,"message":"too many"}}),
         failed_leader,
         &cache,
     );
-    cache.lock().tools_list.in_flight = true;
+    cache.lock().tools_list.in_flight =
+        Some(crate::request_deadline::SharedDeadline::new(Instant::now()));
 
     let successful_leader = pending_request("clientA", json!(3), Some("tools/list"));
     let _responses = complete_tools_list_response(

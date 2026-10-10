@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 pub(super) struct Fixture {
     pub(super) proxy: Arc<SocketProxy>,
     pub(super) responses: mpsc::Sender<String>,
-    pub(super) requests: mpsc::Receiver<String>,
+    pub(super) requests: mpsc::Receiver<crate::upstream::UpstreamRequest>,
     shutdown: oneshot::Receiver<()>,
     pub(super) retired: watch::Sender<Completion>,
 }
@@ -77,7 +77,7 @@ pub(super) async fn follower_queued(proxy: &SocketProxy) -> io::Result<()> {
             let state = proxy.generation.lock().clone();
             if let Some(state) = state
                 && matches!(&state.handshake_cache.lock().initialize,
-                    Initialization::InFlight { waiters } if waiters.len() == 1)
+                    Initialization::InFlight { waiters, .. } if waiters.len() == 1)
             {
                 break;
             }
@@ -176,7 +176,6 @@ async fn concurrent_socket_initialize_has_one_leader_and_one_shared_lifecycle() 
             .any(|value| value.roots && !value.sampling)
     );
 
-    // Per-client ping barriers prove both initialized notifications were consumed.
     send(
         first.get_mut(),
         json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
@@ -213,7 +212,8 @@ async fn concurrent_socket_initialize_has_one_leader_and_one_shared_lifecycle() 
     fixture.stop().await
 }
 
-async fn initialize_error() -> io::Result<()> {
+#[tokio::test]
+async fn initialize_error_fans_out_and_explicit_retry_coalesces() -> io::Result<()> {
     let mut fixture = Fixture::start().await?;
     let (mut first, mut second, leader) = two_clients(&mut fixture).await?;
     let error = json!({"code":-32602,"message":"initialization rejected"});
@@ -261,11 +261,6 @@ async fn initialize_error() -> io::Result<()> {
     assert_eq!(read(&mut first).await?.get("id"), Some(&json!(2)));
     assert_eq!(read(&mut second).await?.get("id"), Some(&json!("retry")));
     fixture.stop().await
-}
-
-#[tokio::test]
-async fn initialize_error_fans_out_and_explicit_retry_coalesces() -> io::Result<()> {
-    initialize_error().await
 }
 
 #[tokio::test]
@@ -354,19 +349,43 @@ async fn disconnected_initialize_leader_does_not_strand_follower() -> io::Result
 fn stale_initialize_leader_fails_leader_and_followers_without_touching_tools_waiters() {
     let cache = Arc::new(Mutex::new(HandshakeCache::default()));
     assert!(matches!(
-        prepare_initialize_request(&cache, "first", json!(1)),
+        prepare_initialize_request(
+            &cache,
+            "first",
+            json!(1),
+            Duration::from_secs(REQUEST_TTL_SECS),
+            Instant::now()
+        ),
         DiscoveryAction::Leader
     ));
     assert!(matches!(
-        prepare_initialize_request(&cache, "second", json!(2)),
+        prepare_initialize_request(
+            &cache,
+            "second",
+            json!(2),
+            Duration::from_secs(REQUEST_TTL_SECS),
+            Instant::now()
+        ),
         DiscoveryAction::Coalesced
     ));
     assert!(matches!(
-        prepare_tools_list_request(&cache, "tools-first", json!(3)),
+        prepare_tools_list_request(
+            &cache,
+            "tools-first",
+            json!(3),
+            Duration::from_secs(REQUEST_TTL_SECS),
+            Instant::now()
+        ),
         DiscoveryAction::Leader
     ));
     assert!(matches!(
-        prepare_tools_list_request(&cache, "tools-second", json!(4)),
+        prepare_tools_list_request(
+            &cache,
+            "tools-second",
+            json!(4),
+            Duration::from_secs(REQUEST_TTL_SECS),
+            Instant::now()
+        ),
         DiscoveryAction::Coalesced
     ));
     let stale = PendingRequestInfo {
@@ -376,6 +395,7 @@ fn stale_initialize_leader_fails_leader_and_followers_without_touching_tools_wai
         cache_key: Some(CacheableMethod::Initialize),
         tool: None,
         inserted_at: Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1),
+        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     };
     let responses = cleanup_initialize_after_stale_requests(&cache, &[stale]);
     assert_eq!(responses.len(), 2);
@@ -385,12 +405,15 @@ fn stale_initialize_leader_fails_leader_and_followers_without_touching_tools_wai
             .all(|(_, payload)| payload.contains("initialize timed out"))
     );
     assert!(matches!(cache.lock().initialize, Initialization::Empty));
-    assert!(cache.lock().tools_list.in_flight);
+    assert!(cache.lock().tools_list.in_flight.is_some());
     assert_eq!(cache.lock().tools_list.waiters.len(), 1);
 }
 
 #[path = "socket_proxy_expiration_tests.rs"]
 mod expiration_tests;
+
+#[path = "socket_proxy_deadline_tests.rs"]
+mod deadline_tests;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_not_found_initialize_error_reaches_both_clients_before_recovery() -> io::Result<()>

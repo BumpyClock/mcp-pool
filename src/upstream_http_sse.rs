@@ -8,7 +8,7 @@ pub(super) struct Event {
     pub data: String,
 }
 
-// Completed events precede the terminal error, including within one transport chunk.
+/// Preserves completed events that precede an error in the same input chunk.
 #[must_use]
 pub(super) struct Feed {
     pub events: Vec<Event>,
@@ -18,7 +18,7 @@ pub(super) struct Feed {
 #[derive(Default)]
 pub(super) struct Decoder {
     line: Vec<u8>,
-    data: Vec<String>,
+    data: String,
     name: String,
     frame_bytes: usize,
     after_carriage_return: bool,
@@ -79,9 +79,10 @@ impl Decoder {
         }
         if line.is_empty() {
             if !self.data.is_empty() {
+                self.data.pop();
                 events.push(Event {
                     name: mem::take(&mut self.name),
-                    data: mem::take(&mut self.data).join("\n"),
+                    data: mem::take(&mut self.data),
                 });
             }
             self.name.clear();
@@ -94,7 +95,10 @@ impl Decoder {
         let (field, value) = line.split_once(':').unwrap_or((line, ""));
         let value = value.strip_prefix(' ').unwrap_or(value);
         match field {
-            "data" => self.data.push(value.to_string()),
+            "data" => {
+                self.data.push_str(value);
+                self.data.push('\n');
+            }
             "event" => self.name = value.to_string(),
             _ => {}
         }
@@ -135,6 +139,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_data_lines_and_event_names_survive_every_chunk_boundary() {
+        let bytes = "event: ignored\n\nid: ignored\ndata:\n\nevent: message\ndata\n: comment\ndata: λ\ndata:  spaced\ndata:\n\nevent: reset\n\ndata: last\n\n".as_bytes();
+        for boundary in 0..=bytes.len() {
+            let (first, second) = bytes.split_at(boundary);
+            let mut decoder = Decoder::new();
+            let first = decoder.feed(first);
+            let second = decoder.feed(second);
+            assert!(first.error.is_none(), "boundary {boundary}");
+            assert!(second.error.is_none(), "boundary {boundary}");
+            let events: Vec<(String, String)> = first
+                .events
+                .into_iter()
+                .chain(second.events)
+                .map(|event| (event.name, event.data))
+                .collect();
+            assert_eq!(
+                events,
+                vec![
+                    (String::new(), String::new()),
+                    ("message".into(), "\nλ\n spaced\n".into()),
+                    (String::new(), "last".into()),
+                ],
+                "boundary {boundary}"
+            );
+        }
+    }
+
+    #[test]
     fn completed_events_survive_invalid_suffix_at_every_chunk_boundary() {
         for (suffix, expected_error) in [
             (vec![0xff, b'\n'], "HTTP SSE contains invalid UTF-8"),
@@ -145,7 +177,6 @@ mod tests {
         ] {
             let prefix = b"event: message\r\ndata: {\"id\":7,\"result\":{}}\r\n\r\n";
             let bytes = [prefix.as_slice(), suffix.as_slice()].concat();
-            // Exercise every boundary around dispatch and UTF-8; sample the large frame's interior.
             let boundaries =
                 (0..=prefix.len() + 2).chain([bytes.len() / 2, bytes.len() - 1, bytes.len()]);
             for boundary in boundaries {

@@ -5,14 +5,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{config, diagnostics, transport};
 
-/// Bridge the caller's stdio to a pooled MCP's socket. This is the per-agent
-/// thin client: an agent's MCP config points at `mcp-pool proxy <name>`, and this
-/// pumps stdin -> socket and socket -> stdout verbatim.
-///
-/// Self-starting: if the pool socket is already live the upstream is shared as-is
-/// ("if it's started, proxy through"); otherwise the upstream is auto-started via
-/// the daemon ("if not started, auto-start") before bridging. The agent's MCP
-/// config needs no separate `start` step.
+/// Bridges stdio to the named pool socket, auto-starting its upstream if absent.
 pub async fn run(name: &str) -> anyhow::Result<()> {
     let endpoint = config::server_socket_path(name);
     diagnostics::log(format!(
@@ -27,10 +20,8 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
             stream
         }
         Err(_) => {
-            // Socket not live: ask the daemon to start the upstream (idempotent,
-            // auto-launches the daemon), then connect to the freshly bound socket.
             diagnostics::log(format!("proxy_autostart name={}", name));
-            if let Err(error) = crate::cli::ensure_started(name).await {
+            if let Err(error) = crate::daemon_client::ensure_started(name).await {
                 eprintln!("mcp-pool: could not start pool server '{name}': {error}");
                 std::process::exit(1);
             }
@@ -46,6 +37,17 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
         }
     };
 
+    bridge(stream, name).await
+}
+
+pub async fn run_resolved(name: &str, definition: &config::ServerDef) -> anyhow::Result<()> {
+    crate::daemon_client::ensure_definition_started(name, definition).await?;
+    let stream = connect_with_retry(&config::server_socket_path(name)).await?;
+    bridge(stream, name).await
+}
+
+/// Drains responses for up to 800 ms after stdin closes so pending replies can finish.
+async fn bridge(stream: transport::LocalStream, name: &str) -> anyhow::Result<()> {
     diagnostics::log(format!("proxy_connected name={}", name));
 
     let (reader, writer) = tokio::io::split(stream);
@@ -61,19 +63,12 @@ pub async fn run(name: &str) -> anyhow::Result<()> {
         pump(reader, stdout, "socket->stdout", &name_stdout).await;
     });
 
-    // The owning agent normally terminates this process on exit. When the agent
-    // closes stdin, drain any in-flight response for a brief grace window before
-    // tearing down, so piped/manual use exits promptly instead of blocking on an
-    // idle socket read.
     let _ = stdin_task.await;
     let _ = tokio::time::timeout(Duration::from_millis(800), stdout_task).await;
     Ok(())
 }
 
 async fn connect_with_retry(path: &Path) -> std::io::Result<transport::LocalStream> {
-    // Retry briefly while the upstream finishes binding its socket. Sleep only
-    // between attempts; the final attempt's real error propagates directly rather
-    // than through a synthesized placeholder.
     for _ in 0..49 {
         if let Ok(stream) = transport::connect(path).await {
             return Ok(stream);

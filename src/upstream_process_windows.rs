@@ -28,8 +28,8 @@ pub(super) struct Ownership {
 }
 
 impl Ownership {
+    /// Starts the upstream suspended so it can be assigned to the kill-on-close job first.
     pub(super) fn prepare(command: &mut Command) -> io::Result<Self> {
-        // Suspension prevents a launcher from creating descendants before assignment.
         command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
@@ -55,6 +55,7 @@ impl Ownership {
         Ok(ownership)
     }
 
+    /// Assigns the suspended child to the job before resuming it.
     pub(super) fn attach(self, child: &Child) -> io::Result<Self> {
         let process_handle = child
             .raw_handle()
@@ -78,6 +79,7 @@ impl Ownership {
         }
     }
 
+    /// Confirms member handles are signaled before accepting an empty job as retired.
     pub(super) fn is_empty(&self) -> io::Result<bool> {
         let mut information: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
         if unsafe {
@@ -95,7 +97,6 @@ impl Ownership {
         if information.ActiveProcesses != 0 {
             return Ok(false);
         }
-        // A zero job count can precede the final process-handle signal.
         for member in &self.members {
             match unsafe { WaitForSingleObject(member.as_raw_handle().cast(), 0) } {
                 WAIT_OBJECT_0 => {}
@@ -106,12 +107,11 @@ impl Ownership {
         Ok(true)
     }
 
-    pub(super) fn disarm(&mut self) {}
-
     fn handle(&self) -> HANDLE {
         self.job.as_raw_handle().cast()
     }
 
+    /// Queries the variable-length process list into pointer-aligned storage.
     fn member_handles(&self) -> io::Result<Vec<OwnedHandle>> {
         let mut capacity = 64usize;
         loop {
@@ -144,7 +144,6 @@ impl Ownership {
                     "upstream job process list exceeded its buffer",
                 ));
             }
-            // The platform writes count ids into the aligned, oversized buffer.
             let identifiers =
                 unsafe { std::slice::from_raw_parts((*information).ProcessIdList.as_ptr(), count) };
             let mut handles = Vec::with_capacity(count);

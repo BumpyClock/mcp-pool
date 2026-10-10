@@ -1,5 +1,6 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::request_deadline::SharedDeadline;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,12 +20,12 @@ pub struct PendingRequestInfo {
     pub client_id: String,
     pub original_id: Value,
     pub method: Option<String>,
-    // Cursor pages share the method name, not the first-page cache.
+    /// Only cacheable first-page requests share a cache entry.
     pub cache_key: Option<CacheableMethod>,
-    /// Tool name for `tools/call` requests (`params.name`), used to enrich the
-    /// response route log. None for every other method. Never carries args.
+    /// Tool name for route logging only; never contains call arguments.
     pub tool: Option<String>,
     pub inserted_at: Instant,
+    pub expires_after: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -32,13 +33,14 @@ pub struct PendingWaiter {
     pub client_id: String,
     pub original_id: Value,
     pub inserted_at: Instant,
+    pub expires_after: Duration,
 }
 
 #[derive(Debug, Default)]
 pub struct ToolsListCache {
     pub cached_result: Option<Value>,
     pub waiters: Vec<PendingWaiter>,
-    pub in_flight: bool,
+    pub in_flight: Option<SharedDeadline>,
 }
 
 #[derive(Debug, Default)]
@@ -47,6 +49,7 @@ pub enum Initialization {
     Empty,
     InFlight {
         waiters: Vec<PendingWaiter>,
+        deadline: SharedDeadline,
     },
     Ready {
         result: Value,
@@ -106,9 +109,6 @@ pub fn build_error_response(original_id: Value, code: i64, message: &str) -> Str
     Value::Object(object).to_string()
 }
 
-/// Extract the tool name from a `tools/call` request's `params.name`. Returns
-/// None when absent or not a string. Used for observability only; the helper
-/// never reads or exposes tool arguments.
 pub fn tool_name(value: &Value) -> Option<String> {
     value
         .get("params")
@@ -179,7 +179,7 @@ impl HandshakeCache {
         self.initialize = Initialization::Empty;
         self.tools_list.cached_result = None;
         self.tools_list.waiters.clear();
-        self.tools_list.in_flight = false;
+        self.tools_list.in_flight = None;
     }
 
     pub fn swallow_initialized(&mut self, value: &Value) -> bool {
@@ -198,6 +198,16 @@ impl HandshakeCache {
                 duplicate
             }
             _ => false,
+        }
+    }
+
+    pub fn deadline(&self, method: CacheableMethod) -> Option<SharedDeadline> {
+        match method {
+            CacheableMethod::Initialize => match &self.initialize {
+                Initialization::InFlight { deadline, .. } => Some(deadline.clone()),
+                _ => None,
+            },
+            CacheableMethod::ToolsList => self.tools_list.in_flight.clone(),
         }
     }
 }

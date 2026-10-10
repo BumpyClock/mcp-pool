@@ -21,8 +21,11 @@ pub(super) fn proxy() -> Arc<SocketProxy> {
             command: "unused-test-backend".to_string(),
             args: Vec::new(),
             env: Default::default(),
+            cwd: None,
+            clear_env: false,
         },
         true,
+        None,
     ))
 }
 
@@ -32,7 +35,7 @@ pub(super) struct Backend {
     pub(super) shutdown: oneshot::Receiver<()>,
     pub(super) retired: watch::Sender<Completion>,
     pub(super) responses: mpsc::Sender<String>,
-    pub(super) requests: mpsc::Receiver<String>,
+    pub(super) requests: mpsc::Receiver<crate::upstream::UpstreamRequest>,
 }
 
 pub(super) fn backend(proxy: &SocketProxy) -> Backend {
@@ -102,7 +105,7 @@ async fn concurrent_start_is_idempotent_and_readiness_is_genuine() -> io::Result
     assert_eq!(proxy.status(), ServerStatus::Running);
     assert!(proxy.readiness().upstream_transport_ready);
     assert!(!proxy.readiness().mcp_initialize_result_received);
-    // Idempotent start must not drop the sole handle or request its retirement.
+
     assert!(shutdown.try_recv().is_err());
     let stop = {
         let proxy = proxy.clone();
@@ -492,7 +495,7 @@ async fn pool_concurrent_start_is_idempotent_and_stop_waits_for_retirement() -> 
     let concurrent_start = {
         let pool = pool.clone();
         let spec = proxy.spec.clone();
-        tokio::spawn(async move { pool.start("test-server", spec).await })
+        tokio::spawn(async move { pool.start("test-server", spec, None).await })
     };
     setup
         .send(Ok(handle))
