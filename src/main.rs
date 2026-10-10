@@ -19,6 +19,7 @@ mod proxy;
 mod request_deadline;
 mod server_config;
 mod socket_proxy;
+mod terminal_color;
 mod tool_arguments;
 mod tool_discovery;
 mod tool_documentation;
