@@ -176,16 +176,39 @@ impl Style {
     }
 
     pub(crate) fn example(&self, server: &str, tool: &Value) -> String {
+        let properties = tool
+            .get("inputSchema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object);
         let arguments = crate::tool_output::options(tool)
             .iter()
             .filter(|option| required(option))
             .filter_map(|option| {
                 let property = option.get("property").and_then(Value::as_str)?;
+                let kind = option.get("type").and_then(Value::as_str);
+                if let Some(descriptor) = properties.and_then(|properties| properties.get(property))
+                {
+                    if let Some(value) = descriptor
+                        .get("enum")
+                        .and_then(Value::as_array)
+                        .and_then(|values| values.first())
+                    {
+                        return Some((property.to_owned(), value.clone()));
+                    }
+                    if kind == Some("array")
+                        && let Some(value) = descriptor
+                            .get("items")
+                            .and_then(|items| items.get("enum"))
+                            .and_then(Value::as_array)
+                            .and_then(|values| values.first())
+                    {
+                        return Some((property.to_owned(), Value::Array(vec![value.clone()])));
+                    }
+                }
                 let example = option
                     .get("exampleValue")
                     .and_then(Value::as_str)
                     .unwrap_or("value");
-                let kind = option.get("type").and_then(Value::as_str);
                 let value = match kind {
                     Some("array") => serde_json::from_str::<Value>(example)
                         .ok()

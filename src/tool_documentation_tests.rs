@@ -169,6 +169,46 @@ fn terminal_styles_add_hierarchy_without_changing_plain_text() {
 }
 
 #[test]
+fn examples_preserve_enum_values_and_leave_json_options_unchanged() {
+    let tool = json!({"name":"configure","inputSchema":{"required":[
+        "count","ratio","enabled","nullable","untyped","values","counts","flags","labels"
+    ],"properties":{
+        "count":{"type":"integer","enum":[2,3]},
+        "ratio":{"type":"number","enum":[0.5,1.5],"default":1},
+        "enabled":{"type":"boolean","enum":[false]},
+        "nullable":{"type":["string","null"],"enum":[null,"value"]},
+        "untyped":{"enum":[3,"value"]},
+        "values":{"type":"array","enum":[[2,3],[4]]},
+        "counts":{"type":"array","items":{"type":"integer","enum":[2,3]}},
+        "flags":{"type":"array","items":{"type":"boolean","enum":[false]}},
+        "labels":{"type":"array","items":{"type":"string","enum":["owner's,label"]}}
+    }}});
+    let example = plain().example("fixture", &tool);
+    let payload = example
+        .strip_prefix("mcp-pool call fixture.configure --args '")
+        .and_then(|payload| payload.strip_suffix('\''))
+        .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
+    assert_eq!(
+        payload,
+        Some(json!({
+            "count":2,"ratio":0.5,"enabled":false,"nullable":null,"untyped":3,
+            "values":[2,3],"counts":[2],"flags":[false],"labels":["owner's,label"]
+        }))
+    );
+    let options = crate::tool_output::options(&tool);
+    let count = options
+        .iter()
+        .find(|option| option.get("property").and_then(Value::as_str) == Some("count"));
+    assert_eq!(
+        count,
+        Some(&json!({
+            "property":"count","cliName":"count","required":true,"type":"number",
+            "placeholder":"<count:number>","exampleValue":"1"
+        }))
+    );
+}
+
+#[test]
 fn examples_are_valid_json_arguments_and_do_not_break_shell_quoting() {
     let tool = json!({"name":"write","inputSchema":{"required":["id","enabled","count","data"],"properties":{
         "id":{"type":"string","default":"owner's-id"},

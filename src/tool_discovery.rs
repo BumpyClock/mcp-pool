@@ -242,7 +242,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
                         style.muted(&format!(
                             "  {} tools · {duration}ms · {}",
                             tools.len(),
-                            transport(&server)
+                            display_transport(&server)
                         ))
                     );
                 } else {
@@ -374,6 +374,17 @@ fn transport(server: &ConfiguredServer) -> String {
     }
 }
 
+fn display_transport(server: &ConfiguredServer) -> String {
+    if server.definition.transport_kind() == "sse" {
+        format!(
+            "SSE {}",
+            crate::mcp_cli::display_url(&server.definition.url)
+        )
+    } else {
+        transport(server)
+    }
+}
+
 fn attach_error(entry: &mut Value, name: &str, error: &str) {
     let status = if error.starts_with("Tool '") {
         "error"
@@ -455,6 +466,30 @@ pub(crate) fn issue(error: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn human_transport_preserves_sse_without_changing_json_metadata() {
+        let mut server = ConfiguredServer {
+            name: "fixture".to_owned(),
+            definition: crate::config::ServerDef {
+                url: "https://username:password@example.com/mcp?token=secret#fragment".to_owned(),
+                transport: "SSE".to_owned(),
+                ..Default::default()
+            },
+            raw: Value::Null,
+            source: std::path::PathBuf::from("fixture.json"),
+        };
+        assert_eq!(display_transport(&server), "SSE https://example.com/mcp");
+        assert_eq!(
+            base(&server, 0).get("transport"),
+            Some(&json!("HTTP https://example.com/mcp"))
+        );
+        server.definition.transport = "http".to_owned();
+        assert_eq!(display_transport(&server), "HTTP https://example.com/mcp");
+        server.definition.url.clear();
+        server.definition.command = "fixture-command".to_owned();
+        assert_eq!(display_transport(&server), "STDIO fixture-command");
+    }
 
     #[test]
     fn quiet_enables_health_exit_code_and_conflicts_are_explicit() -> Result<()> {
