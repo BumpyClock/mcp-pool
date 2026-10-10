@@ -59,6 +59,17 @@ mcp-pool proxy echo
 
 Set `MCP_POOL_DEBUG=1` to enable diagnostic logging to the state dir.
 
+## Local endpoint security
+
+Unix sockets use mode `0600` and verify same-user peers. Application socket
+directories use mode `0700`. Binding inside a private directory does not change
+the process-wide umask; sticky-shared parents still require a temporary restrictive
+umask during bind.
+
+Windows named pipes use an owner-only DACL, reject remote clients, and verify the
+server's user. Cancelled accepts retain their pending instance. A client that
+disconnects before accept does not prevent later clients from connecting.
+
 ## Lifecycle and readiness
 
 `start` confirms upstream transport setup, not MCP initialization. Status reports
