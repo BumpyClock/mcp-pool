@@ -35,6 +35,11 @@ pub(crate) async fn persist(server: &ConfiguredServer, options: &AdHoc) -> Resul
                 .or_insert_with(|| serde_json::json!({}))
                 .as_object_mut()
                 .context("mcpServers must be an object")?;
+            if servers.contains_key(&name) {
+                bail!(
+                    "Server '{name}' already exists; use explicit config add to replace saved configuration"
+                );
+            }
             servers.insert(name, entry);
             Ok(())
         },

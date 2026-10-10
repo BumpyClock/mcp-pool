@@ -5,6 +5,82 @@ use serde_json::{Value, json};
 use super::support::{Fixture, parse_json};
 
 #[tokio::test]
+async fn ad_hoc_persistence_rejects_saved_names_without_changing_file_or_pool() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    fixture.warm("fixture").await?;
+    let remote = super::http::HttpFixture::new().await?;
+    let original = tokio::fs::read(&fixture.config).await?;
+    let config_path = fixture
+        .config
+        .to_str()
+        .ok_or_else(|| io::Error::other("non-Unicode config path"))?;
+    let rejected = fixture
+        .command(&[
+            "list",
+            "--http-url",
+            &remote.url,
+            "--allow-http",
+            "--name",
+            "fixture",
+            "--persist",
+            config_path,
+            "--json",
+        ])
+        .await?;
+    assert!(!rejected.status.success(), "{rejected:?}");
+    let error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        error.contains("already exists") && error.contains("config add"),
+        "{error}"
+    );
+    assert_eq!(tokio::fs::read(&fixture.config).await?, original);
+    assert!(remote.headers.lock().await.is_empty());
+    fixture
+        .success(&[
+            "call",
+            "fixture.echo",
+            "label=unchanged",
+            "--output",
+            "json",
+        ])
+        .await?;
+    assert_eq!(fixture.event_count("spawn").await?, 1);
+
+    let saved = parse_json(
+        &fixture
+            .success(&[
+                "list",
+                "--http-url",
+                &remote.url,
+                "--allow-http",
+                "--name",
+                "added",
+                "--persist",
+                config_path,
+                "--json",
+            ])
+            .await?,
+    )?;
+    assert_eq!(saved.get("status"), Some(&json!("ok")));
+    let updated: Value = serde_json::from_slice(&tokio::fs::read(&fixture.config).await?)
+        .map_err(io::Error::other)?;
+    let previous: Value = serde_json::from_slice(&original).map_err(io::Error::other)?;
+    assert_eq!(
+        updated.pointer("/mcpServers/fixture"),
+        previous.pointer("/mcpServers/fixture")
+    );
+    assert_eq!(
+        updated.pointer("/mcpServers/array"),
+        previous.pointer("/mcpServers/array")
+    );
+    assert_eq!(
+        updated.pointer("/mcpServers/added/baseUrl"),
+        Some(&json!(remote.url))
+    );
+    fixture.finish().await
+}
+
+#[tokio::test]
 async fn list_aliases_status_and_explicit_config_select_synthetic_servers() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     fixture.warm("fixture").await?;

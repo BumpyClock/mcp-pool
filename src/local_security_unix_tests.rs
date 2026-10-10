@@ -63,6 +63,64 @@ async fn creates_private_same_user_socket_and_directory() -> io::Result<()> {
     Ok(())
 }
 
+#[test]
+fn private_directory_binding_does_not_change_concurrent_file_permissions() -> io::Result<()> {
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "local_security::unix::tests::private_directory_umask_fixture",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("MCP_POOL_UMASK_FIXTURE", "1")
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn private_directory_umask_fixture() -> io::Result<()> {
+    if std::env::var_os("MCP_POOL_UMASK_FIXTURE").is_none() {
+        return Ok(());
+    }
+    let original = unsafe { libc::umask(0o022) };
+    let _restore = PrivateUmask(original);
+    let directory = TestDirectory::create()?;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let writer_barrier = barrier.clone();
+    let file_path = directory.0.join("concurrent-file");
+    let writer = std::thread::spawn(move || -> io::Result<usize> {
+        writer_barrier.wait();
+        let mut changed_permissions = 0;
+        for _ in 0..10_000 {
+            fs::write(&file_path, b"private bind must not change this file")?;
+            if fs::metadata(&file_path)?.permissions().mode() & 0o777 != 0o644 {
+                changed_permissions += 1;
+            }
+            fs::remove_file(&file_path)?;
+        }
+        Ok(changed_permissions)
+    });
+    barrier.wait();
+    for _ in 0..1_000 {
+        let path = directory.socket("umask.sock");
+        let listener = bind_unix_listener(&path)?;
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        drop(listener);
+        fs::remove_file(path)?;
+    }
+    let changed_permissions = writer
+        .join()
+        .map_err(|_| io::Error::other("concurrent file writer panicked"))??;
+    assert_eq!(changed_permissions, 0);
+    Ok(())
+}
+
 #[tokio::test]
 async fn refuses_to_change_shared_or_unsafe_parent_directories() -> io::Result<()> {
     let directory = TestDirectory::create()?;
