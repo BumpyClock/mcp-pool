@@ -37,6 +37,10 @@ require importing or converting it to the native TOML config. Select another fil
 with `--config PATH` or `MCPORTER_CONFIG`; an explicit flag takes precedence.
 On Windows, the default is `%USERPROFILE%\.mcporter\mcporter.json`.
 
+Windows resolves extensionless commands such as `npx` using `PATH` and
+`PATHEXT`, preferring Windows launchers such as `npx.cmd` over sibling
+extensionless Unix scripts. Configs do not need a Windows-specific suffix.
+
 Leading global flags include `--json`, `--debug`, `--config PATH`,
 `--root DIR`, `--log-level LEVEL`, and `--oauth-timeout MILLISECONDS`.
 Leading `--json` selects JSON output; it is different from a call's

@@ -169,6 +169,30 @@ async fn batch_launcher_resolves_from_configured_path_and_pathext() -> io::Resul
 }
 
 #[tokio::test]
+async fn windows_launcher_takes_precedence_over_extensionless_shell_script() -> io::Result<()> {
+    let directory = FixtureDirectory::new()?;
+    let command = directory.0.join("pool-npm-launcher");
+    std::fs::write(&command, "#!/bin/sh\nexit 1\n")?;
+    directory.launcher("pool-npm-launcher.cmd")?;
+    let environment = BTreeMap::from([
+        (
+            "PATH".to_string(),
+            directory.0.to_string_lossy().into_owned(),
+        ),
+        ("PATHEXT".to_string(), ".CMD;.EXE".to_string()),
+    ]);
+    for command in [Path::new("pool-npm-launcher"), command.as_path()] {
+        assert_arguments(
+            command,
+            &["argument with spaces", "a&b", "%MCP_POOL_LITERAL%"],
+            environment.clone(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_launcher_resolves_the_selected_path_candidate() -> io::Result<()> {
     let directory = FixtureDirectory::new()?;
     let executable = directory.0.join("pool-native-launcher.exe");

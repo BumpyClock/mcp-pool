@@ -23,6 +23,9 @@
 
 ### Fixed
 
+- Windows command resolution prefers `PATHEXT` launchers over sibling
+  extensionless Unix scripts, so commands such as `npx` work without changing
+  configs to `npx.cmd`.
 - Private-directory Unix binding no longer changes the process-wide umask.
   Sticky-shared parents still use a temporary restrictive umask during bind.
   Cancelled Windows accepts retain their pending instance; abandoned clients

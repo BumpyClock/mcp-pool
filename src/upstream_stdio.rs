@@ -264,10 +264,8 @@ pub(crate) fn resolve_windows_command(
     };
     let extensions = variable("PATHEXT").unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
     for candidate in candidates {
-        if candidate.is_file() {
-            return std::path::absolute(candidate);
-        }
         if candidate.extension().is_none() {
+            // npm installs extensionless Unix scripts alongside Windows launchers.
             for extension in extensions.to_string_lossy().split(';') {
                 let mut executable = candidate.as_os_str().to_os_string();
                 executable.push(extension);
@@ -275,6 +273,9 @@ pub(crate) fn resolve_windows_command(
                     return std::path::absolute(executable);
                 }
             }
+        }
+        if candidate.is_file() {
+            return std::path::absolute(candidate);
         }
     }
     Err(io::Error::new(
