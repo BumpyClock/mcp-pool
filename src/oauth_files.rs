@@ -87,11 +87,6 @@ pub(super) fn canonical(path: &Path) -> Result<PathBuf> {
     ))
 }
 
-pub(super) fn portable_path(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
-}
-
 pub(super) fn write_json(path: &Path, value: &Value) -> Result<()> {
     atomic_write(path, &serde_json::to_vec_pretty(value)?)
 }
@@ -120,7 +115,7 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-fn create_directory(path: &Path) -> Result<()> {
+pub(crate) fn create_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -154,7 +149,7 @@ fn create_directory(path: &Path) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn private_file(path: &Path) -> std::io::Result<File> {
+pub(crate) fn private_file(path: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .write(true)
@@ -165,17 +160,19 @@ fn private_file(path: &Path) -> std::io::Result<File> {
 
 /// Creates credential files with the protected DACL before any bytes are written.
 #[cfg(windows)]
-fn private_file(path: &Path) -> std::io::Result<File> {
+pub(crate) fn private_file(path: &Path) -> std::io::Result<File> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, WRITE_DAC,
+    };
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     with_security(|attributes| {
         let handle = unsafe {
             CreateFileW(
                 wide.as_ptr(),
-                GENERIC_WRITE,
+                GENERIC_WRITE | WRITE_DAC,
                 0,
                 attributes,
                 CREATE_NEW,
@@ -310,7 +307,7 @@ impl Lock {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if started.elapsed() > Duration::from_secs(30) {
                         bail!(
-                            "credential transaction is busy; retry later (an abandoned mcporter lock may require manual cleanup)"
+                            "credential transaction is busy; retry later (an abandoned credential lock may require manual cleanup)"
                         );
                     }
                     std::thread::sleep(Duration::from_millis(25));

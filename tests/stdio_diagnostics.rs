@@ -32,19 +32,24 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     let binary = env!("CARGO_BIN_EXE_mcp-pool");
     let fixture = std::env::current_exe()?.to_string_lossy().into_owned();
     let mut add = Command::new(binary);
-    add.env("MCP_POOL_HOME", &home).args([
-        "add",
-        "diagnostics",
-        "--",
-        &fixture,
-        "--exact",
-        "diagnostic_fixture",
-        "--nocapture",
-    ]);
+    add.env("MCP_POOL_HOME", &home)
+        .env_remove("MCP_POOL_CONFIG")
+        .current_dir(&home)
+        .args([
+            "add",
+            "diagnostics",
+            "--",
+            &fixture,
+            "--exact",
+            "diagnostic_fixture",
+            "--nocapture",
+        ]);
     let output = add.output().await?;
     assert!(output.status.success(), "{output:?}");
     let mut daemon = Command::new(binary)
         .env("MCP_POOL_HOME", &home)
+        .env_remove("MCP_POOL_CONFIG")
+        .current_dir(&home)
         .env(FIXTURE, "1")
         .args(["pool", "serve"])
         .stdin(Stdio::null())
@@ -80,6 +85,9 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     .map_err(io::Error::other)?;
     let mut proxy = Command::new(binary)
         .env("MCP_POOL_HOME", &home)
+        .env_remove("MCP_POOL_CONFIG")
+        .env(FIXTURE, "1")
+        .current_dir(&home)
         .args(["proxy", "diagnostics"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -118,6 +126,8 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     assert_eq!(received, ["echo:first", "echo:second"]);
     let shutdown = Command::new(binary)
         .env("MCP_POOL_HOME", &home)
+        .env_remove("MCP_POOL_CONFIG")
+        .current_dir(&home)
         .arg("shutdown")
         .output()
         .await?;

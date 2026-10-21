@@ -1,0 +1,14 @@
+{
+  "mcp": {
+    "local": {
+      "type": "local",
+      "command": ["./bin/opencode-server", "${PARITY_UNSET_ARG}"],
+      "environment": {"OPENCODE_KEY": "${PARITY_UNSET_KEY}"}
+    },
+    "remote": {
+      "type": "remote",
+      "url": "https://example.invalid/opencode",
+      "headers": {"X-OpenCode": "${PARITY_UNSET_HEADER}"}
+    },
+  },
+}

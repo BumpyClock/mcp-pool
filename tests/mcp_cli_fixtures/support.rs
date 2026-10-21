@@ -31,7 +31,7 @@ impl Fixture {
             ));
         tokio::fs::create_dir_all(&home).await?;
         let home = tokio::fs::canonicalize(home).await?;
-        let config = home.join("mcporter.json");
+        let config = home.join("config.json");
         let working_directory = home.join("working directory");
         tokio::fs::create_dir(&working_directory).await?;
         let counter = home.join("events.txt");
@@ -257,7 +257,7 @@ impl Drop for Fixture {
         match std::process::Command::new(BINARY)
             .args(["daemon", "stop"])
             .env("MCP_POOL_HOME", &self.home)
-            .env("MCPORTER_CONFIG", &self.config)
+            .env("MCP_POOL_CONFIG", &self.config)
             .output()
         {
             Ok(output) if output.status.success() => {}
@@ -277,7 +277,7 @@ fn isolated_command(home: &std::path::Path, config: &std::path::Path) -> Command
     let mut command = Command::new(BINARY);
     command
         .env("MCP_POOL_HOME", home)
-        .env("MCPORTER_CONFIG", config)
+        .env("MCP_POOL_CONFIG", config)
         .env("MCPORTER_DAEMON_DIR", home.join("synthetic-legacy"))
         .env("HOME", home)
         .env("USERPROFILE", home)

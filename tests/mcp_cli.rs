@@ -481,7 +481,7 @@ async fn config_administration_is_local_and_invalid_input_does_not_launch_upstre
 }
 
 #[tokio::test]
-async fn deferred_imports_do_not_read_other_configuration() -> io::Result<()> {
+async fn legacy_imports_are_not_read_during_runtime() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     fixture.warm("fixture").await?;
     let imported = fixture.home.join("must-not-import.json");
@@ -500,6 +500,6 @@ async fn deferred_imports_do_not_read_other_configuration() -> io::Result<()> {
     let output = fixture.success(&["list", "fixture", "--json"]).await?;
     assert_eq!(parse_json(&output)?.get("name"), Some(&json!("fixture")));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("forbidden"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("deferred"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("import SOURCE"));
     fixture.finish().await
 }

@@ -11,6 +11,8 @@ pub(crate) mod write;
 use write::write_checked_mutation;
 #[cfg(test)]
 use write::write_mutation;
+#[path = "config_commands_copy.rs"]
+mod copy;
 #[path = "config_output.rs"]
 mod output;
 pub(crate) use output::serialize;
@@ -18,6 +20,7 @@ use output::summary;
 
 pub(crate) async fn run_with_timeout(
     path: Option<PathBuf>,
+    root: Option<&std::path::Path>,
     arguments: Vec<String>,
     oauth_timeout: Option<u64>,
 ) -> Result<()> {
@@ -27,20 +30,18 @@ pub(crate) async fn run_with_timeout(
         crate::mcp_cli::command_help("config");
         return Ok(());
     }
-    if command == "import" || command == "migrate" {
-        bail!(
-            "Config import/migration is explicitly deferred. Read an existing mcporter.json directly with --config PATH or MCPORTER_CONFIG; use config add for explicit local changes."
-        );
+    if command == "import" {
+        return crate::config_import::run(path, root, arguments.into()).await;
     }
     if command == "add" {
-        return add(path, arguments).await;
+        return add(path, root, arguments).await;
     }
     if command == "remove" {
         let name = value(&mut arguments, "server name")?;
         if !arguments.is_empty() {
             bail!("Usage: config remove NAME");
         }
-        let path = selected_path(path)?;
+        let path = crate::config_paths::destination(path, root)?;
         let source = path.clone();
         let prior_name = name.clone();
         write_checked_mutation(
@@ -52,7 +53,10 @@ pub(crate) async fn run_with_timeout(
         println!("Removed '{name}' from {}", path.display());
         return Ok(());
     }
-    let configuration = crate::mcp_cli::load(path)?;
+    let configuration = crate::server_config::load_at(path, root)?;
+    for warning in &configuration.warnings {
+        crate::mcp_cli::context::warning(warning);
+    }
     if command == "login" {
         return crate::daemon_commands::auth_with_timeout(
             &configuration,
@@ -97,9 +101,7 @@ pub(crate) async fn run_with_timeout(
                 bail!("Usage: config list [FILTER] [--json] [--source local|import]");
             }
             if source.as_deref() == Some("import") {
-                bail!(
-                    "Editor config imports are deferred; use --config PATH to inspect local definitions directly"
-                );
+                bail!("Imported definitions are local copies; use --source local");
             }
             let entries: Vec<Value> = configuration
                 .servers
@@ -175,7 +177,11 @@ pub(crate) async fn run_with_timeout(
     Ok(())
 }
 
-async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<()> {
+async fn add(
+    path: Option<PathBuf>,
+    root: Option<&std::path::Path>,
+    mut arguments: VecDeque<String>,
+) -> Result<()> {
     let mut name = None;
     let mut target = None;
     let mut entry = json!({});
@@ -187,6 +193,9 @@ async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<(
     let mut headers = serde_json::Map::new();
     let mut destination = path;
     let mut dry_run = false;
+    let mut copy_from = None;
+    let mut from = None;
+    let mut replace = false;
     while let Some(argument) = arguments.pop_front() {
         match argument.as_str() {
             "--" => {
@@ -198,13 +207,13 @@ async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<(
             "--transport" => transport = Some(value(&mut arguments, &argument)?),
             "--arg" => passed.push(value(&mut arguments, &argument)?),
             "--persist" => destination = Some(PathBuf::from(value(&mut arguments, &argument)?)),
+            "--from" => from = Some(PathBuf::from(value(&mut arguments, &argument)?)),
+            "--replace" => replace = true,
             "--scope" => {
                 let scope = value(&mut arguments, &argument)?;
                 destination = Some(match scope.as_str() {
-                    "home" => default_path()?,
-                    "project" => std::env::current_dir()?
-                        .join("config")
-                        .join("mcporter.json"),
+                    "home" | "user" => crate::config_paths::home_config()?,
+                    "project" => crate::config_paths::project_config(root)?,
                     _ => bail!("--scope must be home or project"),
                 });
             }
@@ -229,6 +238,7 @@ async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<(
             | "--auth"
             | "--token-cache-dir"
             | "--client-name"
+            | "--protocol-version"
             | "--oauth-client-id"
             | "--oauth-client-secret-env"
             | "--oauth-token-endpoint-auth-method"
@@ -239,6 +249,7 @@ async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<(
                     "--auth" => "auth",
                     "--token-cache-dir" => "tokenCacheDir",
                     "--client-name" => "clientName",
+                    "--protocol-version" => "protocolVersion",
                     "--oauth-client-id" => "oauthClientId",
                     "--oauth-client-secret-env" => "oauthClientSecretEnv",
                     "--oauth-token-endpoint-auth-method" => "oauthTokenEndpointAuthMethod",
@@ -246,12 +257,22 @@ async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<(
                     _ => "oauthRequestedScope",
                 };
                 if let Some(object) = entry.as_object_mut() {
-                    object.insert(key.to_owned(), json!(value(&mut arguments, &argument)?));
+                    let value = value(&mut arguments, &argument)?;
+                    if key == "protocolVersion" {
+                        let preference: crate::mcp_protocol::ProtocolPreference =
+                            serde_json::from_value(json!(value.clone())).map_err(|_| {
+                                anyhow::anyhow!(
+                                    "--protocol-version must be auto, legacy, or 2026-07-28"
+                                )
+                            })?;
+                        let canonical = serde_json::to_value(preference)?;
+                        object.insert(key.to_owned(), canonical);
+                    } else {
+                        object.insert(key.to_owned(), json!(value));
+                    }
                 }
             }
-            "--copy-from" => bail!(
-                "Imported definitions are deferred; use --config PATH and config add explicitly"
-            ),
+            "--copy-from" => copy_from = Some(value(&mut arguments, &argument)?),
             _ if argument.starts_with('-') => bail!("Unknown config add flag '{argument}'"),
             _ if name.is_none() => name = Some(argument),
             _ if target.is_none() => target = Some(argument),
@@ -264,6 +285,9 @@ async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<(
     if name.is_empty() {
         bail!("Server name cannot be empty");
     }
+    if copy_from.is_none() && (from.is_some() || replace) {
+        bail!("--from and --replace require --copy-from");
+    }
     if let Some(target) = target {
         if command.is_some() || url.is_some() {
             bail!("Specify either a positional target or --command/--url");
@@ -274,70 +298,116 @@ async fn add(path: Option<PathBuf>, mut arguments: VecDeque<String>) -> Result<(
             command = Some(target);
         }
     }
-    if command.is_some() == url.is_some() {
-        bail!("Specify exactly one HTTP URL or stdio command");
+    let copying = copy_from.is_some();
+    if let Some(copy_from) = copy_from {
+        copy::apply(
+            &mut entry,
+            &copy_from,
+            from,
+            root,
+            command,
+            url,
+            transport,
+            passed,
+            environment,
+            headers,
+        )?;
+    } else {
+        if command.is_some() == url.is_some() {
+            bail!("Specify exactly one HTTP URL or stdio command");
+        }
+        let kind = transport
+            .as_deref()
+            .unwrap_or(if url.is_some() { "http" } else { "stdio" });
+        if !matches!(kind, "http" | "sse" | "stdio") || (kind == "stdio") != command.is_some() {
+            bail!("--transport must agree with URL/command");
+        }
+        if let Some(object) = entry.as_object_mut() {
+            object.insert("transport".to_owned(), json!(kind));
+            if let Some(url) = url {
+                object.insert("baseUrl".to_owned(), json!(url));
+            }
+            if let Some(command) = command {
+                object.insert("command".to_owned(), json!(command));
+                object.insert("args".to_owned(), json!(passed));
+            }
+            if !environment.is_empty() {
+                object.insert("env".to_owned(), Value::Object(environment));
+            }
+            if !headers.is_empty() {
+                object.insert("headers".to_owned(), Value::Object(headers));
+            }
+        }
     }
-    let kind = transport
-        .as_deref()
-        .unwrap_or(if url.is_some() { "http" } else { "stdio" });
-    if !matches!(kind, "http" | "sse" | "stdio") || (kind == "stdio") != command.is_some() {
-        bail!("--transport must agree with URL/command");
-    }
-    if let Some(object) = entry.as_object_mut() {
-        object.insert("transport".to_owned(), json!(kind));
-        if let Some(url) = url {
-            object.insert("baseUrl".to_owned(), json!(url));
-        }
-        if let Some(command) = command {
-            object.insert("command".to_owned(), json!(command));
-            object.insert("args".to_owned(), json!(passed));
-        }
-        if !environment.is_empty() {
-            object.insert("env".to_owned(), Value::Object(environment));
-        }
-        if !headers.is_empty() {
-            object.insert("headers".to_owned(), Value::Object(headers));
+    let destination = crate::config_paths::destination(destination, root)?;
+    if copying {
+        crate::server_config::validate_document(&json!({"mcpServers":{&name:&entry}}))?;
+    } else {
+        let validation = crate::server_config::parse_config(
+            &destination,
+            &serde_json::to_string(&json!({
+                "mcpServers":{&name:&entry},"imports":[]
+            }))?,
+        )?;
+        if dry_run {
+            let server = validation
+                .servers
+                .get(&name)
+                .context("Missing validated definition")?;
+            println!("{}", serde_json::to_string_pretty(&serialize(server))?);
+            return Ok(());
         }
     }
-    let destination = selected_path(destination)?;
-    let validation = crate::server_config::parse_config(
-        &destination,
-        &serde_json::to_string(&json!({
-            "mcpServers":{&name:&entry},"imports":[]
-        }))?,
-    )?;
     if dry_run {
-        let server = validation
-            .servers
-            .get(&name)
-            .context("Missing validated definition")?;
-        println!("{}", serde_json::to_string_pretty(&serialize(server))?);
+        let mut document = write::read_document(&destination)?;
+        insert_entry(&mut document, &name, &entry, true, replace, &destination)?;
+        crate::server_config::validate_document(&document)?;
+        println!("Would add '{name}' to {}", destination.display());
         return Ok(());
     }
     let source = destination.clone();
     let prior_name = name.clone();
+    let changed = entry.clone();
     write_checked_mutation(
         &destination,
-        |document| {
-            let servers = document
-                .get_mut("mcpServers")
-                .and_then(Value::as_object_mut)
-                .context("mcpServers must be an object")?;
-            servers.insert(name.clone(), entry.clone());
+        |document| insert_entry(document, &name, &entry, copying, replace, &destination),
+        move |document| async move {
+            if !copying
+                || document
+                    .get("mcpServers")
+                    .and_then(|servers| servers.get(&prior_name))
+                    .is_some_and(|previous| previous != &changed)
+            {
+                retire_previous(&source, &document, &prior_name).await?;
+            }
             Ok(())
         },
-        move |document| async move { retire_previous(&source, &document, &prior_name).await },
     )
     .await?;
     println!("Added '{name}' to {}", destination.display());
     Ok(())
 }
 
-fn default_path() -> Result<PathBuf> {
-    Ok(dirs::home_dir()
-        .context("Home directory unavailable")?
-        .join(".mcporter")
-        .join("mcporter.json"))
+fn insert_entry(
+    document: &mut Value,
+    name: &str,
+    entry: &Value,
+    copying: bool,
+    replace: bool,
+    destination: &std::path::Path,
+) -> Result<()> {
+    let servers = document
+        .get_mut("mcpServers")
+        .and_then(Value::as_object_mut)
+        .context("mcpServers must be an object")?;
+    if copying && servers.get(name).is_some_and(|previous| previous != entry) && !replace {
+        bail!(
+            "Server '{name}' already exists in {}; use --replace to overwrite it. No changes made.",
+            destination.display()
+        );
+    }
+    servers.insert(name.to_owned(), entry.clone());
+    Ok(())
 }
 
 pub(crate) async fn retire_previous(
@@ -345,35 +415,19 @@ pub(crate) async fn retire_previous(
     document: &Value,
     name: &str,
 ) -> Result<()> {
-    let previous = crate::server_config::parse_config(source, &serde_json::to_string(document)?)?;
-    if let Some(server) = previous.servers.get(name) {
-        crate::daemon_commands::retire_pool_views(server).await?;
+    if let Some(raw) = document
+        .get("mcpServers")
+        .and_then(|entries| entries.get(name))
+    {
+        let server = crate::server_config::ConfiguredServer {
+            name: name.to_owned(),
+            source: crate::config_paths::absolute(source)?,
+            raw: raw.clone(),
+            definition: crate::config::ServerDef::default(),
+        };
+        crate::daemon_commands::retire_pool_views(&server).await?;
     }
     Ok(())
-}
-
-fn selected_path(path: Option<PathBuf>) -> Result<PathBuf> {
-    let selected = match path {
-        Some(path) => path,
-        None => match std::env::var_os("MCPORTER_CONFIG") {
-            Some(path) => PathBuf::from(path),
-            None => default_path()?,
-        },
-    };
-    let text = selected.to_string_lossy();
-    let expanded =
-        if let Some(relative) = text.strip_prefix("~/").or_else(|| text.strip_prefix("~\\")) {
-            dirs::home_dir()
-                .context("Home directory unavailable")?
-                .join(relative)
-        } else {
-            selected
-        };
-    if expanded.is_absolute() {
-        Ok(expanded)
-    } else {
-        Ok(std::env::current_dir()?.join(expanded))
-    }
 }
 
 fn remove_entry(document: &mut Value, name: &str) -> Result<()> {

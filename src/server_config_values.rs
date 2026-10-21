@@ -61,7 +61,7 @@ pub(super) fn resolve_path(path: &Path, directory: &Path) -> Result<PathBuf> {
     }
 }
 
-pub(super) fn existing_command_path(command: &str, directory: &Path) -> Result<bool> {
+pub(crate) fn existing_command_path(command: &str, directory: &Path) -> Result<bool> {
     if !command.contains(' ') || !looks_like_path(command) || command.starts_with(['"', '\'']) {
         return Ok(false);
     }
@@ -73,7 +73,7 @@ pub(super) fn existing_command_path(command: &str, directory: &Path) -> Result<b
     }
 }
 
-pub(super) fn command_tokens(command: &str) -> Result<Vec<String>> {
+pub(crate) fn command_tokens(command: &str) -> Result<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quote = None;

@@ -136,6 +136,12 @@ pub(crate) async fn retire_pool_views(server: &ConfiguredServer) -> Result<()> {
     let entry = crate::config::ConfigurationEntry {
         source: server.source.clone(),
         name: server.name.clone(),
+        scope: server.definition.credential_scope.clone(),
+        credential_store: if server.definition.credential_scope.is_some() {
+            Some(crate::oauth::context(server)?.storage_identity()?)
+        } else {
+            None
+        },
     };
     let Some(response) = direct(&ControlRequest::Status { name: None }).await? else {
         return Ok(());
@@ -172,7 +178,29 @@ where
                     .context("Daemon status has invalid configuration-entry ownership metadata")?,
             ),
         };
-        if associated.as_ref() == Some(entry) {
+        if associated.as_ref().is_some_and(|associated| {
+            associated.source == entry.source
+                && associated.name == entry.name
+                && entry.scope.is_some()
+                && associated.scope.is_none()
+        }) {
+            bail!(
+                "Pool mutation blocked: daemon lacks credential-scope ownership metadata; restart the daemon after upgrading"
+            );
+        }
+        // Vault URL bindings are per logical name, even across config sources.
+        if associated.as_ref().is_some_and(|associated| {
+            associated.name == entry.name
+                && ((associated.source == entry.source
+                    && entry
+                        .scope
+                        .as_ref()
+                        .is_none_or(|scope| associated.scope.as_ref() == Some(scope)))
+                    || entry
+                        .credential_store
+                        .as_ref()
+                        .is_some_and(|store| associated.credential_store.as_ref() == Some(store)))
+        }) {
             if server.get("owned").and_then(Value::as_bool) != Some(true) {
                 bail!(
                     "Pool mutation blocked: '{name}' is not a verified owned generation. Stop it through its owning runtime first."

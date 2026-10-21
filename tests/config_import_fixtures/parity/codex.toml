@@ -1,0 +1,6 @@
+[mcp_servers.codex]
+url = "https://example.invalid/codex"
+bearer_token_env_var = "PARITY_UNSET_CODEX_BEARER"
+
+[mcp_servers.codex.env_http_headers]
+X-Codex = "PARITY_UNSET_CODEX_HEADER"

@@ -26,7 +26,10 @@ impl Options {
             if auth.is_some() && name == AUTHORIZATION {
                 continue;
             }
-            if name == "mcp-session-id" || name == "mcp-protocol-version" {
+            if matches!(
+                name.as_str(),
+                "mcp-session-id" | "mcp-protocol-version" | "mcp-method" | "mcp-name"
+            ) {
                 continue;
             }
             let mut value = HeaderValue::from_str(&value).map_err(|_| invalid())?;

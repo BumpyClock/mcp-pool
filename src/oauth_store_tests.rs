@@ -55,7 +55,7 @@ fn refresh_lock_filenames_match_cross_application_contract() -> Result<()> {
 }
 
 #[test]
-fn directory_refresh_lock_label_uses_canonical_token_identity() -> Result<()> {
+fn directory_refresh_serializes_distinct_vaults_using_the_same_canonical_cache() -> Result<()> {
     let mut fixture = Fixture::new("https://synthetic.invalid/mcp")?;
     let cache = fixture.root.join("canonical cache");
     std::fs::create_dir_all(cache.join("unused"))?;
@@ -63,28 +63,28 @@ fn directory_refresh_lock_label_uses_canonical_token_identity() -> Result<()> {
         "auth":"oauth","tokenCacheDir":cache.join("unused").join("..")
     });
     let authentication = context(&fixture.server)?;
-    let token_path = std::fs::canonicalize(&cache)?.join("tokens.json");
-    let identity = format!("dir:{}", files::portable_path(&token_path));
-    let expected = authentication
-        .vault_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("fixture vault has no parent"))?
-        .join("refresh-locks")
-        .join(format!("canonical_cache-{}.lock", files::digest(&identity)));
     let locks = store::transaction(&authentication)?;
-    assert!(
-        expected.is_file(),
-        "the label must name the canonical store, not its configured spelling"
-    );
-    let error = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&expected)
-        .err()
-        .ok_or_else(|| anyhow::anyhow!("canonical store lock did not exclude a second owner"))?;
-    assert!(error.kind() == std::io::ErrorKind::AlreadyExists);
+    let mut other = authentication;
+    other.vault_path = fixture.root.join("another-scope").join("credentials.json");
+    other.directory_stores = vec![std::fs::canonicalize(&cache)?];
+    let (started, ready) = std::sync::mpsc::channel();
+    let (acquired, result) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || -> Result<()> {
+        started.send(())?;
+        let _locks = store::transaction(&other)?;
+        acquired.send(())?;
+        Ok(())
+    });
+    ready.recv_timeout(std::time::Duration::from_secs(5))?;
+    assert!(matches!(
+        result.recv_timeout(std::time::Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
     drop(locks);
-    assert!(!expected.exists());
+    result.recv_timeout(std::time::Duration::from_secs(5))?;
+    worker
+        .join()
+        .map_err(|_| anyhow::anyhow!("Credential transaction worker failed"))??;
     Ok(())
 }
 

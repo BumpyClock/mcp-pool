@@ -4,11 +4,23 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use serde_json::json;
 
 use crate::config::{ConfigurationEntry, ServerDef};
 
+pub(crate) const URL_FIELDS: &[&str] = &["baseUrl", "base_url", "url", "serverUrl", "server_url"];
+
+pub(crate) fn is_remote_entry(entry: &serde_json::Map<String, Value>) -> bool {
+    URL_FIELDS.iter().any(|field| entry.contains_key(*field))
+}
+
+pub(crate) fn is_server_entry(entry: &serde_json::Map<String, Value>) -> bool {
+    is_remote_entry(entry) || entry.contains_key("command") || entry.contains_key("executable")
+}
+
 #[path = "server_config_values.rs"]
 mod values;
+pub(crate) use values::{command_tokens, existing_command_path};
 
 #[cfg(test)]
 #[path = "configuration_reader_tests.rs"]
@@ -17,6 +29,7 @@ mod tests;
 pub struct ServerConfiguration {
     pub source: PathBuf,
     pub servers: BTreeMap<String, ConfiguredServer>,
+    pub credential_scope: Option<PathBuf>,
     /// CLI callers must surface these diagnostics rather than silently omit imports.
     pub warnings: Vec<String>,
 }
@@ -59,31 +72,153 @@ struct Entry {
     description: Option<String>,
     #[serde(rename = "timeoutMs", alias = "timeout_ms")]
     timeout_ms: Option<u64>,
+    #[serde(rename = "protocolVersion", alias = "protocol_version")]
+    protocol_version: crate::mcp_protocol::ProtocolPreference,
     #[serde(rename = "bearerToken", alias = "bearer_token")]
     bearer_token: Option<String>,
     #[serde(rename = "bearerTokenEnv", alias = "bearer_token_env")]
     bearer_token_env: Option<String>,
 }
 
-/// Selects an explicit path, then MCPORTER_CONFIG, then ~/.mcporter/mcporter.json.
-/// Reads only that file's entries; editor imports and migration are deferred.
-/// MCP_POOL_HOME does not change this selection.
-pub fn load(path: Option<PathBuf>) -> Result<ServerConfiguration> {
-    let selected = match path {
-        Some(path) => path,
-        None => match std::env::var("MCPORTER_CONFIG") {
-            Ok(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
-            Ok(_) | Err(std::env::VarError::NotPresent) => dirs::home_dir()
-                .ok_or_else(|| anyhow!("home directory not found"))?
-                .join(".mcporter")
-                .join("mcporter.json"),
-            Err(std::env::VarError::NotUnicode(_)) => bail!("MCPORTER_CONFIG is not valid Unicode"),
-        },
+pub(crate) fn validate_document(document: &Value) -> Result<()> {
+    legacy_imports(document)?;
+    let servers = document
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .context("MCP config needs an mcpServers object")?;
+    for (name, raw) in servers {
+        if name.trim().is_empty() {
+            bail!("Server name cannot be empty");
+        }
+        let entry: Entry = serde_json::from_value(raw.clone())
+            .map_err(|_| anyhow!("Invalid field types for server '{name}'"))?;
+        let remote = entry
+            .url
+            .as_ref()
+            .or(entry.base_url.as_ref())
+            .or(entry.snake_base_url.as_ref())
+            .or(entry.server_url.as_ref())
+            .or(entry.snake_server_url.as_ref());
+        let command = entry.command.is_some() || entry.executable.is_some();
+        if remote.is_some() == command {
+            bail!("Server '{name}' needs exactly one URL or command");
+        }
+        let executable = match &entry.command {
+            Some(Command::Text(command)) => Some(command.as_str()),
+            Some(Command::Tokens(tokens)) => tokens.first().map(String::as_str),
+            None => entry.executable.as_deref(),
+        };
+        if command && executable.is_none_or(|value| value.trim().is_empty()) {
+            bail!("Server '{name}' needs a nonempty executable");
+        }
+        let transport =
+            entry
+                .transport
+                .as_deref()
+                .unwrap_or(if remote.is_some() { "http" } else { "stdio" });
+        if !matches!(transport, "http" | "streamable-http" | "sse" | "stdio")
+            || (transport == "stdio") != command
+        {
+            bail!("Server '{name}' transport must agree with its URL or command");
+        }
+        if let Some(url) = remote
+            && !url.contains('$')
+        {
+            let url = reqwest::Url::parse(url)
+                .map_err(|_| anyhow!("Server '{name}' needs an absolute HTTP URL"))?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                bail!("Server '{name}' needs an absolute HTTP URL");
+            }
+        }
+        crate::tool_filter::ToolFilter::from_raw(raw)?;
+    }
+    Ok(())
+}
+
+fn legacy_imports(document: &Value) -> Result<&[Value]> {
+    match document.get("imports") {
+        None => Ok(&[]),
+        Some(Value::Array(imports)) if imports.iter().all(Value::is_string) => Ok(imports),
+        Some(_) => bail!("imports must be an array of strings"),
+    }
+}
+
+pub(crate) fn load_at(path: Option<PathBuf>, root: Option<&Path>) -> Result<ServerConfiguration> {
+    if let Some(source) = crate::config_paths::explicit(path)? {
+        let mut configuration = read(&source, false)?;
+        set_credential_scope(
+            &mut configuration,
+            source.parent().context("Config has no parent")?,
+        );
+        return Ok(configuration);
+    }
+    let home = crate::config_paths::absolute(&crate::config_paths::home_config()?)?;
+    let project = crate::config_paths::absolute(&crate::config_paths::project_config(root)?)?;
+    let mut home_document = read_raw(&home, true)?;
+    let project_document = if project != home {
+        Some(read_raw(&project, true)?)
+    } else {
+        None
     };
-    let source = absolute_source(&selected)?;
-    let contents = std::fs::read_to_string(&source)
-        .with_context(|| format!("could not read mcporter config {}", source.display()))?;
-    parse_config(&source, &contents)
+    if let Some(local) = &project_document {
+        let local = local
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .context("Project config needs an mcpServers object")?;
+        let inherited = home_document
+            .get_mut("mcpServers")
+            .and_then(Value::as_object_mut)
+            .context("Home config needs an mcpServers object")?;
+        inherited.retain(|name, _| !local.contains_key(name));
+    }
+    let mut configuration = parse_config(&home, &serde_json::to_string(&home_document)?)?;
+    if project != home {
+        let local = parse_config(
+            &project,
+            &serde_json::to_string(&project_document.context("Project config missing")?)?,
+        )?;
+        configuration.servers.extend(local.servers);
+        configuration.warnings.extend(local.warnings);
+        if project.is_file() {
+            configuration.source = project.clone();
+        }
+    }
+    set_credential_scope(
+        &mut configuration,
+        project.parent().context("Config has no parent")?,
+    );
+    Ok(configuration)
+}
+
+fn set_credential_scope(configuration: &mut ServerConfiguration, directory: &Path) {
+    configuration.credential_scope = Some(directory.to_path_buf());
+    for server in configuration.servers.values_mut() {
+        server.definition.credential_scope = Some(directory.to_path_buf());
+        if let Some(entry) = server.definition.configuration_entry.as_mut() {
+            entry.scope = Some(directory.to_path_buf());
+        }
+    }
+}
+
+fn read(source: &Path, optional: bool) -> Result<ServerConfiguration> {
+    parse_config(
+        source,
+        &serde_json::to_string(&read_raw(source, optional)?)?,
+    )
+}
+
+fn read_raw(source: &Path, optional: bool) -> Result<Value> {
+    let contents = match std::fs::read_to_string(source) {
+        Ok(contents) => contents,
+        Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({"mcpServers":{}}));
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Could not read MCP config {}", source.display()));
+        }
+    };
+    parse_json(source, &contents)
 }
 
 /// Parses JSONC without connecting to servers or changing user files.
@@ -121,64 +256,32 @@ fn parse_with_environment(
     caller_environment: &impl Fn() -> Result<BTreeMap<String, String>>,
 ) -> Result<ServerConfiguration> {
     let source = absolute_source(source)?;
-    let options = jsonc_parser::ParseOptions {
-        allow_comments: true,
-        allow_trailing_commas: true,
-        allow_loose_object_property_names: false,
-        allow_missing_commas: false,
-        allow_single_quoted_strings: false,
-        allow_hexadecimal_numbers: false,
-        allow_unary_plus_numbers: false,
-    };
-    let raw = jsonc_parser::parse_to_serde_value(contents.trim_start_matches('\u{feff}'), &options)
-        .map_err(|_| anyhow!("invalid JSONC in mcporter config {}", source.display()))?
-        .ok_or_else(|| anyhow!("empty mcporter config {}", source.display()))?;
+    let raw = parse_json(&source, contents)?;
     let object = raw
         .as_object()
-        .ok_or_else(|| anyhow!("mcporter config {} must be an object", source.display()))?;
+        .ok_or_else(|| anyhow!("MCP config {} must be an object", source.display()))?;
     let entries = object
         .get("mcpServers")
         .and_then(Value::as_object)
-        .ok_or_else(|| {
-            anyhow!(
-                "mcporter config {} needs an mcpServers object",
-                source.display()
-            )
-        })?;
+        .ok_or_else(|| anyhow!("MCP config {} needs an mcpServers object", source.display()))?;
     let mut warnings = Vec::new();
-    match object.get("imports") {
-        Some(Value::Array(imports)) => {
-            if imports.iter().any(|entry| !entry.is_string()) {
-                bail!(
-                    "mcporter config {} imports must be an array of strings",
-                    source.display()
-                );
-            }
-            if !imports.is_empty() {
-                warnings.push(format!(
-                    "Editor config imports are deferred: ignoring {} import(s) in {}; only this file's mcpServers are loaded.",
+    let imports =
+        legacy_imports(&raw).map_err(|error| anyhow!("MCP config {} {error}", source.display()))?;
+    if !imports.is_empty() {
+        warnings.push(format!(
+                    "Ignoring {} legacy import(s) in {}; run `mcp-pool import SOURCE` to copy server definitions explicitly.",
                     imports.len(),
                     source.display()
                 ));
-            }
-        }
-        Some(_) => bail!(
-            "mcporter config {} imports must be an array",
-            source.display()
-        ),
-        None => warnings.push(format!(
-            "Automatic editor config imports are deferred; only mcpServers from {} are loaded.",
-            source.display()
-        )),
     }
     let directory = source
         .parent()
-        .ok_or_else(|| anyhow!("mcporter config has no parent directory"))?;
+        .ok_or_else(|| anyhow!("MCP config has no parent directory"))?;
     let mut servers = BTreeMap::new();
     for (name, raw) in entries {
         let entry: Entry = serde_json::from_value(raw.clone()).map_err(|_| {
             anyhow!(
-                "invalid server definition for '{name}' in {}: expected string fields, string arrays/maps, and an unsigned timeoutMs",
+                "invalid server definition for '{name}' in {}: expected string fields, string arrays/maps, an unsigned timeoutMs, and protocolVersion auto, legacy, or 2026-07-28",
                 source.display()
             )
         })?;
@@ -204,8 +307,24 @@ fn parse_with_environment(
     Ok(ServerConfiguration {
         source,
         servers,
+        credential_scope: None,
         warnings,
     })
+}
+
+fn parse_json(source: &Path, contents: &str) -> Result<Value> {
+    let options = jsonc_parser::ParseOptions {
+        allow_comments: true,
+        allow_trailing_commas: true,
+        allow_loose_object_property_names: false,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+    };
+    jsonc_parser::parse_to_serde_value(contents.trim_start_matches('\u{feff}'), &options)
+        .map_err(|_| anyhow!("invalid JSONC in MCP config {}", source.display()))?
+        .ok_or_else(|| anyhow!("empty MCP config {}", source.display()))
 }
 
 fn normalize(
@@ -221,10 +340,13 @@ fn normalize(
         configuration_entry: Some(ConfigurationEntry {
             source: source.to_owned(),
             name: name.to_owned(),
+            scope: None,
+            credential_store: None,
         }),
         description: expand(entry.description.as_deref().unwrap_or_default())
             .context("field 'description'")?,
         timeout_ms: entry.timeout_ms,
+        protocol_version: entry.protocol_version,
         ..ServerDef::default()
     };
     for (name, value) in entry.env {
@@ -298,14 +420,14 @@ fn normalize(
             .collect::<Result<Vec<_>>>()?,
         Some(Command::Text(command)) => {
             let command = expand(&command).context("field 'command'")?;
-            if !entry.args.is_empty() || values::existing_command_path(&command, directory)? {
+            if !entry.args.is_empty() || existing_command_path(&command, directory)? {
                 let mut tokens = vec![command];
                 for argument in entry.args {
                     tokens.push(expand(&argument).context("field 'args'")?);
                 }
                 tokens
             } else {
-                values::command_tokens(&command).context("field 'command'")?
+                command_tokens(&command).context("field 'command'")?
             }
         }
         None => bail!("missing baseUrl/url or command definition"),

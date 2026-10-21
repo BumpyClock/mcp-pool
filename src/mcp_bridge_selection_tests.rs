@@ -24,6 +24,7 @@ fn server_selection_uses_lifecycle_defaults_and_explicit_subset() -> Result<()> 
         configured_server("playwright", json!({})),
     );
     let configuration = ServerConfiguration {
+        credential_scope: None,
         source: PathBuf::from("synthetic.json"),
         servers,
         warnings: Vec::new(),

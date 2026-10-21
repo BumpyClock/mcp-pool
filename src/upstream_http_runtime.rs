@@ -41,9 +41,11 @@ pub(super) async fn run(
                     }
                 };
                 let allow_fallback = first_request && request.initialize && workers.is_empty();
-                first_request = false;
+                if !request.discover {
+                    first_request = false;
+                }
                 if request.initialization_barrier {
-                    if request.initialize {
+                    if request.initialize || request.discover {
                         let worker_client = client.clone();
                         let worker_url = url.clone();
                         let worker_responses = response_tx.clone();

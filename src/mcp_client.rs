@@ -6,13 +6,11 @@ use serde_json::{Value, json};
 use tokio::io::BufReader;
 use tokio::time::{Instant, timeout, timeout_at};
 
+use crate::mcp_protocol::{self, ConnectionInfo, Era, ProtocolPreference};
 use crate::transport::LocalStream;
 
 #[path = "mcp_client_wire.rs"]
 mod wire;
-
-const PROTOCOL_VERSION: &str = "2025-06-18";
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// A sequential MCP session over one shared pool connection.
 /// Cancellation closes the local connection because the pool does not translate
@@ -21,6 +19,7 @@ pub struct McpClient {
     reader: Option<BufReader<LocalStream>>,
     next_id: u64,
     deadline: Duration,
+    connection_info: Option<ConnectionInfo>,
 }
 
 /// A server JSON-RPC error, distinct from transport and protocol failures.
@@ -44,6 +43,13 @@ impl McpClient {
         deadline: Duration,
     ) -> Result<Self> {
         let expires = operation_expiry(deadline)?;
+        let preference = match (definition.protocol_version, definition.transport_kind()) {
+            (ProtocolPreference::Modern, "sse") => {
+                bail!("Pinned modern MCP requires stdio or HTTP, not legacy SSE");
+            }
+            (ProtocolPreference::Auto, "sse") => ProtocolPreference::Legacy,
+            (preference, _) => preference,
+        };
         timeout_at(expires, async {
             crate::daemon_client::ensure_definition_started(name, definition).await?;
             let socket_path = crate::config::server_socket_path(name);
@@ -63,39 +69,68 @@ impl McpClient {
                     Err(error) => return Err(error).context("connecting to MCP pool socket"),
                 }
             };
-            Self::initialize(stream, deadline).await
+            Self::negotiate(stream, deadline, preference).await
         })
         .await
         .context("MCP connection/initialization deadline exceeded")?
     }
 
+    #[cfg(test)]
     pub(crate) async fn initialize(stream: LocalStream, deadline: Duration) -> Result<Self> {
+        Self::negotiate(stream, deadline, ProtocolPreference::Legacy).await
+    }
+
+    pub(crate) fn connection_info(&self) -> Option<&ConnectionInfo> {
+        self.connection_info.as_ref()
+    }
+
+    async fn negotiate(
+        stream: LocalStream,
+        deadline: Duration,
+        preference: ProtocolPreference,
+    ) -> Result<Self> {
         operation_expiry(deadline)?;
         let mut client = Self {
             reader: Some(BufReader::new(stream)),
             next_id: 1,
             deadline,
+            connection_info: None,
         };
+        if preference != ProtocolPreference::Legacy {
+            let mut parameters = json!({});
+            mcp_protocol::stamp(&mut parameters)?;
+            match client.request("server/discover", parameters).await {
+                Ok(result) if mcp_protocol::discovery_offers_modern(&result)? => {
+                    client.connection_info =
+                        Some(mcp_protocol::connection_info(&result, Era::Modern)?);
+                    return Ok(client);
+                }
+                Ok(_) if preference == ProtocolPreference::Auto => {}
+                Err(error)
+                    if preference == ProtocolPreference::Auto
+                        && Self::discovery_unsupported(&error) => {}
+                Ok(_) => {
+                    bail!(
+                        "MCP server does not support pinned protocol version {}",
+                        mcp_protocol::MODERN_VERSION
+                    );
+                }
+                Err(error) => return Err(error).context(
+                    "MCP protocol discovery failed; no upstream or operation was replayed. For a legacy server that cannot handle discovery, set protocolVersion to legacy",
+                ),
+            }
+        }
         let result = client
             .request(
                 "initialize",
                 json!({
-                    "protocolVersion": PROTOCOL_VERSION,
+                    "protocolVersion": mcp_protocol::LEGACY_VERSION,
                     "capabilities": {},
                     "clientInfo": {"name": "mcp-pool", "version": env!("CARGO_PKG_VERSION")}
                 }),
             )
             .await?;
-        let version = result
-            .get("protocolVersion")
-            .and_then(Value::as_str)
-            .context("MCP initialize result omitted protocolVersion")?;
-        if !SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
-            bail!("unsupported MCP protocol version: {version}");
-        }
-        if !result.get("capabilities").is_some_and(Value::is_object) {
-            bail!("MCP initialize result omitted capabilities");
-        }
+        client.connection_info = Some(mcp_protocol::connection_info(&result, Era::Legacy)?);
         client
             .notify("notifications/initialized", json!({}))
             .await?;
@@ -104,7 +139,14 @@ impl McpClient {
 
     /// Returns the matched JSON-RPC result; server errors remain downcastable to
     /// `McpRpcError`. Timeout, EOF, or malformed frames retire this connection.
-    pub async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+    pub async fn request(&mut self, method: &str, mut params: Value) -> Result<Value> {
+        if self
+            .connection_info
+            .as_ref()
+            .is_some_and(|info| info.era == Era::Modern)
+        {
+            mcp_protocol::stamp(&mut params)?;
+        }
         validate_parameters(method, &params)?;
         let timeout_ms = timeout_milliseconds(self.deadline)?;
         let request_id = self.next_id;
@@ -126,7 +168,14 @@ impl McpClient {
         outcome
     }
 
-    pub async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+    pub async fn notify(&mut self, method: &str, mut params: Value) -> Result<()> {
+        if self
+            .connection_info
+            .as_ref()
+            .is_some_and(|info| info.era == Era::Modern)
+        {
+            mcp_protocol::stamp(&mut params)?;
+        }
         validate_parameters(method, &params)?;
         let mut reader = self.reader.take().context("MCP connection is closed")?;
         timeout(
@@ -140,6 +189,12 @@ impl McpClient {
         .with_context(|| format!("MCP {method} notification deadline exceeded"))??;
         self.reader = Some(reader);
         Ok(())
+    }
+
+    fn discovery_unsupported(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<McpRpcError>().is_some_and(|error| {
+            mcp_protocol::discovery_unsupported(error.code, error.data.as_ref())
+        })
     }
 
     /// Dedicated notification connections have no idle deadline; requests
@@ -243,3 +298,7 @@ mod deadline_tests;
 #[cfg(test)]
 #[path = "mcp_client_notification_tests.rs"]
 mod notification_tests;
+
+#[cfg(test)]
+#[path = "mcp_client_protocol_tests.rs"]
+mod protocol_tests;

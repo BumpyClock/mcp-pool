@@ -88,12 +88,17 @@ fn stale_tools_list_leader_clears_in_flight_and_drains_waiters() {
     });
 
     let stale_requests = cleanup_stale_requests(&request_map, &cache);
-    let responses = cleanup_tools_list_after_stale_requests(&cache, &stale_requests);
+    let responses =
+        cleanup_cached_after_stale_requests(&cache, &stale_requests, CacheableMethod::ToolsList);
 
     assert!(request_map.lock().is_empty(), "stale leader removed");
-    assert_eq!(responses.len(), 1, "waiter receives timeout error");
-    let timeout: Value = serde_json::from_str(&responses[0].1).expect("valid json");
-    assert_eq!(responses[0].0, "waiter");
+    assert_eq!(
+        responses.len(),
+        2,
+        "leader and waiter receive timeout errors"
+    );
+    let timeout: Value = serde_json::from_str(&responses[1].1).expect("valid json");
+    assert_eq!(responses[1].0, "waiter");
     assert_eq!(timeout["id"], json!(2));
     assert_eq!(timeout["error"]["code"], json!(-32001));
     assert_eq!(

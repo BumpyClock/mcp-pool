@@ -146,6 +146,16 @@ pub(super) async fn handle_client(
                                             ),
                                             "pool_initialize_coalesced",
                                         ),
+                                        Some(CacheableMethod::ServerDiscover) => (
+                                            prepare_server_discovery_request(
+                                                &handshake_cache,
+                                                &client_id,
+                                                original_id.clone(),
+                                                expires_after,
+                                                transport_deadline,
+                                            ),
+                                            "pool_server_discover_coalesced",
+                                        ),
                                         Some(CacheableMethod::ToolsList) => (
                                             prepare_tools_list_request(
                                                 &handshake_cache,
@@ -401,6 +411,11 @@ pub(super) async fn handle_client(
         if let Initialization::InFlight { waiters, .. } = &mut cache.initialize {
             waiters.retain(|waiter| waiter.client_id != client_id);
         }
+        cache
+            .server_discovery
+            .requests
+            .waiters
+            .retain(|waiter| waiter.client_id != client_id);
         cache
             .tools_list
             .waiters

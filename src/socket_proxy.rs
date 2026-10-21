@@ -39,6 +39,10 @@ mod router;
 #[path = "socket_proxy_wait.rs"]
 mod wait;
 
+#[cfg(test)]
+#[path = "socket_proxy_discovery_tests.rs"]
+mod discovery_tests;
+
 use cache::*;
 use client::handle_client;
 use dispatch::*;

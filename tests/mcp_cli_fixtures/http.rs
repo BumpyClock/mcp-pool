@@ -102,7 +102,11 @@ async fn respond(
         }),
         _ => json!({}),
     };
-    let body = json!({"jsonrpc":"2.0","id":id,"result":result}).to_string();
+    let body = if request.get("method").and_then(Value::as_str) == Some("server/discover") {
+        json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Legacy fixture method not found"}})
+    } else {
+        json!({"jsonrpc":"2.0","id":id,"result":result})
+    }.to_string();
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nMcp-Session-Id: mock-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()

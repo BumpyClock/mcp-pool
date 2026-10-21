@@ -16,12 +16,13 @@ upstream process/connection instead of launching N copies.
 - **Daemon + control socket.** `mcp-pool pool serve` runs the daemon holding
   the `Pool` registry. Native `start`/`stop`/`restart`/`status` use its local
   control socket through `daemon_client.rs` and auto-launch it when absent.
-  `pool list` reads native config without connecting.
+  Callers resolve config and send definitions; the daemon does not load config
+  or warm servers on launch. `pool list` reads the same config without connecting.
   `daemon status` and `daemon stop` do not auto-launch.
 - **MCP commands** (`mcp_cli.rs`, `tool_discovery.rs`, `tool_arguments.rs`,
   `tool_output.rs`): discovery, calls, and resources use pooled connections through
-  `mcp_client.rs`. `server_config.rs` reads existing mcporter JSONC directly.
-  Editor imports and config conversion are deferred; this is not complete mcporter parity.
+  `mcp_client.rs`. `server_config.rs` merges home/project `.mcp/config.json`.
+  `config_import*.rs` copies external definitions only during explicit imports.
   These commands reuse the native daemon and multiplexer, not a parallel ephemeral broker.
   mcporter is the command/config inspiration, not a runtime dependency.
 - **Tool bridge** (`mcp_bridge.rs`, `mcp_bridge_*.rs`): top-level `serve` exposes
@@ -48,6 +49,12 @@ upstream process/connection instead of launching N copies.
   `Stdio` (own a child process tree and stdin/stdout) and `Http` (one client;
   session-aware POST or legacy SSE GET/POST; JSON or SSE responses routed by
   `id`). The multiplexer is backend-agnostic and reuses id-routing for both.
+- **Protocol negotiation** (`mcp_protocol.rs`, `mcp_client.rs`): `protocolVersion`
+  is `auto`, `legacy`, or `2026-07-28`. Auto probes modern discovery and falls
+  back only on definitive incompatibility, using the same upstream. Legacy
+  initialization includes `2025-11-25`. Modern calls carry version metadata and
+  HTTP method/name headers; they do not initialize a legacy session. Silent or
+  exiting legacy servers require explicit `legacy`; probes never restart them.
 - **Verified retirement.** Stop/restart/shutdown await backend and local task
   retirement. An unverified retirement poisons the generation and prohibits
   replacement. Windows owns a Job Object; Unix owns a process group. Servers
@@ -78,12 +85,15 @@ upstream process/connection instead of launching N copies.
   Requests with unknown outcomes are never replayed automatically.
 
 ## Shared session semantics
-- Native pools are keyed by configured name, not executable identity.
-  JSON-config pool identities also include config source and resolved definition.
+- All pool identities include configured name, config source, credential scope,
+  and resolved definition. The daemon is independent of callers' project roots.
 - One pool shares upstream state across clients. Stateful multi-call sequences
   need caller coordination; JSON-RPC ID routing does not isolate server state.
 - Successful initialization and unpaginated tool discovery are cached. Tool-list
   change notifications invalidate discovery; upstream notifications broadcast.
+- Modern server discovery is coalesced across clients. Incompatible legacy and
+  modern handshakes cannot race on one generation. Protocol preference is part
+  of the resolved pool identity.
 - Sampling/roots requests prefer a capable, most-recently-active client. This
   heuristic does not prove callback causality or provide per-client isolation.
 - MCP command deadlines are per caller, not pool identity. `list` bounds each
@@ -98,6 +108,8 @@ upstream process/connection instead of launching N copies.
   cancel followers. Calls are not coalesced.
   Pending-route cleanup defaults to five minutes; longer caller/shared budgets
   can extend retention. Cleanup is distinct from local operation deadlines.
+- `session_cache.rs` owns shared discovery/tool-list TTL and in-flight state.
+  One-time initialization retains separate readiness and notification ownership.
 - Bridge operations include queue waits and reconnect setup in configured
   `timeoutMs` (60 seconds by default, no 120-second cap). Established HTTP
   subscriptions have no idle operation deadline. They forward tool-list
@@ -112,7 +124,7 @@ upstream process/connection instead of launching N copies.
 
 ## CLI surface
 - MCP commands: `list`/`describe`/`list-tools`, `call`, `resource`/`resources`,
-  `auth`, `vault set|clear`, `config list|get|add|remove|login|logout|doctor|help`,
+  `auth`, `vault set|clear`, `config list|get|add|remove|import|login|logout|doctor|help`, `import`,
   `daemon start|status|stop|restart|migrate|help`, and `serve`.
 - Native commands: `pool list`, `pool serve`, `start`, `stop`, `restart`,
   `status [name]`, `add`, `remove`, `proxy`, and `shutdown`.
@@ -121,6 +133,12 @@ upstream process/connection instead of launching N copies.
   `running` pool status confirms transport setup, not discovery or MCP readiness.
 - Dotted tool selectors split at the first dot. `docs.search.v2` selects server
   `docs` and tool `search.v2` for calls and tool-specific discovery.
+- Bare configured server names discover tools; inferred `SERVER.TOOL`,
+  `SERVER TOOL`, and call expressions invoke tools. Explicit native commands
+  take precedence. Inference must not execute an unknown command.
+- Tool resolution prefers exact names, then a unique normalized alias. Typo
+  suggestions never execute. Resolve policy against actual upstream names;
+  excluded real `help`/`list_tools` tools must not become discovery fallbacks.
 - `call --output raw` deliberately emits a JSON result envelope, not Node inspect text.
 - `--oauth-timeout` is accepted only for `auth` and `config login`.
   Cached refresh keeps its fixed OAuth deadline; `--timeout` bounds operation waits.
@@ -131,31 +149,42 @@ upstream process/connection instead of launching N copies.
   not a continuous stream.
 - `serve [--stdio | --http PORT [--host HOST]] [--servers NAME,...]` requires
   keep-alive entries. It is not the native daemon command.
-- `proxy NAME` prefers native config, then the selected JSON config.
-  With `MCP_POOL_HOME`, fallback requires explicit `MCPORTER_CONFIG`.
-  Proxy config selection uses the environment, not `--config`.
-  `pool proxy NAME` uses native config only.
-- `config import` is deferred. `daemon migrate` inventories legacy owners.
+- `proxy NAME` and `pool proxy NAME` use the same merged config, scoped auth,
+  `--config`, and `--root` selection as MCP commands.
+- `import` / `config import` copies Claude Code/Desktop, Codex, mcporter,
+  Cursor, Windsurf, OpenCode, VS Code, project, or former native TOML definitions.
+  Source files remain untouched. `config add --copy-from SOURCE:NAME` uses the
+  same converter before applying overrides; it is not a second import mechanism.
+  Identical imports are idempotent; conflicting replacements require `--replace`.
+  Imported references stay unresolved until use. Credentials are not imported.
+  `daemon migrate` inventories legacy owners.
   Retirement requires `--stop-legacy --confirmed-drained`, a same-user local
   handshake, and verified process identities/tree ownership.
   It asks the owning runtime to stop, not arbitrary PIDs.
   Failed retirement retains a journal and blocks cutover.
 - `emit-ts`, `generate-cli`, `inspect-cli`, `record`, `replay`, and an SDK are out of scope.
 
-## Paths & identity (XDG-aware)
-- Native config: `<config_dir>/mcp-pool/config.toml` (`%APPDATA%` on Windows).
-- JSON config selection: `--config PATH`, then `MCPORTER_CONFIG`, then
-  `~/.mcporter/mcporter.json` (`%USERPROFILE%\.mcporter\mcporter.json` on Windows).
-  Only the selected file's `mcpServers` entries are loaded.
-- Credentials: `$XDG_DATA_HOME/mcporter/credentials.json` when configured,
-  otherwise `~/.mcporter/credentials.json`; per-server caches and `tokenCacheDir`
-  are also read. These stores are used directly, not migrated.
+## Paths & identity
+- Config: `~/.mcp/config.json` merged with `PROJECT/.mcp/config.json`;
+  project entries replace same-named home entries before environment resolution.
+  `--config PATH`, then `MCP_POOL_CONFIG`, selects only that file.
+  `MCPORTER_CONFIG` and legacy config paths are not read at runtime.
+- Project lookup uses the nearest `.mcp` directory or Git root, otherwise cwd.
+  `--root` chooses an explicit project.
+- Credentials: `~/.mcp/credentials.json` and `PROJECT/.mcp/credentials.json`.
+  Project auth overrides home auth independently of config ownership.
+  Invalid/expired project credentials do not fall back to home credentials.
+  Refresh writes the selected store. Explicit credential mutations write the
+  active project store; `--config` writes beside the selected file.
+  Clearing a project override restores home fallback. Explicit `tokenCacheDir`
+  remains supported; legacy credential directories are not auto-discovered.
 - State / sockets: `<state_dir>/mcp-pool/run/` (`%LOCALAPPDATA%` on Windows).
 - Control socket: `<state_dir>/mcp-pool/mcp-pool-control.sock` /
   `\\.\pipe\mcp-pool-<home-hash>-control`.
 - Per-server socket: `mcp-pool-<name>.sock` /
   `\\.\pipe\mcp-pool-<home-hash>-<name>`.
-- `MCP_POOL_HOME` isolates native config and daemon state, not JSON config or credentials.
+- `MCP_POOL_HOME` redirects home config/credentials to its `config/` directory
+  and isolates daemon state; project and explicit credential paths remain separate.
 - `MCP_POOL_CREDENTIALS_READ_ONLY=1` allows valid cached credentials but blocks
   refresh, consent, and vault mutations. The caller's policy is sent to the daemon,
   including an existing daemon started without the flag.

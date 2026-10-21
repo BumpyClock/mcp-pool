@@ -7,9 +7,11 @@ static WARNINGS: AtomicBool = AtomicBool::new(true);
 
 pub(super) struct ContextOptions {
     pub path: Option<PathBuf>,
+    pub root: Option<PathBuf>,
     pub command: String,
     pub arguments: Vec<String>,
     pub oauth_timeout: Option<u64>,
+    pub plain: bool,
 }
 
 pub(crate) fn command_index(arguments: &[String]) -> Option<usize> {
@@ -20,10 +22,12 @@ pub(crate) fn command_index(arguments: &[String]) -> Option<usize> {
             "--config" | "--root" | "--log-level" | "--oauth-timeout"
         ) {
             index += 2;
-        } else if matches!(argument.as_str(), "--json" | "--debug" | "--no-color")
-            || ["--config=", "--root=", "--log-level=", "--oauth-timeout="]
-                .iter()
-                .any(|prefix| argument.starts_with(prefix))
+        } else if matches!(
+            argument.as_str(),
+            "--json" | "--debug" | "--no-color" | "--plain"
+        ) || ["--config=", "--root=", "--log-level=", "--oauth-timeout="]
+            .iter()
+            .any(|prefix| argument.starts_with(prefix))
         {
             index += 1;
         } else {
@@ -44,6 +48,7 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
     let mut oauth_timeout = None;
     let mut level = None;
     let mut leading_json = false;
+    let mut plain = false;
     let mut retained = Vec::new();
     let mut arguments = arguments.into_iter().enumerate();
     let mut literal = false;
@@ -88,6 +93,10 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
                 }
                 continue;
             }
+            if argument == "--plain" {
+                plain = true;
+                continue;
+            }
             if argument == "--json" && index < command_position {
                 leading_json = true;
                 continue;
@@ -108,34 +117,19 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
             Ordering::SeqCst,
         );
     }
-    if let Some(root) = root {
-        let root = if root.is_absolute() {
-            root
+    if let Some(directory) = root.as_mut() {
+        *directory = if directory.is_absolute() {
+            directory.clone()
         } else {
-            std::env::current_dir()?.join(root)
+            std::env::current_dir()?.join(&*directory)
         };
-        if !root.is_dir() {
+        if !directory.is_dir() {
             bail!("--root must name an existing directory");
         }
-        if let Some(selected) = path.as_mut() {
-            if selected.is_relative() {
-                *selected = root.join(&*selected);
-            }
-        } else if let Some(selected) = std::env::var_os("MCPORTER_CONFIG") {
-            let selected = PathBuf::from(selected);
-            path = Some(if selected.is_relative() {
-                root.join(selected)
-            } else {
-                selected
-            });
-        } else {
-            let selected = root.join("config").join("mcporter.json");
-            match std::fs::metadata(&selected) {
-                Ok(metadata) if metadata.is_file() => path = Some(selected),
-                Ok(_) => bail!("Root mcporter config is not a file"),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error).context("Inspecting root mcporter config"),
-            }
+        if let Some(selected) = path.as_mut()
+            && selected.is_relative()
+        {
+            *selected = directory.join(&*selected);
         }
     }
     if leading_json {
@@ -147,9 +141,11 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
     }
     Ok(ContextOptions {
         path,
+        root,
         command,
         arguments: retained,
         oauth_timeout,
+        plain,
     })
 }
 
@@ -216,5 +212,20 @@ mod tests {
         assert_eq!(timeout(None, Some("20"), Some(30), 60_000), 20);
         assert_eq!(timeout(None, Some("0"), None, 60_000), 60_000);
         assert_eq!(timeout(None, Some("garbage"), None, 30_000), 30_000);
+    }
+
+    #[test]
+    fn plain_output_is_explicit_and_literal_payloads_do_not_change_it() -> Result<()> {
+        let plain = parse(vec!["--plain".into(), "call".into(), "docs.echo".into()])?;
+        assert!(plain.plain);
+        let literal = parse(vec![
+            "call".into(),
+            "docs.echo".into(),
+            "--".into(),
+            "--plain".into(),
+        ])?;
+        assert!(!literal.plain);
+        assert_eq!(literal.arguments, ["docs.echo", "--", "--plain"]);
+        Ok(())
     }
 }

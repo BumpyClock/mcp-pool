@@ -128,4 +128,23 @@ mod tests {
         assert_ne!(canonical(json!([1, 2])), canonical(json!([2, 1])));
         Ok(())
     }
+
+    #[test]
+    fn protocol_preferences_separate_incompatible_upstreams() -> Result<()> {
+        let configuration = crate::server_config::parse_config(
+            &std::path::PathBuf::from("synthetic.json"),
+            r#"{"mcpServers":{"docs":{"command":"echo"}}}"#,
+        )?;
+        let server = configuration.servers.get("docs").context("server")?;
+        let original = pool_name(server, &server.definition)?;
+        let mut definition = server.definition.clone();
+        definition.protocol_version = crate::mcp_protocol::ProtocolPreference::Legacy;
+        let legacy = pool_name(server, &definition)?;
+        definition.protocol_version = crate::mcp_protocol::ProtocolPreference::Modern;
+        let modern = pool_name(server, &definition)?;
+        assert_ne!(original, legacy);
+        assert_ne!(original, modern);
+        assert_ne!(legacy, modern);
+        Ok(())
+    }
 }

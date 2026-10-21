@@ -6,15 +6,6 @@ use crate::config::{self, ServerDef};
 use crate::control::{ControlRequest, ControlResponse};
 use crate::{diagnostics, transport};
 
-pub(crate) async fn ensure_started(name: &str) -> anyhow::Result<()> {
-    require_success(
-        control_request(&ControlRequest::Start {
-            name: name.to_string(),
-        })
-        .await?,
-    )
-}
-
 pub(crate) async fn ensure_definition_started(
     name: &str,
     definition: &ServerDef,

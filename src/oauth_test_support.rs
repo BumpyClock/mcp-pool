@@ -49,7 +49,7 @@ impl Fixture {
             name: "synthetic".to_owned(),
             definition,
             raw: json!({"auth":"oauth"}),
-            source: root.join("config.json"),
+            source: root.join(".mcp").join("config.json"),
         };
         Ok(Self { root, server })
     }

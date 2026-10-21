@@ -319,7 +319,10 @@ fn app_owned_directories(path: &Path) -> Vec<PathBuf> {
 
 fn bind_with_private_mode(path: &Path) -> io::Result<tokio::net::UnixListener> {
     let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "local socket path has no parent")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "local socket path has no parent",
+        )
     })?;
     let metadata = fs::symlink_metadata(parent)?;
     if metadata.file_type().is_dir()

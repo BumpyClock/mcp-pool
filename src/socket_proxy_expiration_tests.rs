@@ -33,6 +33,10 @@ fn age_pending_requests(generation: &Generation, keep_tools: bool, remaining: Du
                     *deadline = crate::request_deadline::SharedDeadline::new(expiry);
                 }
             }
+            Some(CacheableMethod::ServerDiscover) => {
+                cache.server_discovery.requests.in_flight =
+                    Some(crate::request_deadline::SharedDeadline::new(expiry));
+            }
             Some(CacheableMethod::ToolsList) => {
                 cache.tools_list.in_flight =
                     Some(crate::request_deadline::SharedDeadline::new(expiry));
@@ -413,6 +417,91 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
             .await
             .is_err(),
         "expired followers receive no duplicate response"
+    );
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn server_discovery_waiter_expiration_does_not_cancel_live_leader() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut leader_client = BufReader::new(connect(&fixture.proxy).await?);
+    let mut follower_client = BufReader::new(connect(&fixture.proxy).await?);
+    send(
+        leader_client.get_mut(),
+        json!({"jsonrpc":"2.0","id":"leader","method":"server/discover","params":{}}),
+    )
+    .await?;
+    let leader = fixture.request().await?;
+    send(
+        follower_client.get_mut(),
+        json!({"jsonrpc":"2.0","id":"follower","method":"server/discover","params":{}}),
+    )
+    .await?;
+
+    let generation = fixture
+        .proxy
+        .generation
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing generation"))?;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while generation
+            .handshake_cache
+            .lock()
+            .server_discovery
+            .requests
+            .waiters
+            .len()
+            != 1
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    {
+        let mut cache = generation.handshake_cache.lock();
+        let waiter = cache
+            .server_discovery
+            .requests
+            .waiters
+            .first_mut()
+            .ok_or_else(|| io::Error::other("missing discovery waiter"))?;
+        waiter.inserted_at = Instant::now() - waiter.expires_after - Duration::from_millis(1);
+    }
+    generation.expiration_changed.notify_one();
+
+    assert_eq!(
+        read(&mut follower_client).await?,
+        json!({"jsonrpc":"2.0","id":"follower","error":{
+            "code":-32001,"message":"server/discover discovery timed out"
+        }})
+    );
+    assert_eq!(generation.request_map.lock().len(), 1);
+    assert!(
+        generation
+            .handshake_cache
+            .lock()
+            .server_discovery
+            .requests
+            .in_flight
+            .is_some()
+    );
+    assert!(fixture.requests.try_recv().is_err());
+
+    fixture
+        .responses
+        .send(
+            json!({"jsonrpc":"2.0","id":leader.get("id"),"error":{
+                "code":-32601,"message":"Method not found"
+            }})
+            .to_string(),
+        )
+        .await
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        read(&mut leader_client).await?.get("id"),
+        Some(&json!("leader"))
     );
     fixture.stop().await
 }

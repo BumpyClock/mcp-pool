@@ -5,41 +5,6 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{config, diagnostics, transport};
 
-/// Bridges stdio to the named pool socket, auto-starting its upstream if absent.
-pub async fn run(name: &str) -> anyhow::Result<()> {
-    let endpoint = config::server_socket_path(name);
-    diagnostics::log(format!(
-        "proxy_start name={} endpoint={}",
-        name,
-        endpoint.display()
-    ));
-
-    let stream = match transport::connect(&endpoint).await {
-        Ok(stream) => {
-            diagnostics::log(format!("proxy_attached_existing name={}", name));
-            stream
-        }
-        Err(_) => {
-            diagnostics::log(format!("proxy_autostart name={}", name));
-            if let Err(error) = crate::daemon_client::ensure_started(name).await {
-                eprintln!("mcp-pool: could not start pool server '{name}': {error}");
-                std::process::exit(1);
-            }
-            match connect_with_retry(&endpoint).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    eprintln!(
-                        "mcp-pool: started '{name}' but could not connect to its pool socket ({error})"
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-    };
-
-    bridge(stream, name).await
-}
-
 pub async fn run_resolved(name: &str, definition: &config::ServerDef) -> anyhow::Result<()> {
     crate::daemon_client::ensure_definition_started(name, definition).await?;
     let stream = connect_with_retry(&config::server_socket_path(name)).await?;

@@ -18,6 +18,25 @@ cargo build --release
 # binary at target/release/mcp-pool
 ```
 
+Build and install the current checkout explicitly:
+
+```powershell
+.\install.ps1
+.\install.ps1 -BinDir "$HOME\local\.bin"
+```
+
+```sh
+sh ./install.sh
+sh ./install.sh --bin-dir "$HOME/.local/bin"
+```
+
+The installers default to `~/.local/bin`, build the host target from this
+repository even when invoked elsewhere, and verify the staged executable before
+replacing an existing file. A locked Windows executable fails without stopping its
+daemon. The scripts do not change `PATH`; they warn if another executable would
+still be selected. `mcp-pool --version` includes the Git revision and a source
+fingerprint, so two different dirty builds no longer look identical.
+
 ## Development
 
 ```sh
@@ -30,12 +49,60 @@ bacon --job clippy
 On Windows, `.\dev.ps1` starts the `bacon --job run` watcher. On macOS/Linux,
 use `./dev.sh`.
 
-## Use an existing mcporter config
+## Configuration and imports
 
-MCP commands read `~/.mcporter/mcporter.json` directly. They do not
-require importing or converting it to the native TOML config. Select another file
-with `--config PATH` or `MCPORTER_CONFIG`; an explicit flag takes precedence.
-On Windows, the default is `%USERPROFILE%\.mcporter\mcporter.json`.
+All commands use the same JSONC format at `~/.mcp/config.json` and
+`PROJECT/.mcp/config.json`. Project entries override same-named home entries;
+other home entries remain available. Project lookup uses the nearest `.mcp`
+directory or Git root, falling back to the current directory. `--root DIR`
+selects a project explicitly. `--config PATH` or `MCP_POOL_CONFIG` selects just
+one file instead of merging. `MCPORTER_CONFIG` is no longer read.
+
+Import existing definitions once, then use only the copied configuration:
+
+```sh
+mcp-pool import claude --dry-run
+mcp-pool import claude
+mcp-pool import codex --scope project
+mcp-pool import project --scope project
+mcp-pool import mcporter --from PATH
+mcp-pool import cursor --scope project
+mcp-pool import vscode --from PATH --dry-run
+mcp-pool config import claude docs --scope project
+mcp-pool import mcp-pool --from OLD_CONFIG_TOML
+```
+
+`import` and `config import` are equivalent. Imports default to the home config;
+use `--scope project` for `PROJECT/.mcp/config.json`, or `--config PATH` for an
+explicit destination. `--from PATH` selects a source file, and optional server
+names select a subset. Existing identical definitions are safe to reimport;
+different definitions require `--replace`. Conflicts leave the whole destination
+unchanged. `--dry-run` makes no files or connections. Import output reports names
+and paths, not credential values.
+
+| Source | Files read during explicit import |
+| --- | --- |
+| `claude` / `claude-code` | `~/.claude.json`, Claude project-local entries in that file, `PROJECT/.mcp.json`, and legacy `.claude/mcp.json` / `settings.json` / `settings.local.json` files. Local overrides project, then user. |
+| `claude-desktop` | The platform's `Claude/claude_desktop_config.json`. |
+| `codex` | `~/.codex/config.toml` and `PROJECT/.codex/config.toml`. Project wins. `CODEX_HOME` overrides the user directory. |
+| `mcporter` | `~/.mcporter/mcporter.json` and `PROJECT/config/mcporter.json`. Project wins. |
+| `cursor` | `PROJECT/.cursor/mcp.json`, `~/.cursor/mcp.json`, and platform `Cursor/User/mcp.json` locations. Project wins. |
+| `windsurf` | `.codeium/windsurf`, `.codeium/windsurf-next`, `.windsurf`, and platform Codeium locations containing `mcp_config.json`. Use `--from` for another location. |
+| `vscode` / `vs-code` | `PROJECT/.vscode/mcp.json` and the platform's `Code/User/mcp.json` or `Code - Insiders/User/mcp.json`. Reads the VS Code `servers` container. |
+| `opencode` | Project `opencode.jsonc` / `opencode.json`, platform OpenCode configuration, and supported legacy OpenAI locations. Honors `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `OPENAI_WORKDIR` during explicit import. |
+| `project` | Claude project files, `.codex/config.toml`, and `config/mcporter.json`. Cross-tool name conflicts fail rather than choosing silently. |
+| `mcp-pool` | The former native `mcp-pool/config.toml`, or `--from PATH`. |
+
+Sources are never modified, executed, or followed during normal commands.
+Relative working directories and executable paths are rebased while copying.
+Environment references, headers, OAuth settings, and tool filters remain in the
+copy; ambient environment values are not saved. Codex disabled servers are
+omitted with a warning. Unsupported authentication helpers and transports fail
+explicitly instead of dropping authentication. OAuth tokens are not imported;
+authorize each scope explicitly. Legacy `imports` arrays are not followed.
+Literal `bearerToken` credentials and masked credential placeholders are rejected
+atomically; use `bearerTokenEnv` or an unresolved environment reference instead.
+After upgrading, stop an old daemon before starting pools with the new config.
 
 Windows resolves extensionless commands such as `npx` using `PATH` and
 `PATHEXT`, preferring Windows launchers such as `npx.cmd` over sibling
@@ -45,9 +112,8 @@ Leading global flags include `--json`, `--debug`, `--config PATH`,
 `--root DIR`, `--log-level LEVEL`, and `--oauth-timeout MILLISECONDS`.
 Leading `--json` selects JSON output; it is different from a call's
 `--json ARGUMENT_OBJECT`. `--root` resolves relative config paths against an
-existing directory. Without an explicit or environment-selected config, it
-uses that directory's `config/mcporter.json` if present, otherwise the home
-default. It does not change the process working directory.
+existing directory and selects its `.mcp` project layer and credentials.
+It does not change the process working directory.
 Log levels `trace` and `debug` enable diagnostic logging; `info`, `warn`,
 `error`, and `silent` disable verbose diagnostics. `--oauth-timeout` bounds
 explicit authorization for `auth` and `config login`, including stdio helpers.
@@ -66,10 +132,27 @@ mcp-pool resources docs               # list resources
 mcp-pool resource docs "docs://guide"  # read a resource
 ```
 
+Root `--help` exposes both MCP commands and native pool controls. `help call`
+and `call --help` describe the same command. Configured servers also support
+short forms:
+
+```sh
+mcp-pool docs
+mcp-pool docs list --schema
+mcp-pool docs.search query="MCP"
+mcp-pool docs search query="MCP"
+mcp-pool 'docs.search(query: "MCP")'
+```
+
+The first two discover tools; the remaining forms call a tool. A server-first
+tool token is never silently ignored. Explicit commands such as `status` and
+the `pool` namespace take precedence over same-named servers; use explicit
+`list NAME` or `call --server NAME --tool TOOL` for those servers.
+
 `docs`, `search`, and `docs://guide` are placeholders. Use names and URIs returned
 by your configured server. Discovery connects to servers and can start stdio
 processes; it is not a local config listing. Use `config list` to inspect config
-without connecting, or `pool list` to list native TOML definitions.
+without connecting, or `pool list` to list the same configured servers.
 
 `list`, `describe`, and `list-tools` accept `--schema`, `--brief`/`--signatures`,
 `--all-parameters`, `--json`, `--status`, `--sources`, and `--timeout MILLISECONDS`.
@@ -96,6 +179,8 @@ quiet, redirected output, CI, and `TERM=dumb` remain free of progress output.
 Set `MCP_POOL_NO_PROGRESS=1` to disable the indicator; the existing
 `MCPORTER_NO_SPINNER=1` setting is also honored. Proxy and bridge streams are
 never decorated with progress output.
+For MCP commands, `--plain` suppresses progress without changing the selected
+result format. Native status and `pool list` use it for stable line-based rows.
 
 `call` accepts `SERVER.TOOL`, `SERVER TOOL`, or `--server NAME --tool NAME`.
 Dotted tool selectors split at the first dot: `docs.search.v2` selects server
@@ -106,6 +191,14 @@ property declaration order. Named `key=@FILE` values read a regular UTF-8 file
 as literal text, up to 16 MiB; `key=@@text` sends literal `@text`.
 Tool-option flags must match schema properties or their kebab-case spelling;
 unknown options are rejected.
+Tool names resolve exactly first, then through a unique case-insensitive alias
+that ignores punctuation. For example, `list-pages` can select upstream
+`list_pages`. Ambiguous aliases fail; near-miss spellings only suggest a name and
+never execute the suggested tool. Tool-specific discovery uses the same resolver.
+`call SERVER.list_tools` and `call SERVER.help` fall back to discovery only when
+there is no corresponding real tool. Real tools, including excluded tools, are
+never bypassed by these fallbacks. Tool arguments are not accepted by a discovery
+fallback.
 `--raw-strings`/`--no-coerce` preserves string values instead of coercing JSON
 numbers, booleans, or collections. Calls and resources accept
 `--output auto|text|markdown|json|raw` and `--timeout MILLISECONDS`.
@@ -152,8 +245,30 @@ directories. Relative command paths and `cwd` resolve against the selected
 config file's directory; absent stdio `cwd` uses that directory.
 HTTP headers, `bearerToken`, and `bearerTokenEnv` resolve environment values
 from the server's configured `env` overrides before the caller's environment.
-Editor config imports and automatic config conversion are deferred. Only the selected file's
-`mcpServers` entries are loaded, and ignored imports produce a warning.
+External configs are read only by explicit `import` commands. Legacy `imports`
+arrays in an owned config produce a warning and are not followed.
+
+### Upstream protocol negotiation
+
+Server entries accept `protocolVersion` (`protocol_version` is an alias):
+
+| Value | Behavior |
+| --- | --- |
+| `auto` (default) | Probe `server/discover` for `2026-07-28`; fall back to legacy initialization only after a definitive unsupported-method/version response or an initial HTTP protocol mismatch. |
+| `legacy` | Skip the modern probe and send `initialize`. Supports `2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05`. |
+| `2026-07-28` | Require modern discovery. No legacy fallback. |
+
+Modern requests carry protocol-version metadata and HTTP method/name headers.
+They do not send a legacy `initialize` or `notifications/initialized` handshake.
+Legacy SSE uses legacy negotiation. Pools with incompatible configured protocol
+preferences have distinct identities. JSON discovery reports the negotiated
+`protocolVersion`, `era`, and any server instructions.
+
+Negotiation uses the same upstream, not a temporary probe process. Authentication
+failures, malformed replies, disconnects, and unanswered probes do not trigger
+restarts or replay. If an older stdio server exits or ignores unknown methods,
+set its `protocolVersion` to `legacy`. An operation whose outcome is unknown is
+never retried automatically.
 
 Server entries can use `allowedTools` or `blockedTools` arrays, with
 `allowed_tools` and `blocked_tools` as aliases, to filter discovery, calls,
@@ -170,18 +285,28 @@ mcp-pool config list --json           # local definitions, without discovery
 mcp-pool config get docs --json
 mcp-pool config doctor --json         # config and credential status, not a live probe
 mcp-pool config add echo --command npx --arg -y --arg @modelcontextprotocol/server-everything --arg stdio --dry-run
-mcp-pool config add remote https://example.com/mcp --persist .\mcporter.json
-mcp-pool --config .\mcporter.json config remove remote
+mcp-pool config add remote https://example.com/mcp --scope project
+mcp-pool config add docs-copy --copy-from cursor:docs --scope project --dry-run
+mcp-pool config add docs-copy --copy-from vscode:docs --from PATH --protocol-version legacy
+mcp-pool --config .\.mcp\config.json config remove remote
 mcp-pool config login docs            # explicit auth
 mcp-pool config logout docs           # clear stored OAuth credentials
 mcp-pool config help
 ```
 
-`config add` and `config remove` change the selected JSON config, not native
-TOML. `--persist PATH` chooses an add destination; `--scope home|project` selects
-the home config or `config/mcporter.json` in the current directory.
+`config add` and `config remove` change the selected JSON config, shared with
+native `add` and `remove`. By default they write an existing project config,
+otherwise the home config. Removing a project override exposes the inherited
+home entry again. `--persist PATH` chooses an add destination;
+`--scope home|project` selects the home or project `.mcp/config.json`.
 `--dry-run` validates and prints the definition without writing; environment
 and header values are redacted.
+`config add --copy-from SOURCE:NAME` starts with the same normalized definition
+as an explicit import, then applies the supplied target, environment, header,
+auth, description, and protocol overrides. The destination alias can differ
+from the source name. `--from PATH` selects the source file. Identical copies are
+idempotent; a different existing destination requires `--replace`. Copying does
+not read or transfer OAuth vault/cache credentials.
 Config mutations preserve unrelated JSON fields but rewrite formatting and
 remove JSONC comments. Use a separate file when the original must remain unchanged.
 Replacement and removal retire matching prior pool views before committing.
@@ -189,10 +314,10 @@ If retirement fails, the config remains unchanged.
 
 ### Config, credentials, and isolation
 
-`MCP_POOL_HOME` isolates native config, daemon state, sockets, and logs. It does
-not select the mcporter config or relocate mcporter credentials. Use
-`MCPORTER_CONFIG` separately when testing an isolated daemon against a specific
-config.
+`MCP_POOL_HOME` redirects the home config and home credential layer to
+`MCP_POOL_HOME/config/`, and isolates daemon state, sockets, and logs. It does
+not relocate project config or project credentials. Use `MCP_POOL_CONFIG` or
+`--config PATH` for a fully explicit configuration and adjacent credential scope.
 
 Set `MCP_POOL_CREDENTIALS_READ_ONLY=1` in the calling process to
 allow use of valid cached credentials without refresh or credential writes.
@@ -205,8 +330,8 @@ For example, this PowerShell sequence selects the home config explicitly while
 keeping daemon state in the repository and credentials read-only:
 
 ```powershell
-$env:MCP_POOL_HOME = Join-Path $PWD "target\mcporter-validation"
-$env:MCPORTER_CONFIG = Join-Path $HOME ".mcporter\mcporter.json"
+$env:MCP_POOL_HOME = Join-Path $PWD "target\mcp-validation"
+$env:MCP_POOL_CONFIG = Join-Path $HOME ".mcp\config.json"
 $env:MCP_POOL_CREDENTIALS_READ_ONLY = "1"
 mcp-pool list --json --exit-code
 mcp-pool daemon stop
@@ -227,10 +352,19 @@ mcp-pool vault set docs --tokens-file tokens.json
 mcp-pool vault clear docs
 ```
 
-Credential commands read and write mcporter's associated credential stores.
-These include `~/.mcporter/credentials.json` (or
-`$XDG_DATA_HOME/mcporter/credentials.json` when configured) and per-server
-credential directories such as `~/.mcporter/SERVER` or `tokenCacheDir`.
+Credentials use `~/.mcp/credentials.json` and
+`PROJECT/.mcp/credentials.json`. Project credentials override home credentials
+independently of where a server is defined, so a project can authenticate an
+inherited home server as a different account without copying its definition.
+An expired or invalid project credential never falls back to a home account.
+Refresh updates the selected credential store, not a copy of a rotating token.
+`auth`, `vault set`, and logout/clear target the active project scope;
+`--config PATH` targets credentials beside that config. To authorize at home,
+run `mcp-pool --config ~/.mcp/config.json auth SERVER`.
+Clearing a project credential restores home fallback. Credential scopes also
+separate pooled connections, including projects using different accounts.
+Explicit `tokenCacheDir` still opts into that cache and can intentionally share
+credentials; legacy mcporter credential paths are not discovered automatically.
 Do not use `auth --reset`, `vault set`, `vault clear`, or config login/logout
 against credentials that must remain unchanged. Pass token material through a
 file or stdin, not command-line arguments. Never commit credential files.
@@ -292,7 +426,7 @@ names. General daemon records remain available; unidentified server records are
 suppressed when a server filter is active.
 
 `daemon migrate --json` inventories observed legacy owners as `pid` and
-`verified` records. Config imports and conversion remain deferred.
+`verified` records. Config conversion is a separate explicit `import` operation.
 Legacy retirement requires both `--stop-legacy` and `--confirmed-drained`;
 drain clients and obtain authorization before invoking it. Retirement requires
 a same-user local handshake and verified process identities/tree ownership.
@@ -375,10 +509,10 @@ per-client state isolation.
 
 The command surface includes `list`/`describe`/`list-tools`, `auth`, `call`,
 `resource`/`resources`, `vault set|clear`,
-`config list|get|add|remove|login|logout|doctor|help`, `daemon`, and `serve`.
+`config list|get|add|remove|import|login|logout|doctor|help`, `import`, `daemon`, and `serve`.
 mcporter is the command and config inspiration, not a second runtime or a promise
 of complete parity.
-`config import` and editor imports are deferred.
+Imports copy definitions; they do not enable live editor-config dependencies.
 `emit-ts`, `generate-cli`, `inspect-cli`, `record`, `replay`, and an SDK are
 outside this implementation's scope.
 Pools remain owned by the persistent native daemon, not an ephemeral per-command
@@ -393,7 +527,10 @@ Consumers can parse that output as JSON; byte-for-byte text parity is not promis
 
 ## Native pool usage
 
-Native lifecycle commands still manage the pool daemon and TOML config.
+Native lifecycle commands manage the pool daemon using the same `.mcp` JSON config.
+Configuration is resolved by each caller, not the daemon's launch directory.
+Daemon launch does not execute configured servers automatically; use `start`
+without a name to start all servers in the caller's merged configuration.
 The former top-level native `list` and `serve` are now `pool list` and
 `pool serve`; top-level `list` performs live MCP discovery, and top-level
 `serve` is the compatibility MCP bridge.
@@ -410,7 +547,7 @@ mcp-pool start echo        # pre-warm the pooled upstream (optional)
 mcp-pool status            # show all pools
 mcp-pool restart echo
 mcp-pool stop echo
-mcp-pool pool list         # native configured servers; no discovery
+mcp-pool pool list         # configured servers; no discovery
 mcp-pool remove echo
 
 # Run the daemon explicitly (otherwise auto-launched on first command)
@@ -426,12 +563,9 @@ mcp-pool proxy echo
 
 Set `MCP_POOL_DEBUG=1` to enable diagnostic logging to the state dir.
 
-`proxy NAME` prefers a native TOML definition. If none exists, it can resolve
-`NAME` from the selected mcporter config and start a shared pool. When
-`MCP_POOL_HOME` is set, this fallback requires an explicit `MCPORTER_CONFIG`;
-this prevents an isolated native test from silently using the home config.
-`pool proxy NAME` uses only native definitions. Proxy selection uses the
-environment variable, not the compatibility commands' `--config` flag.
+`proxy NAME` and `pool proxy NAME` both resolve the merged `.mcp` configuration,
+including scoped credentials. Both accept `--config` and `--root`.
+No legacy TOML or mcporter configuration is read as a fallback.
 
 ## Local endpoint security
 
@@ -470,9 +604,10 @@ If daemon shutdown fails, failed pools remain blocked and visible in status.
 The daemon resumes accepting lifecycle commands for unrelated pools.
 
 Restart creates fresh routing and discovery state. It disconnects existing proxy
-clients; agents must reconnect. Native pools use configured names, not executable
-fingerprints. Compatibility pool identities also include the selected config
-source and resolved definition. Configuring the same command under two names,
+clients; agents must reconnect. Pool identities include the configured name,
+config source, credential scope, and resolved definition. Status shows logical
+names and includes the internal identity as `pool_name` in JSON.
+Configuring the same command under two names,
 or resolving it through different config files, can create separate pools.
 
 ## Remote transports
@@ -500,7 +635,7 @@ blocking confirmed local retirement. Remote cleanup is not guaranteed.
 An expired HTTP session returns an error without replaying the request. Restart
 the pool and reconnect before issuing new requests. Optional Streamable HTTP GET
 streams and resumable event replay are not implemented. Servers resolved from
-mcporter config can use configured headers and associated OAuth credentials.
+the `.mcp` config can use configured headers and scoped OAuth credentials.
 OAuth consent remains an explicit `auth` operation.
 
 ## Shared session contract

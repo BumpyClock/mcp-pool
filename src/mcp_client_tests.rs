@@ -42,7 +42,7 @@ async fn initialize_server(server: &mut Server) -> Result<()> {
     assert_eq!(request.pointer("/params/capabilities"), Some(&json!({})));
     assert_eq!(
         request.pointer("/params/protocolVersion"),
-        Some(&json!("2025-06-18"))
+        Some(&json!("2025-11-25"))
     );
     send(
         server,

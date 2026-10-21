@@ -15,7 +15,7 @@ mod authorization_tests;
 #[path = "oauth_browser.rs"]
 mod browser;
 #[path = "oauth_files.rs"]
-mod files;
+pub(crate) mod files;
 #[path = "oauth_flow.rs"]
 mod flow;
 #[path = "oauth_protocol.rs"]
@@ -65,6 +65,20 @@ impl fmt::Debug for HttpAuth {
     }
 }
 
+impl HttpAuth {
+    pub(crate) fn storage_identity(&self) -> Result<PathBuf> {
+        let path = if self.directory_primary {
+            self.directory_stores
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("Primary credential cache has no directory"))?
+                .join("tokens.json")
+        } else {
+            self.vault_path.clone()
+        };
+        crate::config_paths::absolute(&path)
+    }
+}
+
 pub struct AuthOptions {
     pub reset: bool,
     pub no_browser: bool,
@@ -72,30 +86,40 @@ pub struct AuthOptions {
 }
 
 pub async fn prepare(server: &ConfiguredServer, no_oauth: bool) -> Result<ServerDef> {
-    let mut definition = server.definition.clone();
-    if !definition.is_remote() {
-        definition.auth = None;
-        return Ok(definition);
-    }
-    let mut authentication = context(server)?;
-    authentication.cached_only = no_oauth;
-    let snapshot = read_snapshot(&authentication).await?;
-    let configured =
-        string(&server.raw, "auth").is_some_and(|method| method.eq_ignore_ascii_case("oauth"));
-    if configured || snapshot.get("tokens").is_some() {
+    let mut definition = identity_definition(server)?;
+    if let Some(authentication) = definition.auth.as_mut() {
+        authentication.cached_only = no_oauth;
+        let snapshot = read_snapshot(authentication).await?;
         let tokens = snapshot
             .get("tokens")
-            .ok_or_else(|| missing(&authentication))?;
+            .ok_or_else(|| missing(authentication))?;
         store::validate_tokens(tokens)?;
         if store::expired(tokens) {
             if authentication.read_only {
-                ensure_writable(&authentication)?;
+                ensure_writable(authentication)?;
             }
             if no_oauth || string(tokens, "refresh_token").is_none() {
-                return Err(missing(&authentication));
+                return Err(missing(authentication));
             }
         }
-        definition.auth = Some(authentication);
+    }
+    Ok(definition)
+}
+
+pub(crate) fn identity_definition(server: &ConfiguredServer) -> Result<ServerDef> {
+    let mut definition = server.definition.clone();
+    definition.auth = None;
+    if definition.is_remote() {
+        let authentication = read_context(server)?;
+        let snapshot = store::read(&authentication)?;
+        let configured =
+            string(&server.raw, "auth").is_some_and(|method| method.eq_ignore_ascii_case("oauth"));
+        if let Some(entry) = definition.configuration_entry.as_mut() {
+            entry.credential_store = Some(authentication.storage_identity()?);
+        }
+        if configured || snapshot.get("tokens").is_some() {
+            definition.auth = Some(authentication);
+        }
     }
     Ok(definition)
 }
@@ -190,7 +214,7 @@ pub fn vault_clear(server: &ConfiguredServer) -> Result<()> {
 }
 
 pub fn credential_status(server: &ConfiguredServer) -> Result<Value> {
-    let authentication = context(server)?;
+    let authentication = read_context(server)?;
     let snapshot = store::read(&authentication)?;
     let binding_valid = store::validate_binding(&authentication, &snapshot).is_ok();
     let tokens = snapshot.get("tokens");
@@ -208,28 +232,11 @@ pub fn credential_status(server: &ConfiguredServer) -> Result<Value> {
 
 pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
     let definition = &server.definition;
-    let home = definition
-        .env
-        .get("HOME")
-        .or_else(|| definition.env.get("USERPROFILE"))
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(PathBuf::from)
-        })
-        .or_else(dirs::home_dir)
-        .ok_or_else(|| anyhow::anyhow!("home directory unavailable for credentials"))?;
-    let data = definition
-        .env
-        .get("XDG_DATA_HOME")
-        .cloned()
-        .or_else(|| std::env::var("XDG_DATA_HOME").ok())
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute());
-    let vault_root = data
-        .map(|path| path.join("mcporter"))
-        .unwrap_or_else(|| home.join(".mcporter"));
+    let vault_root = definition
+        .credential_scope
+        .clone()
+        .or_else(|| server.source.parent().map(std::path::Path::to_path_buf))
+        .ok_or_else(|| anyhow::anyhow!("Config has no credential directory"))?;
     let server_url = if definition.is_remote() {
         Url::parse(&definition.url)
             .map_err(|_| anyhow::anyhow!("invalid MCP server URL"))?
@@ -262,12 +269,14 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
     let mut directory_stores = Vec::new();
     if let Some(directory) = token_cache_directory {
         let path = if directory == "~" {
-            home
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory unavailable"))?
         } else if let Some(suffix) = directory
             .strip_prefix("~/")
             .or_else(|| directory.strip_prefix("~\\"))
         {
-            home.join(suffix)
+            dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Home directory unavailable"))?
+                .join(suffix)
         } else {
             PathBuf::from(directory)
         };
@@ -280,8 +289,6 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
                 .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?
                 .join(path)
         });
-    } else if !server.name.contains(['/', '\\']) && server.name != "." && server.name != ".." {
-        directory_stores.push(home.join(".mcporter").join(&server.name));
     }
     Ok(HttpAuth {
         server_name: server.name.clone(),
@@ -328,6 +335,24 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
             || std::env::var("MCP_POOL_CREDENTIALS_READ_ONLY").is_ok_and(|value| value == "1"),
         cached_only: false,
     })
+}
+
+fn read_context(server: &ConfiguredServer) -> Result<HttpAuth> {
+    let primary = context(server)?;
+    if server.definition.credential_scope.is_none()
+        || primary.directory_primary
+        || store::present(&primary)?
+    {
+        return Ok(primary);
+    }
+    let home = crate::config_paths::absolute(&crate::config_paths::home_directory()?)?;
+    if primary.vault_path.parent() == Some(home.as_path()) {
+        return Ok(primary);
+    }
+    let mut fallback = primary;
+    fallback.vault_path = home.join("credentials.json");
+    fallback.directory_stores.clear();
+    Ok(fallback)
 }
 
 pub(crate) fn setting<'a>(value: &'a Value, camel: &str, snake: &str) -> Option<&'a str> {

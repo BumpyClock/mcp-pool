@@ -193,13 +193,7 @@ async fn vault_tokens_auth_reuse_and_clear_are_isolated_and_redacted() -> io::Re
         )
         .await?;
     assert!(stdin.status.success(), "{stdin:?}");
-    assert!(
-        fixture
-            .home
-            .join("mcporter")
-            .join("credentials.json")
-            .exists()
-    );
+    assert!(fixture.home.join("credentials.json").exists());
     fixture.success(&["config", "logout", "protected"]).await?;
     fixture.finish().await
 }
@@ -210,9 +204,9 @@ async fn daemon_administration_and_native_namespace_keep_their_meanings() -> io:
     let status = fixture.success(&["daemon", "status", "--json"]).await?;
     assert_eq!(parse_json(&status)?.get("running"), Some(&json!(true)));
     let native = parse_json(&fixture.success(&["pool", "list", "--json"]).await?)?;
-    assert_eq!(native, json!([]));
+    assert_eq!(native.as_array().map(Vec::len), Some(2));
     let global_native = parse_json(&fixture.success(&["--json", "pool", "list"]).await?)?;
-    assert_eq!(global_native, json!([]));
+    assert_eq!(global_native.as_array().map(Vec::len), Some(2));
     assert!(!fixture.counter.exists());
     fixture.success(&["daemon", "start"]).await?;
     fixture.success(&["daemon", "restart"]).await?;
@@ -310,7 +304,7 @@ async fn caller_read_only_policy_reaches_existing_daemon_without_refresh_or_writ
         )
         .await?;
     assert!(seeded.status.success(), "{seeded:?}");
-    let vault = fixture.home.join("mcporter").join("credentials.json");
+    let vault = fixture.home.join("credentials.json");
     let snapshot = tokio::fs::read(&vault).await?;
     assert_eq!(
         parse_json(&fixture.success(&["daemon", "status", "--json"]).await?)?.get("running"),
@@ -384,7 +378,7 @@ async fn daemon_relative_log_is_bounded_and_filters_logical_server_names() -> io
     assert_eq!(first_servers.len(), 1);
     let selected = first_servers
         .first()
-        .and_then(|server| server.get("name"))
+        .and_then(|server| server.get("pool_name"))
         .and_then(Value::as_str)
         .ok_or_else(|| io::Error::other("native status omitted selected name"))?
         .to_owned();
@@ -428,7 +422,7 @@ async fn daemon_relative_log_is_bounded_and_filters_logical_server_names() -> io
     assert_eq!(second_servers.len(), 2);
     let excluded = second_servers
         .iter()
-        .filter_map(|server| server.get("name").and_then(Value::as_str))
+        .filter_map(|server| server.get("pool_name").and_then(Value::as_str))
         .find(|name| *name != selected)
         .ok_or_else(|| io::Error::other("native status omitted excluded name"))?;
     assert_eq!(fixture.event_count("spawn").await?, 2);

@@ -19,6 +19,9 @@ use options::Options;
 #[path = "upstream_http_request.rs"]
 mod request;
 use request::Request;
+#[path = "upstream_http_response.rs"]
+mod response;
+use response::deliver;
 #[cfg(test)]
 #[path = "upstream_http_auth_tests.rs"]
 mod auth_tests;
@@ -28,6 +31,9 @@ mod deadline_tests;
 #[cfg(test)]
 #[path = "upstream_http_options_tests.rs"]
 mod options_tests;
+#[cfg(test)]
+#[path = "upstream_http_protocol_tests.rs"]
+mod protocol_tests;
 #[path = "upstream_http_retire.rs"]
 mod retire;
 #[path = "upstream_http_runtime.rs"]
@@ -74,6 +80,7 @@ enum Session {
 enum PostOutcome {
     Complete,
     LegacyMismatch,
+    DiscoveryUnsupported(u16),
 }
 
 #[cfg(test)]
@@ -199,7 +206,22 @@ async fn execute(
         ))
         .await
         .unwrap_or_else(|_| Err("HTTP request deadline exceeded; request was not replayed".into()));
-    if matches!(result, Ok(PostOutcome::LegacyMismatch)) {
+    if let Ok(PostOutcome::DiscoveryUnsupported(status)) = result {
+        if let Some(identifier) = request.identifier {
+            let payload = serde_json::json!({
+                "jsonrpc":"2.0",
+                "id":identifier,
+                "error":{
+                    "code":crate::mcp_protocol::DISCOVERY_UNSUPPORTED,
+                    "message":"HTTP endpoint does not support modern MCP discovery",
+                    "data":{"httpStatus":status}
+                }
+            });
+            if response_tx.send(payload.to_string()).await.is_err() {
+                crate::diagnostics::log("upstream_http_response_receiver_closed");
+            }
+        }
+    } else if matches!(result, Ok(PostOutcome::LegacyMismatch)) {
         if let Some(established) = established.take()
             && established.send(Some(request)).is_err()
         {
@@ -252,6 +274,9 @@ async fn post(
             if request.initialize {
                 return Err("MCP HTTP upstream is already initialized".into());
             }
+            if (protocol == crate::mcp_protocol::MODERN_VERSION) != request.modern {
+                return Err("MCP request protocol does not match the shared upstream".into());
+            }
             builder = builder.header("MCP-Protocol-Version", protocol);
             if let Some(identifier) = identifier {
                 builder = builder.header("Mcp-Session-Id", identifier);
@@ -259,12 +284,24 @@ async fn post(
         }
         Session::Fresh => {}
     }
+    if request.modern {
+        builder = builder.header("MCP-Protocol-Version", crate::mcp_protocol::MODERN_VERSION);
+        if let Some(method) = &request.method {
+            builder = builder.header("MCP-Method", method);
+        }
+        if let Some(name) = &request.name {
+            builder = builder.header("MCP-Name", name);
+        }
+    }
     let mut response = builder
         .body(request.line.clone())
         .send()
         .await
         .map_err(|_| "HTTP request failed; request was not replayed")?;
     let status = response.status();
+    if request.discover && fresh && matches!(status.as_u16(), 400 | 404 | 405 | 415) {
+        return Ok(PostOutcome::DiscoveryUnsupported(status.as_u16()));
+    }
     if allow_fallback
         && fresh
         && matches!(
@@ -356,56 +393,6 @@ async fn post(
         }
         _ => Err("HTTP upstream returned an unsupported content type".into()),
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn deliver(
-    body: &str,
-    request: &Request,
-    session_identifier: Option<HeaderValue>,
-    session: &Arc<Mutex<Session>>,
-    response_tx: &mpsc::Sender<String>,
-    answered: &mut bool,
-    established: &mut Option<oneshot::Sender<Option<Request>>>,
-) -> Result<(), String> {
-    let value = parse_message(body)?;
-    let matches = request.identifier.as_ref().is_some_and(|identifier| {
-        value.get("id") == Some(identifier)
-            && (value.get("result").is_some() || value.get("error").is_some())
-    });
-    if matches && request.initialize && value.get("result").is_some() {
-        if session_identifier.as_ref().is_some_and(|identifier| {
-            identifier.is_empty()
-                || !identifier
-                    .as_bytes()
-                    .iter()
-                    .all(|byte| (0x21..=0x7e).contains(byte))
-        }) {
-            return Err("MCP initialize response contains an invalid session ID".into());
-        }
-        let protocol = value
-            .pointer("/result/protocolVersion")
-            .and_then(Value::as_str)
-            .ok_or("MCP initialize response omitted protocolVersion")?;
-        if protocol.is_empty() {
-            return Err("MCP initialize response contains an invalid protocolVersion".into());
-        }
-        let protocol = HeaderValue::from_str(protocol)
-            .map_err(|_| "MCP initialize response contains an invalid protocolVersion")?;
-        *session.lock().await = Session::Ready {
-            identifier: session_identifier,
-            protocol,
-        };
-    }
-    response_tx
-        .send(value.to_string())
-        .await
-        .map_err(|_| "HTTP response receiver closed")?;
-    *answered |= matches;
-    if matches {
-        release_initialization(established);
-    }
-    Ok(())
 }
 
 fn release_initialization(established: &mut Option<oneshot::Sender<Option<Request>>>) {

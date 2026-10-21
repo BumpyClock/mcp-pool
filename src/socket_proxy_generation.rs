@@ -387,19 +387,21 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
                 .map(|pending| pending_expiration(pending, &cache))
                 .min()
         };
-        let waiter_deadline = generation
-            .handshake_cache
-            .lock()
-            .tools_list
-            .waiters
-            .iter()
-            .map(|waiter| {
-                waiter
-                    .inserted_at
-                    .checked_add(waiter.expires_after)
-                    .unwrap_or_else(Instant::now)
-            })
-            .min();
+        let waiter_deadline = {
+            let cache = generation.handshake_cache.lock();
+            cache
+                .tools_list
+                .waiters
+                .iter()
+                .chain(cache.server_discovery.requests.waiters.iter())
+                .map(|waiter| {
+                    waiter
+                        .inserted_at
+                        .checked_add(waiter.expires_after)
+                        .unwrap_or_else(Instant::now)
+                })
+                .min()
+        };
         let deadline = request_deadline.into_iter().chain(waiter_deadline).min();
         let wait_deadline = async {
             match deadline {

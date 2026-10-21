@@ -13,6 +13,9 @@ pub use schema::hydrate;
 #[path = "tool_inputs.rs"]
 mod inputs;
 pub use inputs::{Inputs, merge_stdin};
+#[path = "tool_options.rs"]
+pub(crate) mod options;
+use options::{AdHocOption, CallOption};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Output {
@@ -62,17 +65,17 @@ impl AdHoc {
         token: &str,
         tokens: &mut std::collections::VecDeque<String>,
     ) -> Result<bool> {
-        match token {
-            "--http-url" | "--sse" => {
+        match AdHocOption::parse(token) {
+            Some(AdHocOption::HttpUrl | AdHocOption::Sse) => {
                 self.url = Some(value(tokens, token)?);
                 self.transport = Some(if token == "--sse" { "sse" } else { "http" }.to_owned());
             }
-            "--stdio" => self.command = Some(value(tokens, token)?),
-            "--stdio-arg" => self.arguments.push(value(tokens, token)?),
-            "--cwd" => self.cwd = Some(PathBuf::from(value(tokens, token)?)),
-            "--name" => self.name = Some(value(tokens, token)?),
-            "--allow-http" => self.allow_http = true,
-            "--env" | "--header" => {
+            Some(AdHocOption::Stdio) => self.command = Some(value(tokens, token)?),
+            Some(AdHocOption::StdioArg) => self.arguments.push(value(tokens, token)?),
+            Some(AdHocOption::Cwd) => self.cwd = Some(PathBuf::from(value(tokens, token)?)),
+            Some(AdHocOption::Name) => self.name = Some(value(tokens, token)?),
+            Some(AdHocOption::AllowHttp) => self.allow_http = true,
+            Some(AdHocOption::Env | AdHocOption::Header) => {
                 let entry = value(tokens, token)?;
                 let (key, content) = entry
                     .split_once('=')
@@ -88,9 +91,9 @@ impl AdHoc {
                 };
                 target.insert(key.trim().to_owned(), content.trim().to_owned());
             }
-            "--persist" => self.persist = Some(PathBuf::from(value(tokens, token)?)),
-            "--description" => self.description = Some(value(tokens, token)?),
-            _ => return Ok(false),
+            Some(AdHocOption::Persist) => self.persist = Some(PathBuf::from(value(tokens, token)?)),
+            Some(AdHocOption::Description) => self.description = Some(value(tokens, token)?),
+            None => return Ok(false),
         }
         Ok(true)
     }
@@ -235,33 +238,35 @@ pub fn call(arguments: Vec<String>) -> Result<Call> {
         if result.ephemeral.consume(&token, &mut tokens)? {
             continue;
         }
-        match token.as_str() {
-            "--server" | "--mcp" => result.server = Some(value(&mut tokens, &token)?),
-            "--tool" => result.tool = Some(value(&mut tokens, &token)?),
-            "--timeout" => {
+        match CallOption::parse(&token) {
+            Some(CallOption::Server) => result.server = Some(value(&mut tokens, &token)?),
+            Some(CallOption::Tool) => result.tool = Some(value(&mut tokens, &token)?),
+            Some(CallOption::Timeout) => {
                 result.timeout = Some(positive_milliseconds(&value(&mut tokens, &token)?)?)
             }
-            "--output" => result.output = Output::parse(&value(&mut tokens, &token)?)?,
-            "--raw" => result.output = Output::Raw,
-            "--raw-strings" => result.raw_strings = true,
-            "--no-coerce" => {
+            Some(CallOption::Output) => {
+                result.output = Output::parse(&value(&mut tokens, &token)?)?
+            }
+            Some(CallOption::Raw) => result.output = Output::Raw,
+            Some(CallOption::RawStrings) => result.raw_strings = true,
+            Some(CallOption::NoCoerce) => {
                 result.raw_strings = true;
                 result.no_coerce = true;
             }
-            "--no-oauth" => result.no_oauth = true,
-            "--yes" => {}
-            "--tail-log" => result.tail_log = true,
-            "--save-images" => {
+            Some(CallOption::NoOauth) => result.no_oauth = true,
+            Some(CallOption::Yes) => {}
+            Some(CallOption::TailLog) => result.tail_log = true,
+            Some(CallOption::SaveImages) => {
                 result.save_images = Some(PathBuf::from(value(&mut tokens, &token)?))
             }
-            "--args" | "--params" | "--json" => {
+            Some(CallOption::Json) => {
                 let content = value(&mut tokens, &token)?;
                 if content == "-" {
                     result.stdin = true;
                 }
                 result.inputs.json(&content)?;
             }
-            _ if token.starts_with("--") => {
+            None if token.starts_with("--") => {
                 let flag = token.trim_start_matches("--");
                 if let Some((key, content)) = flag.split_once('=') {
                     result.generic_flags.insert(key.to_owned());
@@ -275,7 +280,7 @@ pub fn call(arguments: Vec<String>) -> Result<Call> {
                     result.inputs.named(flag.to_owned(), content);
                 }
             }
-            _ => positional.push(token),
+            None => positional.push(token),
         }
     }
     let mut positional = std::collections::VecDeque::from(positional);
@@ -292,7 +297,12 @@ pub fn call(arguments: Vec<String>) -> Result<Call> {
         let selector = expression
             .get(..opening)
             .context("Invalid call expression")?;
-        if !selector.contains('.') && (result.ephemeral.present() || result.server.is_some()) {
+        if result.ephemeral.present() || result.server.is_some() {
+            let selector = result
+                .server
+                .as_ref()
+                .and_then(|server| selector.strip_prefix(&format!("{server}.")))
+                .unwrap_or(selector);
             if result.tool.as_deref().is_some_and(|tool| tool != selector) {
                 bail!("Conflicting tool selector and flags");
             }

@@ -13,6 +13,23 @@ struct Guard {
     file: Option<std::fs::File>,
 }
 
+pub(crate) fn read_document(path: &Path) -> Result<Value> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => parse_document(&contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(json!({"mcpServers":{}})),
+        Err(error) => Err(error).context("Reading MCP config"),
+    }
+}
+
+fn parse_document(contents: &str) -> Result<Value> {
+    jsonc_parser::parse_to_serde_value(
+        contents.trim_start_matches('\u{feff}'),
+        &jsonc_parser::ParseOptions::default(),
+    )
+    .map_err(|_| anyhow!("Config is not valid JSONC; no changes made"))?
+    .context("Config is empty; no changes made")
+}
+
 impl Drop for Guard {
     fn drop(&mut self) {
         drop(self.file.take());
@@ -42,7 +59,7 @@ where
     Before: std::future::Future<Output = Result<()>>,
 {
     let directory = path.parent().context("Config path has no directory")?;
-    std::fs::create_dir_all(directory)?;
+    crate::oauth::files::create_directory(directory)?;
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         bail!("Refusing to replace a symlink config; use its real path explicitly");
     }
@@ -80,36 +97,16 @@ where
         None
     };
     let mut document = if let Some(contents) = &original {
-        jsonc_parser::parse_to_serde_value(
-            contents.trim_start_matches('\u{feff}'),
-            &jsonc_parser::ParseOptions::default(),
-        )
-        .map_err(|_| anyhow!("Config is not valid JSONC; no changes made"))?
-        .context("Config is empty; no changes made")?
+        parse_document(contents)?
     } else {
-        json!({"mcpServers":{},"imports":[]})
+        json!({"mcpServers":{}})
     };
     let previous = document.clone();
     mutate(&mut document)?;
     let contents = serde_json::to_string_pretty(&document)?;
-    crate::server_config::parse_config(path, &contents)?;
+    crate::server_config::validate_document(&document)?;
     let staging = path.with_extension(format!("json.write-{}", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Foundation::GENERIC_WRITE;
-        use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
-        options.access_mode(GENERIC_WRITE | WRITE_DAC);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&staging)
+    let mut file = crate::oauth::files::private_file(&staging)
         .context("Creating atomic config replacement")?;
     let staging_guard = Guard {
         path: staging.clone(),
@@ -178,6 +175,38 @@ mod tests {
                     .with_extension(format!("json.write-{}", std::process::id()))
                     .exists()
             );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        std::fs::remove_dir_all(directory)?;
+        result
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_imports_prevent_atomic_replacement() -> Result<()> {
+        let directory = std::env::current_dir()?.join("target").join(format!(
+            "writer-imports-{}",
+            oauth2::CsrfToken::new_random().secret()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("config.json");
+        let result = async {
+            for imports in [json!("not-an-array"), json!([3])] {
+                let original =
+                    json!({"mcpServers":{"fixture":{"command":"echo"}},"imports":imports})
+                        .to_string();
+                std::fs::write(&path, &original)?;
+                let denied = write_mutation(&path, |document| {
+                    document
+                        .as_object_mut()
+                        .context("object")?
+                        .insert("custom".into(), json!(4));
+                    Ok(())
+                })
+                .await;
+                assert!(denied.is_err(), "Malformed config must not be committed");
+                assert_eq!(std::fs::read_to_string(&path)?, original);
+            }
             Ok::<(), anyhow::Error>(())
         }
         .await;

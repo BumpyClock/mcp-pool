@@ -6,8 +6,6 @@ mod unix;
 mod windows;
 
 #[cfg(unix)]
-pub(crate) use unix::{
-    bind_unix_listener, validate_unix_socket_path, verify_unix_peer,
-};
+pub(crate) use unix::{bind_unix_listener, validate_unix_socket_path, verify_unix_peer};
 #[cfg(windows)]
 pub(crate) use windows::{connect_named_pipe, create_named_pipe};

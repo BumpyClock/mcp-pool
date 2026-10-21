@@ -7,6 +7,13 @@ use serde_json::{Value, json};
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 use crate::tool_arguments::{AdHoc, Output, positive_milliseconds, value};
 
+#[path = "tool_discovery_error.rs"]
+mod errors;
+use errors::attach_error;
+#[cfg(test)]
+use errors::category;
+pub(crate) use errors::issue;
+
 #[derive(Default)]
 struct Flags {
     json: bool,
@@ -22,6 +29,14 @@ struct Flags {
     sources: bool,
     ephemeral: AdHoc,
     target: Option<String>,
+}
+
+struct Discovery {
+    server: ConfiguredServer,
+    tools: Vec<Value>,
+    duration: u64,
+    error: Option<String>,
+    connection_info: Option<crate::mcp_protocol::ConnectionInfo>,
 }
 
 fn parse(arguments: Vec<String>) -> Result<Flags> {
@@ -150,8 +165,21 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     progress.finish();
     let style = crate::tool_documentation::Style::terminal(flags.no_color);
     completed.sort_by_key(|(index, _)| *index);
-    for (_, (server, mut tools, duration, error)) in completed {
+    for (_, discovered) in completed {
+        let Discovery {
+            server,
+            mut tools,
+            duration,
+            error,
+            connection_info,
+        } = discovered;
         let mut entry = base(&server, duration);
+        if let Some(info) = &connection_info
+            && let Some(object) = entry.as_object_mut()
+            && let Value::Object(metadata) = serde_json::to_value(info)?
+        {
+            object.extend(metadata);
+        }
         if let Some(error) = error {
             failure = true;
             attach_error(&mut entry, &server.name, &error);
@@ -163,14 +191,19 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
             });
             tools.dedup_by(|left, right| left.get("name") == right.get("name"));
             if let Some(tool) = &selected_tool {
-                tools.retain(|entry| entry.get("name").and_then(Value::as_str) == Some(tool));
-                if tools.is_empty() {
-                    failure = true;
-                    attach_error(
-                        &mut entry,
-                        &server.name,
-                        &format!("Tool '{tool}' not found on '{}'", server.name),
-                    );
+                match crate::mcp_cli::resolve_tool(&server, &tools, tool) {
+                    Ok(resolved) => tools.retain(|entry| {
+                        entry.get("name").and_then(Value::as_str) == Some(resolved.as_str())
+                    }),
+                    Err(error) => {
+                        failure = true;
+                        tools.clear();
+                        attach_error(
+                            &mut entry,
+                            &server.name,
+                            &crate::mcp_cli::safe_error(&server, &error),
+                        );
+                    }
                 }
             }
             let rendered_tools: Vec<Value> = tools
@@ -213,6 +246,13 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
                         );
                     }
                     println!();
+                    if let Some(instructions) = connection_info
+                        .as_ref()
+                        .and_then(|info| info.instructions.as_deref())
+                        .filter(|instructions| !instructions.is_empty())
+                    {
+                        println!("{}\n", style.muted(instructions));
+                    }
                     let mut optional_hidden = false;
                     for tool in &tools {
                         if flags.brief {
@@ -301,11 +341,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     Ok(())
 }
 
-async fn discover(
-    server: ConfiguredServer,
-    timeout: Option<u64>,
-    no_oauth: bool,
-) -> (ConfiguredServer, Vec<Value>, u64, Option<String>) {
+async fn discover(server: ConfiguredServer, timeout: Option<u64>, no_oauth: bool) -> Discovery {
     let started = Instant::now();
     let environment = std::env::var("MCPORTER_LIST_TIMEOUT").ok();
     let timeout = crate::mcp_cli::context::timeout(
@@ -319,7 +355,7 @@ async fn discover(
         let mut client = crate::mcp_cli::connect(&server, Some(timeout), no_oauth).await?;
         let tools = client.list_tools().await?;
         crate::mcp_cli::tool_allowed(&server, "")?;
-        Ok::<_, anyhow::Error>(
+        Ok::<_, anyhow::Error>((
             tools
                 .into_iter()
                 .filter(|tool| {
@@ -330,22 +366,36 @@ async fn discover(
                         })
                 })
                 .collect(),
-        )
+            client.connection_info().cloned(),
+        ))
     })
     .await;
     let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     match outcome {
-        Ok(Ok(tools)) => (server, tools, duration, None),
+        Ok(Ok((tools, connection_info))) => Discovery {
+            server,
+            tools,
+            duration,
+            error: None,
+            connection_info,
+        },
         Ok(Err(error)) => {
             let message = crate::mcp_cli::safe_error(&server, &error);
-            (server, Vec::new(), duration, Some(message))
+            Discovery {
+                server,
+                tools: Vec::new(),
+                duration,
+                error: Some(message),
+                connection_info: None,
+            }
         }
-        Err(_) => (
+        Err(_) => Discovery {
             server,
-            Vec::new(),
+            tools: Vec::new(),
             duration,
-            Some("Server discovery timed out".to_owned()),
-        ),
+            error: Some("Server discovery timed out".to_owned()),
+            connection_info: None,
+        },
     }
 }
 
@@ -383,84 +433,6 @@ fn display_transport(server: &ConfiguredServer) -> String {
     } else {
         transport(server)
     }
-}
-
-fn attach_error(entry: &mut Value, name: &str, error: &str) {
-    let status = if error.starts_with("Tool '") {
-        "error"
-    } else {
-        category(error)
-    };
-    if let Some(object) = entry.as_object_mut() {
-        object.insert("status".to_owned(), json!(status));
-        object.insert("error".to_owned(), json!(error));
-        object.insert("issue".to_owned(), issue(error));
-        if status == "auth" {
-            object.insert(
-                "authCommand".to_owned(),
-                json!(format!("mcp-pool auth {name}")),
-            );
-        }
-    }
-}
-
-pub(crate) fn category(error: &str) -> &'static str {
-    match issue(error).get("kind").and_then(Value::as_str) {
-        Some("auth") => "auth",
-        Some("offline") => "offline",
-        Some("http") => "http",
-        _ => "error",
-    }
-}
-
-pub(crate) fn issue(error: &str) -> Value {
-    let lower = error.to_ascii_lowercase();
-    let tokens: Vec<&str> = lower
-        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .filter(|token| !token.is_empty())
-        .collect();
-    let status = if lower.contains("http") || lower.contains("status") {
-        tokens
-            .iter()
-            .filter_map(|token| token.parse::<u16>().ok())
-            .find(|status| (400..600).contains(status))
-    } else {
-        None
-    };
-    let kind = if status.is_some_and(|status| matches!(status, 401 | 403))
-        || lower.contains("oauth")
-        || lower.contains("unauthorized")
-        || lower.contains("forbidden")
-        || lower.contains("invalid_token")
-    {
-        "auth"
-    } else if lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("deadline")
-        || lower.contains("connection refused")
-        || lower.contains("failed to start")
-        || lower.contains("no such file")
-        || lower.contains("system cannot find")
-        || lower.contains("closed")
-        || lower.contains("connection reset")
-        || lower.contains("fetch failed")
-        || lower.contains("network is unreachable")
-    {
-        "offline"
-    } else if status.is_some() {
-        "http"
-    } else if tokens.contains(&"401") {
-        "auth"
-    } else {
-        "other"
-    };
-    let mut issue = json!({"kind":kind,"rawMessage":error});
-    if let Some(status) = status
-        && let Some(object) = issue.as_object_mut()
-    {
-        object.insert("statusCode".to_owned(), json!(status));
-    }
-    issue
 }
 
 #[cfg(test)]

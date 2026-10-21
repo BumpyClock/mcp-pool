@@ -397,7 +397,8 @@ fn stale_initialize_leader_fails_leader_and_followers_without_touching_tools_wai
         inserted_at: Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1),
         expires_after: Duration::from_secs(REQUEST_TTL_SECS),
     };
-    let responses = cleanup_initialize_after_stale_requests(&cache, &[stale]);
+    let responses =
+        cleanup_cached_after_stale_requests(&cache, &[stale], CacheableMethod::Initialize);
     assert_eq!(responses.len(), 2);
     assert!(
         responses

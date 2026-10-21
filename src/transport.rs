@@ -181,7 +181,11 @@ mod tests {
                 .await
                 .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))??;
         assert_eq!(received, 0);
-        assert!(tokio::time::timeout(Duration::from_millis(20), listener.accept()).await.is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
         drop(abandoned_server);
         assert_eq!(
             bind(&path).err().map(|error| error.kind()),

@@ -58,6 +58,39 @@ fn command_array_uses_its_own_arguments() -> Result<()> {
 }
 
 #[test]
+fn protocol_preferences_are_typed_and_follow_the_selected_definition() -> Result<()> {
+    use crate::mcp_protocol::ProtocolPreference;
+    for (field, encoded, preference) in [
+        ("protocolVersion", "auto", ProtocolPreference::Auto),
+        ("protocolVersion", "legacy", ProtocolPreference::Legacy),
+        ("protocol_version", "2026-07-28", ProtocolPreference::Modern),
+    ] {
+        let configuration =
+            parse(&json!({"mcpServers":{"test":{"command":"echo",field:encoded}}}).to_string())?;
+        assert_eq!(
+            server(&configuration)?.definition.protocol_version,
+            preference
+        );
+    }
+    for invalid in [json!("2026"), json!(null), json!(true)] {
+        assert!(
+            parse(
+                &json!({"mcpServers":{"test":{"command":"echo","protocolVersion":invalid}}})
+                    .to_string()
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(
+        server(&parse(r#"{"mcpServers":{"test":{"command":"echo"}}}"#)?)?
+            .definition
+            .protocol_version,
+        ProtocolPreference::Auto
+    );
+    Ok(())
+}
+
+#[test]
 fn command_string_supports_quotes_and_empty_arguments() -> Result<()> {
     let configuration =
         parse(r#"{"mcpServers":{"test":{"command":"node --name 'two words' \"\" --enabled"}}}"#)?;
@@ -331,7 +364,7 @@ fn url_and_headers_interpolate_without_echoing_values() -> Result<()> {
 }
 
 #[test]
-fn deferred_imports_have_source_diagnostics() -> Result<()> {
+fn legacy_imports_require_explicit_copy_with_source_diagnostics() -> Result<()> {
     let configuration =
         parse(r#"{"imports":["cursor","claude-code"],"mcpServers":{"test":{"command":"node"}}}"#)?;
     assert_eq!(configuration.servers.len(), 1);
@@ -340,10 +373,10 @@ fn deferred_imports_have_source_diagnostics() -> Result<()> {
         .warnings
         .first()
         .ok_or_else(|| anyhow!("warning missing"))?;
-    assert!(warning.contains("2 import(s)"));
-    assert!(warning.contains("deferred"));
+    assert!(warning.contains("2 legacy import(s)"));
+    assert!(warning.contains("mcp-pool import SOURCE"));
     assert!(warning.contains(&configuration.source.to_string_lossy().to_string()));
-    assert_eq!(parse(r#"{"mcpServers":{}}"#)?.warnings.len(), 1);
+    assert!(parse(r#"{"mcpServers":{}}"#)?.warnings.is_empty());
     assert!(
         parse(r#"{"imports":[],"mcpServers":{}}"#)?
             .warnings
@@ -382,7 +415,7 @@ fn explicit_load_reports_selected_file() -> Result<()> {
     let path = std::env::current_dir()?
         .join("src")
         .join("configuration_reader_tests.rs");
-    let error = load(Some(path.clone()))
+    let error = load_at(Some(path.clone()), None)
         .err()
         .ok_or_else(|| anyhow!("Rust test source unexpectedly parsed as JSONC"))?;
     assert!(format!("{error:#}").contains(&path.to_string_lossy().to_string()));
@@ -397,7 +430,7 @@ fn explicit_load_reads_only_the_selected_source() -> Result<()> {
         &selected,
         r#"{"imports":[],"mcpServers":{"test":{"command":["node"],"cwd":"workers"}}}"#,
     )?;
-    let configuration = load(Some(selected.clone()))?;
+    let configuration = load_at(Some(selected.clone()), None)?;
     assert_eq!(configuration.source, selected);
     assert_eq!(configuration.servers.len(), 1);
     assert_eq!(
@@ -531,6 +564,8 @@ fn configuration_entry_names_and_sources_are_preserved_for_http_and_stdio() -> R
             Some(&ConfigurationEntry {
                 source: source()?,
                 name: name.to_owned(),
+                scope: None,
+                credential_store: None,
             })
         );
         let identity = entry

@@ -1,0 +1,18 @@
+{
+  // Project definitions override the same names in the user config.
+  "mcpServers": {
+    "shared": {
+      "command": "./bin/project-server",
+      "args": ["--literal", "${PARITY_UNSET_ARGUMENT}"],
+      "cwd": "workers",
+      "env": {"PARITY_KEY": "${PARITY_UNSET_ENV}"}
+    },
+    "oauth-docs": {
+      "type": "http",
+      "url": "https://example.invalid/mcp",
+      "auth": "oauth",
+      "headers": {"X-Client": "${PARITY_UNSET_HEADER}"},
+      "tokenCacheDir": "tokens"
+    },
+  },
+}

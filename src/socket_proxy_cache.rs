@@ -1,4 +1,6 @@
 use super::*;
+use crate::mcp_session::DiscoverySupport;
+use crate::mcp_session::is_definitive_discovery_unsupported;
 
 pub(super) fn prepare_initialize_request(
     cache: &HandshakeCacheRef,
@@ -8,6 +10,16 @@ pub(super) fn prepare_initialize_request(
     transport_deadline: Instant,
 ) -> DiscoveryAction {
     let mut cache = cache.lock();
+    cache.clear_expired_results();
+    if cache.server_discovery.support == DiscoverySupport::Modern
+        || cache.server_discovery.requests.in_flight.is_some()
+    {
+        return DiscoveryAction::Cached(build_error_response(
+            original_id,
+            -32601,
+            "initialize is unavailable because modern server discovery selected the upstream protocol",
+        ));
+    }
     match &mut cache.initialize {
         Initialization::Ready { result, .. } => {
             DiscoveryAction::Cached(build_success_response(original_id, result.clone()))
@@ -32,6 +44,38 @@ pub(super) fn prepare_initialize_request(
     }
 }
 
+pub(super) fn prepare_server_discovery_request(
+    cache: &HandshakeCacheRef,
+    client_id: &str,
+    original_id: Value,
+    expires_after: Duration,
+    transport_deadline: Instant,
+) -> DiscoveryAction {
+    let mut cache = cache.lock();
+    cache.clear_expired_results();
+    if cache.server_discovery.support == DiscoverySupport::Unsupported {
+        return DiscoveryAction::Cached(build_error_response(
+            original_id,
+            -32601,
+            "server/discover is unsupported by this upstream; use legacy initialize",
+        ));
+    }
+    if !matches!(cache.initialize, Initialization::Empty) {
+        return DiscoveryAction::Cached(build_error_response(
+            original_id,
+            -32601,
+            "server/discover is unavailable after a legacy initialize handshake",
+        ));
+    }
+    prepare_shared_request(
+        &mut cache.server_discovery.requests,
+        client_id,
+        original_id,
+        expires_after,
+        transport_deadline,
+    )
+}
+
 pub(super) fn complete_initialize_response(
     value: &Value,
     leader: PendingRequestInfo,
@@ -51,61 +95,49 @@ pub(super) fn complete_initialize_response(
         cache.store("initialize", result.clone());
         diagnostics::log("pool_cache_stored method=initialize");
     }
-    let Value::Object(object) = value else {
-        return Vec::new();
-    };
-    diagnostics::log(format!(
-        "pool_response_routed client_id={} method=initialize elapsed_ms={} outcome={} waiters={}",
-        leader.client_id,
-        leader.inserted_at.elapsed().as_millis(),
-        response_outcome(value),
-        waiters.len(),
-    ));
-    let mut responses = Vec::with_capacity(waiters.len() + 1);
-    responses.push((
-        leader.client_id,
-        jsonrpc::with_id(object.clone(), leader.original_id),
-    ));
-    responses.extend(waiters.into_iter().map(|waiter| {
-        (
-            waiter.client_id,
-            jsonrpc::with_id(object.clone(), waiter.original_id),
-        )
-    }));
-    responses
+    fan_out_response(value, leader, waiters, "initialize")
 }
 
-pub(super) fn cleanup_initialize_after_stale_requests(
+pub(super) fn cleanup_cached_after_stale_requests(
     cache: &HandshakeCacheRef,
     stale_requests: &[PendingRequestInfo],
+    method: CacheableMethod,
 ) -> Vec<(String, String)> {
     if !stale_requests
         .iter()
-        .any(|pending| pending.cache_key == Some(CacheableMethod::Initialize))
+        .any(|pending| pending.cache_key == Some(method))
     {
         return Vec::new();
     }
     let mut cache = cache.lock();
-    let waiters = match std::mem::take(&mut cache.initialize) {
-        Initialization::InFlight { waiters, .. } => waiters,
-        state => {
-            cache.initialize = state;
-            Vec::new()
-        }
+    let waiters = match method {
+        CacheableMethod::Initialize => match std::mem::take(&mut cache.initialize) {
+            Initialization::InFlight { waiters, .. } => waiters,
+            state => {
+                cache.initialize = state;
+                Vec::new()
+            }
+        },
+        CacheableMethod::ServerDiscover => cache.server_discovery.requests.finish().0,
+        CacheableMethod::ToolsList => cache.tools_list.finish().0,
     };
     stale_requests
         .iter()
-        .filter(|pending| pending.cache_key == Some(CacheableMethod::Initialize))
+        .filter(|pending| pending.cache_key == Some(method))
         .map(|pending| {
             (
                 pending.client_id.clone(),
-                build_error_response(pending.original_id.clone(), -32001, "initialize timed out"),
+                build_error_response(
+                    pending.original_id.clone(),
+                    -32001,
+                    method.timeout_message(),
+                ),
             )
         })
         .chain(waiters.into_iter().map(|waiter| {
             (
                 waiter.client_id,
-                build_error_response(waiter.original_id, -32001, "initialize timed out"),
+                build_error_response(waiter.original_id, -32001, method.timeout_message()),
             )
         }))
         .collect()
@@ -119,23 +151,64 @@ pub(super) fn prepare_tools_list_request(
     transport_deadline: Instant,
 ) -> DiscoveryAction {
     let mut cache = cache.lock();
-    if let Some(result) = cache.get("tools/list") {
+    cache.clear_expired_results();
+    prepare_shared_request(
+        &mut cache.tools_list,
+        client_id,
+        original_id,
+        expires_after,
+        transport_deadline,
+    )
+}
+
+fn prepare_shared_request(
+    slot: &mut crate::mcp_session::RequestCache,
+    client_id: &str,
+    original_id: Value,
+    expires_after: Duration,
+    transport_deadline: Instant,
+) -> DiscoveryAction {
+    if let Some(result) = slot.get() {
         return DiscoveryAction::Cached(build_success_response(original_id, result));
     }
-    if let Some(deadline) = &cache.tools_list.in_flight {
-        deadline.extend(transport_deadline);
-        cache.tools_list.waiters.push(PendingWaiter {
+    if slot.coalesce(
+        PendingWaiter {
             client_id: client_id.to_string(),
             original_id,
             inserted_at: Instant::now(),
             expires_after,
-        });
-        return DiscoveryAction::Coalesced;
-    }
-    cache.tools_list.in_flight = Some(crate::request_deadline::SharedDeadline::new(
+        },
         transport_deadline,
-    ));
-    DiscoveryAction::Leader
+    ) {
+        DiscoveryAction::Coalesced
+    } else {
+        DiscoveryAction::Leader
+    }
+}
+
+pub(super) fn complete_server_discovery_response(
+    value: &Value,
+    leader: PendingRequestInfo,
+    cache: &HandshakeCacheRef,
+) -> Vec<(String, String)> {
+    let mut cache = cache.lock();
+    let (waiters, _) = cache.server_discovery.requests.finish();
+
+    if value.get("error").is_none()
+        && let Some(result) = value.get("result").cloned()
+        && let Ok(modern_supported) = crate::mcp_protocol::discovery_offers_modern(&result)
+    {
+        cache.store_result("server/discover", result);
+        diagnostics::log(format!(
+            "pool_cache_stored method=server/discover modern_supported={modern_supported}"
+        ));
+    } else if is_definitive_discovery_unsupported(value) {
+        cache.server_discovery.support = DiscoverySupport::Unsupported;
+        cache.server_discovery.requests.invalidate();
+        diagnostics::log("pool_discovery_unsupported_cached");
+    }
+
+    fan_out_response(value, leader, waiters, "server/discover")
 }
 
 pub(super) fn complete_tools_list_response(
@@ -144,20 +217,29 @@ pub(super) fn complete_tools_list_response(
     cache: &HandshakeCacheRef,
 ) -> Vec<(String, String)> {
     let mut cache = cache.lock();
-    cache.tools_list.in_flight = None;
-    let waiters = std::mem::take(&mut cache.tools_list.waiters);
+    let (waiters, invalidated_in_flight) = cache.tools_list.finish();
 
     if value.get("error").is_none()
         && let Some(result) = value.get("result").cloned()
+        && !invalidated_in_flight
     {
-        cache.tools_list.cached_result = Some(result);
+        cache.store_result("tools/list", result);
         diagnostics::log("pool_cache_stored method=tools/list");
     }
 
+    fan_out_response(value, leader, waiters, "tools/list")
+}
+
+fn fan_out_response(
+    value: &Value,
+    leader: PendingRequestInfo,
+    waiters: Vec<PendingWaiter>,
+    method: &str,
+) -> Vec<(String, String)> {
     let mut responses = Vec::with_capacity(waiters.len() + 1);
     if let Value::Object(object) = value {
         diagnostics::log(format!(
-            "pool_response_routed client_id={} method=tools/list elapsed_ms={} outcome={} waiters={}",
+            "pool_response_routed client_id={} method={method} elapsed_ms={} outcome={} waiters={}",
             leader.client_id,
             leader.inserted_at.elapsed().as_millis(),
             response_outcome(value),
@@ -177,55 +259,25 @@ pub(super) fn complete_tools_list_response(
     responses
 }
 
-pub(super) fn cleanup_stale_tools_list_waiters(cache: &HandshakeCacheRef) -> Vec<(String, String)> {
+fn cleanup_stale_waiters(
+    waiters: &mut Vec<PendingWaiter>,
+    method: CacheableMethod,
+) -> Vec<(String, String)> {
     let now = Instant::now();
-    let mut cache = cache.lock();
     let mut stale = Vec::new();
-    let mut kept = Vec::with_capacity(cache.tools_list.waiters.len());
-    for waiter in cache.tools_list.waiters.drain(..) {
+    let mut kept = Vec::with_capacity(waiters.len());
+    for waiter in waiters.drain(..) {
         if now.duration_since(waiter.inserted_at) >= waiter.expires_after {
             stale.push((
                 waiter.client_id,
-                build_error_response(waiter.original_id, -32001, "tools/list discovery timed out"),
+                build_error_response(waiter.original_id, -32001, method.timeout_message()),
             ));
         } else {
             kept.push(waiter);
         }
     }
-    cache.tools_list.waiters = kept;
+    *waiters = kept;
     stale
-}
-
-pub(super) fn cleanup_tools_list_after_stale_requests(
-    cache: &HandshakeCacheRef,
-    stale_requests: &[PendingRequestInfo],
-) -> Vec<(String, String)> {
-    if !stale_requests
-        .iter()
-        .any(|pending| pending.cache_key == Some(CacheableMethod::ToolsList))
-    {
-        return Vec::new();
-    }
-
-    let mut cache = cache.lock();
-    cache.tools_list.in_flight = None;
-    let waiters = std::mem::take(&mut cache.tools_list.waiters);
-    if !waiters.is_empty() {
-        diagnostics::log(format!(
-            "pool_tools_list_stale_leader_cleaned waiters={}",
-            waiters.len()
-        ));
-    }
-
-    waiters
-        .into_iter()
-        .map(|waiter| {
-            (
-                waiter.client_id,
-                build_error_response(waiter.original_id, -32001, "tools/list discovery timed out"),
-            )
-        })
-        .collect()
 }
 
 pub(super) fn request_recovery_if_session_not_found(
@@ -309,25 +361,33 @@ pub(super) fn expire_pending_requests(
     cache: &HandshakeCacheRef,
 ) -> Vec<(String, String)> {
     let stale = cleanup_stale_requests(request_map, cache);
-    cleanup_tools_list_after_stale_requests(cache, &stale)
-        .into_iter()
-        .chain(cleanup_stale_tools_list_waiters(cache))
-        .chain(cleanup_initialize_after_stale_requests(cache, &stale))
-        .chain(
-            stale
-                .into_iter()
-                .filter(|pending| pending.cache_key != Some(CacheableMethod::Initialize))
-                .map(|pending| {
-                    let message = if pending.cache_key == Some(CacheableMethod::ToolsList) {
-                        "tools/list discovery timed out"
-                    } else {
-                        "request timed out"
-                    };
-                    (
-                        pending.client_id,
-                        build_error_response(pending.original_id, -32001, message),
-                    )
-                }),
-        )
-        .collect()
+    let mut responses = Vec::new();
+    for method in [
+        CacheableMethod::Initialize,
+        CacheableMethod::ServerDiscover,
+        CacheableMethod::ToolsList,
+    ] {
+        responses.extend(cleanup_cached_after_stale_requests(cache, &stale, method));
+    }
+    let mut cache = cache.lock();
+    responses.extend(cleanup_stale_waiters(
+        &mut cache.tools_list.waiters,
+        CacheableMethod::ToolsList,
+    ));
+    responses.extend(cleanup_stale_waiters(
+        &mut cache.server_discovery.requests.waiters,
+        CacheableMethod::ServerDiscover,
+    ));
+    responses.extend(
+        stale
+            .into_iter()
+            .filter(|pending| pending.cache_key.is_none())
+            .map(|pending| {
+                (
+                    pending.client_id,
+                    build_error_response(pending.original_id, -32001, "request timed out"),
+                )
+            }),
+    );
+    responses
 }

@@ -1,23 +1,37 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal};
 
-use clap::{Parser, Subcommand};
+use clap::{FromArgMatches, Parser, Subcommand};
 
-use crate::config::{self, PoolConfig, ServerDef};
-use crate::control::ControlRequest;
-use crate::daemon_client::control_request;
+use crate::config;
+use crate::configured_cli::Operation;
 use crate::diagnostics;
 
+#[path = "cli_native.rs"]
+mod native;
 #[path = "cli_output.rs"]
 mod output;
+#[path = "cli_routing.rs"]
+mod routing;
+#[cfg(test)]
+use native::normalize_transport;
+use native::{add_server, build_server_def, remove_server};
 use output::print_response_data;
 
 #[derive(Parser)]
 #[command(
     name = "mcp-pool",
-    version,
-    about = "Pool MCP servers — one upstream, many clients"
+    version = env!("MCP_POOL_BUILD_VERSION"),
+    about = "Pool MCP servers — one upstream, many clients",
+    after_help = "MCP commands:\n  list, describe, list-tools  Discover tools\n  resource, resources        Read or discover resources\n  auth                       Authorize a configured server\n  vault                      Manage cached credentials\n  config                     Manage merged MCP configuration\n  import                     Copy external MCP definitions\n  daemon                     Manage the MCP pool daemon\n  serve                      Expose pooled tools over stdio or HTTP\n\nNative commands:\n  pool list|serve             Inspect or run the native pool daemon\n  start|stop|restart|status   Control pooled servers\n  add|remove|proxy|shutdown   Manage native pool entries"
 )]
 pub struct Cli {
+    /// Read only this MCP config instead of merging home and project configs.
+    #[arg(long, global = true)]
+    pub config: Option<std::path::PathBuf>,
+
+    /// Project directory for project config and credential selection.
+    #[arg(long, global = true)]
+    pub root: Option<std::path::PathBuf>,
     /// Enable diagnostic logging (also via MCP_POOL_DEBUG=1).
     #[arg(long, global = true)]
     pub debug: bool,
@@ -26,7 +40,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Stable line-based output: name<TAB>status<TAB>transport<TAB>socket.
+    /// Native status/pool-list rows; suppress progress for MCP commands.
     #[arg(long, global = true)]
     pub plain: bool,
 
@@ -40,7 +54,42 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Run the pool daemon in the foreground (auto-launched by other commands if absent).
+    /// Call an MCP tool.
+    Call {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Read or discover MCP resources.
+    Resource {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Authorize a configured MCP server.
+    Auth {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Manage cached MCP credentials.
+    Vault {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Manage merged MCP configuration.
+    Config {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Manage the MCP pool daemon.
+    Daemon {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Copy external MCP server definitions into .mcp/config.json.
+    Import {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+    /// Run the native MCP pool daemon in the foreground.
     Serve,
 
     /// Start pooled MCP server(s): a single one by name, or all configured
@@ -56,7 +105,7 @@ pub enum Cmd {
     /// Show pool status (all servers, or one by name).
     Status { name: Option<String> },
 
-    /// List configured servers (local config; no daemon required).
+    /// List configured servers without connecting.
     List,
 
     /// Add a server to config.
@@ -98,21 +147,68 @@ pub enum Cmd {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let arguments: Vec<String> = std::env::args_os()
+    let mut arguments: Vec<String> = std::env::args_os()
         .map(|argument| {
             argument
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("command-line arguments must be valid Unicode"))
         })
         .collect::<anyhow::Result<_>>()?;
+    let initial_command_position =
+        crate::mcp_cli::command_position(arguments.get(1..).unwrap_or_default())
+            .map(|position| position + 1);
+    if let Some(position) = initial_command_position
+        && arguments
+            .get(position)
+            .is_some_and(|argument| argument == "help")
+    {
+        arguments = routing::rewrite_help(arguments, position);
+    }
     let command_position = crate::mcp_cli::command_position(arguments.get(1..).unwrap_or_default())
         .map(|position| position + 1);
     let native_namespace = command_position
         .and_then(|position| arguments.get(position))
         .is_some_and(|argument| argument == "pool");
+    let native_command = command_position.and_then(|position| {
+        let tail = arguments.get(position + 1..)?;
+        crate::mcp_cli::command_position(tail).and_then(|index| tail.get(index))
+    });
+    if native_namespace && native_command.is_some_and(|command| routing::top_level_only(command)) {
+        anyhow::bail!("MCP commands are top-level commands, not native pool commands");
+    }
+    if native_namespace
+        && command_position
+            .and_then(|position| arguments.get(position + 1))
+            .is_some_and(|argument| argument == "list")
+        && arguments
+            .iter()
+            .skip(command_position.unwrap_or_default() + 2)
+            .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+    {
+        println!(
+            "Usage: mcp-pool pool list [--json|--plain]\nList configured native pool entries without connecting to MCP servers."
+        );
+        return Ok(());
+    }
     if !native_namespace && crate::mcp_cli::handles(arguments.get(1..).unwrap_or_default()) {
         diagnostics::init_from_env();
         return crate::mcp_cli::run(arguments.into_iter().skip(1).collect()).await;
+    }
+    if !native_namespace
+        && let Some(position) = command_position
+        && arguments.get(position).is_some_and(|argument| {
+            !argument.starts_with('-') && !routing::is_native_command(argument)
+        })
+    {
+        let (config_path, root) = routing::global_paths(arguments.get(1..).unwrap_or_default())?;
+        let routed = routing::infer(
+            arguments.get(1..).unwrap_or_default(),
+            position - 1,
+            config_path,
+            root.as_deref(),
+        )?;
+        diagnostics::init_from_env();
+        return crate::mcp_cli::run(routed).await;
     }
     let native_arguments = if native_namespace {
         arguments
@@ -124,7 +220,8 @@ pub async fn run() -> anyhow::Result<()> {
     } else {
         arguments
     };
-    let cli = Cli::parse_from(native_arguments);
+    let matches = routing::parser(native_namespace).get_matches_from(native_arguments);
+    let cli = Cli::from_arg_matches(&matches)?;
 
     diagnostics::init_from_env();
     if cli.debug {
@@ -135,23 +232,25 @@ pub async fn run() -> anyhow::Result<()> {
     let color = use_color(&cli);
 
     match cli.cmd {
+        Cmd::Call { arguments } => run_mcp_subcommand("call", arguments).await,
+        Cmd::Resource { arguments } => run_mcp_subcommand("resource", arguments).await,
+        Cmd::Auth { arguments } => run_mcp_subcommand("auth", arguments).await,
+        Cmd::Vault { arguments } => run_mcp_subcommand("vault", arguments).await,
+        Cmd::Config { arguments } => run_mcp_subcommand("config", arguments).await,
+        Cmd::Daemon { arguments } => run_mcp_subcommand("daemon", arguments).await,
+        Cmd::Import { arguments } => {
+            crate::config_import::run(cli.config, cli.root.as_deref(), arguments).await
+        }
         Cmd::Serve => crate::daemon::serve().await,
         Cmd::Proxy { name } => {
-            let native_config = PoolConfig::load()?;
-            let allow_reference = std::env::var_os("MCP_POOL_HOME").is_none()
-                || std::env::var_os("MCPORTER_CONFIG").is_some();
-            if !native_namespace && allow_reference && !native_config.server.contains_key(&name) {
-                let configuration = crate::server_config::load(None)?;
-                let server = configuration
-                    .servers
-                    .get(&name)
-                    .ok_or_else(|| anyhow::anyhow!("unknown server: {name}"))?;
-                let definition = crate::oauth::prepare(server, false).await?;
-                let pool_name = crate::mcp_cli::pool_name(server, &definition)?;
-                crate::proxy::run_resolved(&pool_name, &definition).await
-            } else {
-                crate::proxy::run(&name).await
-            }
+            let configuration = crate::server_config::load_at(cli.config, cli.root.as_deref())?;
+            let server = configuration
+                .servers
+                .get(&name)
+                .ok_or_else(|| anyhow::anyhow!("unknown server: {name}"))?;
+            let definition = crate::oauth::prepare(server, false).await?;
+            let pool_name = crate::mcp_cli::pool_name(server, &definition)?;
+            crate::proxy::run_resolved(&pool_name, &definition).await
         }
         Cmd::Add {
             name,
@@ -160,25 +259,69 @@ pub async fn run() -> anyhow::Result<()> {
             command,
             dry_run,
             trailing,
-        } => add_server(&name, url, transport, command, dry_run, trailing),
-        Cmd::Remove { name, yes } => remove_server(&name, yes),
-        Cmd::List => list_servers(mode),
+        } => {
+            let definition = build_server_def(url, transport, command, trailing)?;
+            add_server(&name, definition, dry_run, cli.config, cli.root.as_deref()).await
+        }
+        Cmd::Remove { name, yes } => {
+            remove_server(&name, yes, cli.config, cli.root.as_deref()).await
+        }
+        Cmd::List => list_servers(mode, cli.config, cli.root.as_deref()),
         Cmd::Start { name } => {
             let request = match name {
-                Some(name) => ControlRequest::Start { name },
-                None => ControlRequest::StartAll,
+                Some(name) => Operation::Start { name },
+                None => Operation::StartAll,
             };
-            control_round_trip(request, mode, color).await
+            control_round_trip(request, mode, color, cli.config, cli.root.as_deref()).await
         }
-        Cmd::Stop { name } => control_round_trip(ControlRequest::Stop { name }, mode, color).await,
+        Cmd::Stop { name } => {
+            control_round_trip(
+                Operation::Stop { name },
+                mode,
+                color,
+                cli.config,
+                cli.root.as_deref(),
+            )
+            .await
+        }
         Cmd::Restart { name } => {
-            control_round_trip(ControlRequest::Restart { name }, mode, color).await
+            control_round_trip(
+                Operation::Restart { name },
+                mode,
+                color,
+                cli.config,
+                cli.root.as_deref(),
+            )
+            .await
         }
         Cmd::Status { name } => {
-            control_round_trip(ControlRequest::Status { name }, mode, color).await
+            control_round_trip(
+                Operation::Status { name },
+                mode,
+                color,
+                cli.config,
+                cli.root.as_deref(),
+            )
+            .await
         }
-        Cmd::Shutdown => control_round_trip(ControlRequest::Shutdown, mode, color).await,
+        Cmd::Shutdown => {
+            control_round_trip(
+                Operation::Shutdown,
+                mode,
+                color,
+                cli.config,
+                cli.root.as_deref(),
+            )
+            .await
+        }
     }
+}
+
+async fn run_mcp_subcommand(command: &str, arguments: Vec<String>) -> anyhow::Result<()> {
+    let mut routed = Vec::with_capacity(arguments.len() + 1);
+    routed.push(command.to_owned());
+    routed.extend(arguments);
+    crate::mcp_cli::run(routed).await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -205,138 +348,29 @@ fn use_color(cli: &Cli) -> bool {
         && io::stdout().is_terminal()
 }
 
-fn build_server_def(
-    url: Option<String>,
-    transport: Option<String>,
-    command: Option<String>,
-    trailing: Vec<String>,
-) -> anyhow::Result<ServerDef> {
-    let (stdio_command, args) = match (command, trailing.split_first()) {
-        (Some(command), None) => (command, Vec::new()),
-        (Some(_), Some(_)) => {
-            return Err(anyhow::anyhow!(
-                "--command cannot be combined with trailing command args"
-            ));
-        }
-        (None, None) => (String::new(), Vec::new()),
-        (None, Some((first, rest))) => {
-            if first.is_empty() {
-                return Err(anyhow::anyhow!("stdio command must not be empty"));
-            }
-            (first.clone(), rest.to_vec())
-        }
-    };
-    let has_stdio = !stdio_command.is_empty();
-
-    match (url, has_stdio) {
-        (Some(_), true) | (None, false) => Err(anyhow::anyhow!(
-            "specify exactly one of: --url <URL>  OR  a stdio command (-- COMMAND...)"
-        )),
-        (Some(url), false) => {
-            let transport = transport
-                .map(|value| normalize_transport(&value))
-                .transpose()?
-                .unwrap_or_else(|| "http".to_string());
-            Ok(ServerDef {
-                url,
-                transport,
-                ..Default::default()
-            })
-        }
-        (None, true) => Ok(ServerDef {
-            command: stdio_command,
-            args,
-            ..Default::default()
-        }),
-    }
-}
-
-fn normalize_transport(value: &str) -> anyhow::Result<String> {
-    let normalized = value.to_ascii_lowercase();
-    match normalized.as_str() {
-        "http" | "sse" => Ok(normalized),
-        other => Err(anyhow::anyhow!(
-            "invalid --transport '{other}': expected 'http' or 'sse'"
-        )),
-    }
-}
-
-fn add_server(
-    name: &str,
-    url: Option<String>,
-    transport: Option<String>,
-    command: Option<String>,
-    dry_run: bool,
-    trailing: Vec<String>,
-) -> anyhow::Result<()> {
-    let server_def = build_server_def(url, transport, command, trailing)?;
-    let target_path = config::config_path()?;
-
-    if dry_run {
-        let mut snapshot = PoolConfig::load().unwrap_or_default();
-        snapshot.upsert(name, server_def);
-        let toml_text = toml::to_string_pretty(&snapshot)
-            .map_err(|error| anyhow::anyhow!("serialize config: {error}"))?;
-        println!("# target: {}", target_path.display());
-        print!("{toml_text}");
-        return Ok(());
-    }
-
-    let mut pool_config = PoolConfig::load()?;
-    pool_config.upsert(name, server_def);
-    pool_config.save()?;
-
-    println!("added server '{name}' -> {}", target_path.display());
-    Ok(())
-}
-
-fn remove_server(name: &str, yes: bool) -> anyhow::Result<()> {
-    let mut pool_config = PoolConfig::load()?;
-    if !pool_config.server.contains_key(name) {
-        eprintln!("mcp-pool: '{name}' is not configured");
-        std::process::exit(1);
-    }
-
-    if !yes && io::stdin().is_terminal() && !confirm(&format!("remove server '{name}'?")) {
-        println!("aborted");
-        return Ok(());
-    }
-
-    pool_config.remove(name);
-    pool_config.save()?;
-
-    println!("removed server '{name}'");
-    Ok(())
-}
-
-fn confirm(prompt: &str) -> bool {
-    print!("{prompt} [y/N] ");
-    if io::stdout().flush().is_err() {
-        return false;
-    }
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return false;
-    }
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-}
-
 /// Plain output is `name<TAB>status<TAB>transport<TAB>socket`; local config emits `-` for status.
-fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
-    let pool_config = PoolConfig::load()?;
-    let entries: Vec<(String, String, String)> = pool_config
-        .server
+fn list_servers(
+    mode: OutputMode,
+    path: Option<std::path::PathBuf>,
+    root: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let configuration = crate::server_config::load_at(path, root)?;
+    let entries: Vec<(String, String, String)> = configuration
+        .servers
         .iter()
-        .map(|(name, def)| {
-            (
+        .map(|(name, server)| {
+            Ok((
                 name.clone(),
-                def.transport_kind().to_string(),
-                config::server_socket_path(name)
-                    .to_string_lossy()
-                    .to_string(),
-            )
+                server.definition.transport_kind().to_string(),
+                config::server_socket_path(&crate::mcp_cli::pool_name(
+                    server,
+                    &crate::oauth::identity_definition(server)?,
+                )?)
+                .to_string_lossy()
+                .to_string(),
+            ))
         })
-        .collect();
+        .collect::<anyhow::Result<_>>()?;
 
     if entries.is_empty() {
         if mode == OutputMode::Json {
@@ -373,21 +407,26 @@ fn list_servers(mode: OutputMode) -> anyhow::Result<()> {
 }
 
 async fn control_round_trip(
-    request: ControlRequest,
+    request: Operation,
     mode: OutputMode,
     color: bool,
+    path: Option<std::path::PathBuf>,
+    root: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let message = match &request {
-        ControlRequest::Start { .. }
-        | ControlRequest::StartDefinition { .. }
-        | ControlRequest::StartAll => "Starting pooled MCP servers",
-        ControlRequest::Stop { .. } => "Stopping pooled MCP server",
-        ControlRequest::Restart { .. } => "Restarting pooled MCP server",
-        ControlRequest::Status { .. } => "Checking MCP pool status",
-        ControlRequest::Shutdown => "Stopping MCP pool daemon",
+        Operation::Start { .. } | Operation::StartAll => "Starting pooled MCP servers",
+        Operation::Stop { .. } => "Stopping pooled MCP server",
+        Operation::Restart { .. } => "Restarting pooled MCP server",
+        Operation::Status { .. } => "Checking MCP pool status",
+        Operation::Shutdown => "Stopping MCP pool daemon",
     };
     let mut progress = crate::cli_progress::Progress::new(mode == OutputMode::Table);
-    let response = progress.wait(message, control_request(&request)).await?;
+    let response = progress
+        .wait(
+            message,
+            crate::configured_cli::control(&request, path, root),
+        )
+        .await?;
     progress.finish();
 
     if !response.ok {
@@ -398,7 +437,21 @@ async fn control_round_trip(
         std::process::exit(1);
     }
 
+    let failed = matches!(request, Operation::StartAll)
+        && response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("servers"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|servers| {
+                servers.iter().any(|server| {
+                    server.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+                })
+            });
     print_response_data(&request, response.data, mode, color);
+    if failed {
+        anyhow::bail!("One or more configured servers failed to start");
+    }
     Ok(())
 }
 

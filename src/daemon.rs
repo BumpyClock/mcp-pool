@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Notify;
 
-use crate::config::{PoolConfig, control_socket_path};
+use crate::config::control_socket_path;
 use crate::control::{ControlRequest, ControlResponse};
 use crate::diagnostics;
 use crate::pool::{Pool, upstream_spec_from_def};
@@ -29,10 +29,6 @@ pub async fn serve() -> anyhow::Result<()> {
         diagnostics::set_stderr_mirror(true);
     }
 
-    if let Err(error) = PoolConfig::load() {
-        diagnostics::log(format!("config load failed at startup: {error}"));
-    }
-
     let pool = Arc::new(Pool::new());
     let discovered = pool.discover_existing_sockets();
     diagnostics::log(format!(
@@ -46,29 +42,6 @@ pub async fn serve() -> anyhow::Result<()> {
         "control socket bound at {}",
         control_path.display()
     ));
-
-    {
-        let warm_pool = Arc::clone(&pool);
-        tokio::spawn(async move {
-            match warm_pool.start_all().await {
-                Ok(results) => {
-                    let started = results.iter().filter(|(_, error)| error.is_none()).count();
-                    diagnostics::log(format!(
-                        "warmed pool: {started}/{} configured server(s) starting",
-                        results.len()
-                    ));
-                    for (name, error) in &results {
-                        if let Some(error) = error {
-                            diagnostics::log(format!(
-                                "warm start failed name={name} error={error}"
-                            ));
-                        }
-                    }
-                }
-                Err(error) => diagnostics::log(format!("warm pool: config load failed: {error}")),
-            }
-        });
-    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_notify = Arc::new(Notify::new());
@@ -186,34 +159,6 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
             let spec = upstream_spec_from_def(definition);
             pool.start(name, spec, definition.configuration_entry.clone())
                 .await
-        }
-        ControlRequest::Start { name } => {
-            let config = match PoolConfig::load() {
-                Ok(config) => config,
-                Err(error) => return ControlResponse::err(error.to_string()),
-            };
-            let Some(definition) = config.server.get(name) else {
-                return ControlResponse::err(format!("unknown server: {name}"));
-            };
-            let spec = upstream_spec_from_def(definition);
-            pool.start(name, spec, None).await
-        }
-        ControlRequest::StartAll => {
-            return match pool.start_all().await {
-                Ok(results) => {
-                    let servers: Vec<serde_json::Value> = results
-                        .into_iter()
-                        .map(|(name, error)| match error {
-                            Some(error) => {
-                                serde_json::json!({ "name": name, "ok": false, "error": error })
-                            }
-                            None => serde_json::json!({ "name": name, "ok": true }),
-                        })
-                        .collect();
-                    ControlResponse::data(serde_json::json!({ "servers": servers }))
-                }
-                Err(error) => ControlResponse::err(error.to_string()),
-            };
         }
         ControlRequest::Stop { name } => pool.stop_server(name).await.map(|_| ()),
         ControlRequest::Restart { name } => pool.restart(name).await.map(|_| ()),

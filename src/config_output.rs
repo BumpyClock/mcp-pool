@@ -25,6 +25,13 @@ pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
                 object.insert(key.to_owned(), value.clone());
             }
         }
+        if let Some(value) = server
+            .raw
+            .get("protocolVersion")
+            .or_else(|| server.raw.get("protocol_version"))
+        {
+            object.insert("protocolVersion".to_owned(), value.clone());
+        }
         for (key, alias) in [
             ("allowedTools", "allowed_tools"),
             ("blockedTools", "blocked_tools"),

@@ -5,7 +5,14 @@ use super::{artifacts, connect, persist_ad_hoc, print_outcome, server, stdin, to
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 use crate::tool_arguments;
 
+#[path = "tool_resolution.rs"]
+mod resolution;
+pub(super) use resolution::{has_real_tool, is_discovery_pseudo, resolve_tool};
+
 pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<String>) -> Result<()> {
+    let has_explicit_json_input = arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--args" | "--params" | "--json"));
     let mut parsed = tool_arguments::call(arguments)?;
     if parsed.stdin {
         tool_arguments::merge_stdin(&mut parsed, &stdin().await?)?;
@@ -21,6 +28,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         tool_arguments::Output::Json | tool_arguments::Output::Raw
     ));
     let mut tool = parsed.tool.clone();
+    let mut discovery_fallback = None;
     let outcome: Result<Value> = async {
         let mut client = progress
             .wait(
@@ -31,14 +39,23 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         let tools = progress
             .wait("Discovering MCP tools", client.list_tools())
             .await?;
+        if let Some(requested) = tool.as_deref()
+            && is_discovery_pseudo(requested)
+            && !has_real_tool(&tools, requested)
+        {
+            if has_explicit_json_input
+                || parsed.stdin
+                || !parsed.arguments.is_empty()
+                || !parsed.positionals.is_empty()
+                || !parsed.generic_flags.is_empty()
+            {
+                bail!("Pseudo-tool '{requested}' does not accept tool arguments or positionals");
+            }
+            discovery_fallback = Some((parsed.timeout, parsed.no_oauth, parsed.output));
+            return Ok(Value::Null);
+        }
         let resolved = select_tool(&selected, &tools, tool.as_deref())?;
         tool = Some(resolved.clone());
-        if !tool_allowed(&selected, &resolved)? {
-            bail!(
-                "Tool '{resolved}' is excluded by the configuration for '{}'",
-                selected.name
-            );
-        }
         let metadata = tools
             .iter()
             .find(|entry| entry.get("name").and_then(Value::as_str) == Some(&resolved))
@@ -62,6 +79,11 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     }
     .await;
     progress.finish();
+    if let Some((timeout, no_oauth, output)) = discovery_fallback {
+        outcome?;
+        crate::mcp_cli::discover_server(&selected, timeout, no_oauth, output).await?;
+        return Ok(());
+    }
     let log_result = outcome.as_ref().ok().cloned();
     let rendered = print_outcome(&selected, tool.as_deref(), outcome, parsed.output);
     if let Some(result) = &log_result
@@ -84,25 +106,7 @@ pub(super) fn select_tool(
     tools: &[Value],
     requested: Option<&str>,
 ) -> Result<String> {
-    if let Some(name) = requested {
-        return Ok(name.to_owned());
-    }
-    let mut eligible = Vec::new();
-    for name in tools
-        .iter()
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-    {
-        if tool_allowed(server, name)? {
-            eligible.push(name);
-        }
-    }
-    match eligible.as_slice() {
-        [name] => Ok((*name).to_owned()),
-        [] => bail!("Server '{}' exposes no available tools", server.name),
-        _ => bail!(
-            "Missing tool: '{}' exposes multiple tools; use call {}.TOOL",
-            server.name,
-            server.name
-        ),
-    }
+    resolve_tool(&server.name, tools, requested, |name| {
+        tool_allowed(server, name)
+    })
 }

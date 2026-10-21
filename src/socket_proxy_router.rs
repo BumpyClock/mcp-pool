@@ -71,6 +71,9 @@ fn restore_response(
 ) -> Vec<(String, String)> {
     match pending.cache_key {
         Some(CacheableMethod::Initialize) => complete_initialize_response(value, pending, cache),
+        Some(CacheableMethod::ServerDiscover) => {
+            complete_server_discovery_response(value, pending, cache)
+        }
         Some(CacheableMethod::ToolsList) => complete_tools_list_response(value, pending, cache),
         None => {
             diagnostics::log(format!(

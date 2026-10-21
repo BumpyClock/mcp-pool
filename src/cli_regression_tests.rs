@@ -57,7 +57,9 @@ fn ad_hoc_tokens_and_final_metadata_reach_the_shared_normalizer() -> Result<()> 
         selected.definition.configuration_entry,
         Some(crate::config::ConfigurationEntry {
             source: selected.source.clone(),
-            name: "final-name".to_owned()
+            name: "final-name".to_owned(),
+            scope: None,
+            credential_store: None,
         })
     );
     assert!(selected.source.ends_with("persisted.json"));

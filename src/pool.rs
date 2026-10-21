@@ -85,29 +85,6 @@ impl Pool {
         proxy.start().await
     }
 
-    pub async fn start_all(self: &Arc<Self>) -> std::io::Result<Vec<(String, Option<String>)>> {
-        let config = crate::config::PoolConfig::load()?;
-        let mut starts = tokio::task::JoinSet::new();
-        let mut results = Vec::with_capacity(config.server.len());
-        for (name, definition) in config.server {
-            let spec = upstream_spec_from_def(&definition);
-            let pool = self.clone();
-            starts.spawn(async move {
-                let error = pool
-                    .start(&name, spec, None)
-                    .await
-                    .err()
-                    .map(|error| error.to_string());
-                (name, error)
-            });
-        }
-        while let Some(result) = starts.join_next().await {
-            results.push(result.map_err(std::io::Error::other)?);
-        }
-        results.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(results)
-    }
-
     pub async fn stop_server(&self, name: &str) -> std::io::Result<bool> {
         let _gate = self.shutdown_gate.read().await;
         let starting = self.proxies.read().get(name).cloned();
@@ -346,6 +323,8 @@ mod options_tests {
         let entry = crate::config::ConfigurationEntry {
             source: "fixture-source.json".into(),
             name: "configured-server".into(),
+            scope: None,
+            credential_store: None,
         };
         let pool = Pool::new();
         pool.insert_test_proxy(
@@ -379,6 +358,8 @@ mod options_tests {
         let entry = crate::config::ConfigurationEntry {
             source: "fixture-source.json".into(),
             name: "configured-server".into(),
+            scope: None,
+            credential_store: None,
         };
         let pool = Pool::new();
         pool.insert_test_proxy(

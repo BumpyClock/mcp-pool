@@ -4,14 +4,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum ControlRequest {
-    Start {
-        name: String,
-    },
     StartDefinition {
         name: String,
         definition: Box<crate::config::ServerDef>,
     },
-    StartAll,
     Stop {
         name: String,
     },
@@ -64,21 +60,20 @@ mod tests {
 
     #[test]
     fn request_is_tagged_with_op() {
-        let serialized = serde_json::to_string(&ControlRequest::Start {
+        let serialized = serde_json::to_string(&ControlRequest::Stop {
             name: "echo".into(),
         })
         .unwrap();
-        assert!(serialized.contains("\"op\":\"start\""), "{serialized}");
+        assert!(serialized.contains("\"op\":\"stop\""), "{serialized}");
         assert!(serialized.contains("\"name\":\"echo\""), "{serialized}");
         let back: ControlRequest = serde_json::from_str(&serialized).unwrap();
-        assert!(matches!(back, ControlRequest::Start { name } if name == "echo"));
+        assert!(matches!(back, ControlRequest::Stop { name } if name == "echo"));
     }
 
     #[test]
     fn all_request_variants_round_trip() {
         let serializations = [
             serde_json::to_string(&ControlRequest::Stop { name: "a".into() }).unwrap(),
-            serde_json::to_string(&ControlRequest::StartAll).unwrap(),
             serde_json::to_string(&ControlRequest::Restart { name: "a".into() }).unwrap(),
             serde_json::to_string(&ControlRequest::Status { name: None }).unwrap(),
             serde_json::to_string(&ControlRequest::Status {
@@ -110,6 +105,8 @@ mod tests {
             configuration_entry: Some(crate::config::ConfigurationEntry {
                 source: std::path::PathBuf::from("fixture.json"),
                 name: "logical-fixture".into(),
+                scope: None,
+                credential_store: None,
             }),
             url: "https://example.invalid/mcp".to_string(),
             headers: std::collections::BTreeMap::from([(
@@ -137,6 +134,8 @@ mod tests {
             Some(crate::config::ConfigurationEntry {
                 source: std::path::PathBuf::from("fixture.json"),
                 name: "logical-fixture".into(),
+                scope: None,
+                credential_store: None,
             })
         );
         assert_eq!(

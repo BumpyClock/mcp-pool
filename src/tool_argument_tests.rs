@@ -40,12 +40,18 @@ fn dotted_tool_names_keep_the_full_suffix_in_selectors_and_expressions() -> Resu
     for tokens in [
         vec!["docs.search.v2", "query=fixture"],
         vec!["docs.search.v2(query: 'fixture')"],
+        vec!["--server", "docs", "search.v2(query: 'fixture')"],
+        vec!["--server", "docs", "docs.search.v2(query: 'fixture')"],
     ] {
         let parsed = parse(&tokens)?;
         assert_eq!(parsed.server.as_deref(), Some("docs"));
         assert_eq!(parsed.tool.as_deref(), Some("search.v2"));
         assert_eq!(parsed.arguments.get("query"), Some(&json!("fixture")));
     }
+    let dotted_server = parse(&["--server", "docs.api", "search.v2(query: 'fixture')"])?;
+    assert_eq!(dotted_server.server.as_deref(), Some("docs.api"));
+    assert_eq!(dotted_server.tool.as_deref(), Some("search.v2"));
+    assert!(parse(&["--server", "docs", "--tool", "other", "search.v2()"]).is_err());
     Ok(())
 }
 

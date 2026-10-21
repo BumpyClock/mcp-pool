@@ -6,6 +6,8 @@ fn entry() -> ConfigurationEntry {
     ConfigurationEntry {
         source: "synthetic.json".into(),
         name: "fixture".to_owned(),
+        scope: None,
+        credential_store: None,
     }
 }
 
@@ -90,6 +92,54 @@ async fn borrowed_generation_cannot_authorize_credential_or_config_mutation() ->
             .context("expected ownership rejection")?
             .to_string()
             .contains("not a verified owned generation")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn home_auth_mutation_retires_every_consumer_of_that_store_but_not_project_accounts()
+-> Result<()> {
+    let target = ConfigurationEntry {
+        source: "home/config.json".into(),
+        name: "fixture".into(),
+        scope: Some("home".into()),
+        credential_store: Some("home/credentials.json".into()),
+    };
+    let mut inherited = target.clone();
+    inherited.source = "project/config.json".into();
+    inherited.scope = Some("project".into());
+    let mut independent = inherited.clone();
+    independent.credential_store = Some("project/credentials.json".into());
+    let stopped = Arc::new(Mutex::new(Vec::new()));
+    let recorded = stopped.clone();
+    retire_matching(
+        &json!({"servers":[
+            {"name":"home-view","owned":true,"configuration_entry":target},
+            {"name":"inherited-view","owned":true,"configuration_entry":inherited},
+            {"name":"project-account","owned":true,"configuration_entry":independent}
+        ]}),
+        &target,
+        move |request| {
+            let recorded = recorded.clone();
+            async move {
+                if let ControlRequest::Stop { name } = request {
+                    recorded
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("test lock poisoned"))?
+                        .push(name);
+                } else {
+                    bail!("Unexpected control operation");
+                }
+                Ok(ControlResponse::ok())
+            }
+        },
+    )
+    .await?;
+    assert_eq!(
+        *stopped
+            .lock()
+            .map_err(|_| anyhow::anyhow!("test lock poisoned"))?,
+        ["home-view", "inherited-view"]
     );
     Ok(())
 }

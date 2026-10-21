@@ -1,0 +1,7 @@
+{
+  "wind": {
+    "command": "node",
+    "args": ["wind.js"],
+    "env": {"WINDSURF_KEY": "$env:PARITY_UNSET_WIND_KEY"}
+  }
+}

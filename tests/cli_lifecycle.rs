@@ -28,10 +28,19 @@ impl Daemon {
         ));
         tokio::fs::create_dir(&home).await?;
         tokio::fs::create_dir(home.join("config")).await?;
-        tokio::fs::write(home.join("config").join("config.toml"), config).await?;
+        let legacy: toml::Value = toml::from_str(config).map_err(io::Error::other)?;
+        let legacy = serde_json::to_value(legacy).map_err(io::Error::other)?;
+        let servers = legacy.get("server").cloned().unwrap_or_else(|| json!({}));
+        tokio::fs::write(
+            home.join("config").join("config.json"),
+            json!({"mcpServers":servers}).to_string(),
+        )
+        .await?;
         let child = Command::new(BINARY)
             .args(["pool", "serve"])
             .env("MCP_POOL_HOME", &home)
+            .env_remove("MCP_POOL_CONFIG")
+            .current_dir(&home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -78,6 +87,8 @@ impl Daemon {
             Command::new(BINARY)
                 .args(args)
                 .env("MCP_POOL_HOME", &self.home)
+                .env_remove("MCP_POOL_CONFIG")
+                .current_dir(&self.home)
                 .kill_on_drop(true)
                 .output(),
         )
@@ -95,6 +106,8 @@ impl Daemon {
         Command::new(BINARY)
             .args(["proxy", "echo"])
             .env("MCP_POOL_HOME", &self.home)
+            .env_remove("MCP_POOL_CONFIG")
+            .current_dir(&self.home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

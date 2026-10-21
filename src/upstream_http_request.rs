@@ -6,6 +6,10 @@ pub(super) struct Request {
     pub(super) line: String,
     pub(super) identifier: Option<Value>,
     pub(super) initialize: bool,
+    pub(super) discover: bool,
+    pub(super) modern: bool,
+    pub(super) method: Option<String>,
+    pub(super) name: Option<String>,
     pub(super) initialization_barrier: bool,
     timeout_ms: Option<u64>,
     shared: bool,
@@ -37,7 +41,17 @@ impl Request {
                 .cloned()
         });
         let initialize = method == Some("initialize");
-        let initialization_barrier = initialize || method == Some("notifications/initialized");
+        let discover = method == Some("server/discover");
+        let modern = value
+            .get("params")
+            .is_some_and(crate::mcp_protocol::is_modern);
+        let initialization_barrier =
+            initialize || discover || method == Some("notifications/initialized");
+        let method = method.map(str::to_owned);
+        let name = value
+            .pointer("/params/name")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let line = if timeout_ms.is_some() {
             value.to_string()
         } else {
@@ -47,6 +61,10 @@ impl Request {
             line,
             identifier,
             initialize,
+            discover,
+            modern,
+            method,
+            name,
             initialization_barrier,
             timeout_ms,
             shared,

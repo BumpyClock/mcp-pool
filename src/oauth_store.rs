@@ -26,7 +26,7 @@ fn vault(authentication: &HttpAuth) -> Result<Value> {
     if !matches!(value.get("version").and_then(Value::as_u64), Some(1 | 2))
         || !value.get("entries").is_some_and(Value::is_object)
     {
-        bail!("unsupported or malformed mcporter credential vault");
+        bail!("unsupported or malformed MCP credential vault");
     }
     Ok(value)
 }
@@ -106,6 +106,14 @@ pub(super) fn read(authentication: &HttpAuth) -> Result<Value> {
     Ok(selected)
 }
 
+pub(super) fn present(authentication: &HttpAuth) -> Result<bool> {
+    Ok(snapshots(authentication)?.iter().any(|snapshot| {
+        snapshot
+            .as_object()
+            .is_some_and(|object| !object.is_empty())
+    }))
+}
+
 fn filename_safe_label(label: &str) -> String {
     let mut safe = String::new();
     let mut unsafe_run = false;
@@ -124,7 +132,7 @@ fn filename_safe_label(label: &str) -> String {
         .collect()
 }
 
-/// Shares lock paths with mcporter so both processes serialize refreshes of the same token.
+/// Shared directory caches need one refresh lock even when their vaults differ.
 pub(super) fn transaction(authentication: &HttpAuth) -> Result<Vec<files::Lock>> {
     let vault = vault(authentication)?;
     let mut identities = vec![(
@@ -140,24 +148,17 @@ pub(super) fn transaction(authentication: &HttpAuth) -> Result<Vec<files::Lock>>
         let name = key.split('|').next().unwrap_or_default().to_owned();
         identities.push((name, format!("vault:{key}")));
     }
-    if authentication.directory_primary {
-        for root in &authentication.directory_stores {
-            let path = files::canonical(&root.join("tokens.json"))?;
-            identities.push((
-                path.parent()
-                    .and_then(std::path::Path::file_name)
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                format!("dir:{}", files::portable_path(&path)),
-            ));
-        }
-    }
     let root = authentication
         .vault_path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("vault has no parent"))?
         .join("refresh-locks");
     let mut paths = BTreeSet::new();
+    if authentication.directory_primary {
+        for directory in &authentication.directory_stores {
+            paths.insert(files::canonical(&directory.join(".mcp-refresh"))?);
+        }
+    }
     for (label, identity) in identities {
         let label = filename_safe_label(&label);
         let name = if label.is_empty() {

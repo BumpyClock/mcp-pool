@@ -1,7 +1,7 @@
-use super::{ControlRequest, OutputMode};
+use super::{Operation, OutputMode};
 
 pub(super) fn print_response_data(
-    request: &ControlRequest,
+    request: &Operation,
     data: Option<serde_json::Value>,
     mode: OutputMode,
     color: bool,
@@ -16,16 +16,14 @@ pub(super) fn print_response_data(
     let (green, yellow, _red, reset) = colors(color);
 
     match request {
-        ControlRequest::Start { name } | ControlRequest::StartDefinition { name, .. } => {
+        Operation::Start { name } => {
             println!("{green}started{reset} {name}")
         }
-        ControlRequest::StartAll => print_start_all(data.as_ref(), color),
-        ControlRequest::Stop { name } => println!("{yellow}stopped{reset} {name}"),
-        ControlRequest::Restart { name } => println!("{green}restarted{reset} {name}"),
-        ControlRequest::Shutdown => println!("{yellow}daemon shutting down{reset}"),
-        ControlRequest::Status { name } => {
-            print_status_table(data.as_ref(), name.as_deref(), color)
-        }
+        Operation::StartAll => print_start_all(data.as_ref(), color),
+        Operation::Stop { name } => println!("{yellow}stopped{reset} {name}"),
+        Operation::Restart { name } => println!("{green}restarted{reset} {name}"),
+        Operation::Shutdown => println!("{yellow}daemon shutting down{reset}"),
+        Operation::Status { name } => print_status_table(data.as_ref(), name.as_deref(), color),
     }
 }
 

@@ -6,15 +6,6 @@ use serde::{Deserialize, Serialize};
 
 const ENV_HOME: &str = "MCP_POOL_HOME";
 
-pub fn config_dir() -> io::Result<PathBuf> {
-    if let Ok(custom) = std::env::var(ENV_HOME) {
-        return Ok(PathBuf::from(custom).join("config"));
-    }
-    let base = dirs::config_dir()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory not found"))?;
-    Ok(base.join("mcp-pool"))
-}
-
 pub fn state_dir() -> io::Result<PathBuf> {
     if let Ok(custom) = std::env::var(ENV_HOME) {
         return Ok(PathBuf::from(custom).join("state"));
@@ -27,10 +18,6 @@ pub fn state_dir() -> io::Result<PathBuf> {
 
 pub fn run_dir() -> io::Result<PathBuf> {
     Ok(state_dir()?.join("run"))
-}
-
-pub fn config_path() -> io::Result<PathBuf> {
-    Ok(config_dir()?.join("config.toml"))
 }
 
 /// Windows named pipes use a stable per-home hash because their namespace is global.
@@ -100,10 +87,17 @@ fn sanitize_socket_name(name: &str) -> String {
 pub struct ConfigurationEntry {
     pub source: PathBuf,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_store: Option<PathBuf>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct ServerDef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_scope: Option<PathBuf>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub configuration_entry: Option<ConfigurationEntry>,
 
@@ -128,6 +122,12 @@ pub struct ServerDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 
+    #[serde(
+        default,
+        skip_serializing_if = "crate::mcp_protocol::ProtocolPreference::is_auto"
+    )]
+    pub protocol_version: crate::mcp_protocol::ProtocolPreference,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<crate::oauth::HttpAuth>,
 
@@ -147,6 +147,7 @@ impl std::fmt::Debug for ServerDef {
             .debug_struct("ServerDef")
             .field("transport", &self.transport_kind())
             .field("timeout_ms", &self.timeout_ms)
+            .field("protocol_version", &self.protocol_version)
             .finish_non_exhaustive()
     }
 }
@@ -169,48 +170,6 @@ impl ServerDef {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PoolConfig {
-    #[serde(default)]
-    pub server: BTreeMap<String, ServerDef>,
-}
-
-impl PoolConfig {
-    pub fn load() -> io::Result<PoolConfig> {
-        let path = config_path()?;
-        if !path.exists() {
-            return Ok(PoolConfig::default());
-        }
-        let contents = std::fs::read_to_string(&path)?;
-        toml::from_str(&contents).map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {error}", path.display()),
-            )
-        })
-    }
-
-    pub fn save(&self) -> io::Result<()> {
-        let path = config_path()?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let serialized =
-            toml::to_string_pretty(self).map_err(|error| io::Error::other(error.to_string()))?;
-        let temp = path.with_extension("toml.tmp");
-        std::fs::write(&temp, serialized)?;
-        std::fs::rename(&temp, &path)?;
-        Ok(())
-    }
-
-    pub fn upsert(&mut self, name: &str, def: ServerDef) {
-        self.server.insert(name.to_string(), def);
-    }
-
-    pub fn remove(&mut self, name: &str) -> bool {
-        self.server.remove(name).is_some()
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,25 +206,5 @@ mod tests {
         assert!(formatted.contains("http"));
         assert!(!formatted.contains("fixture-secret"));
         assert!(!formatted.contains("example.invalid"));
-    }
-
-    #[test]
-    fn pool_config_toml_round_trip() {
-        let mut cfg = PoolConfig::default();
-        cfg.upsert(
-            "echo",
-            ServerDef {
-                command: "npx".into(),
-                args: vec!["-y".into()],
-                ..Default::default()
-            },
-        );
-        let serialized = toml::to_string(&cfg).unwrap();
-        let mut back: PoolConfig = toml::from_str(&serialized).unwrap();
-        assert_eq!(back.server.len(), 1);
-        assert_eq!(back.server["echo"].command, "npx");
-        assert_eq!(back.server["echo"].args, vec!["-y".to_string()]);
-        assert!(back.remove("echo"));
-        assert!(!back.remove("echo"));
     }
 }

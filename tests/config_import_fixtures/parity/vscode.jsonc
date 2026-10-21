@@ -1,0 +1,10 @@
+{
+  // VS Code calls its container "servers" rather than "mcpServers".
+  "servers": {
+    "editor": {
+      "type": "http",
+      "url": "https://example.invalid/vscode",
+      "headers": {"X-VSCode": "${PARITY_UNSET_VSCODE_KEY}"}
+    }
+  },
+}

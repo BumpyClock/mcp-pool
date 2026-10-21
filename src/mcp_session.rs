@@ -3,10 +3,24 @@ use std::time::{Duration, Instant};
 use crate::request_deadline::SharedDeadline;
 use serde_json::Value;
 
+#[path = "session_cache.rs"]
+mod cache;
+pub use cache::RequestCache;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheableMethod {
     Initialize,
+    ServerDiscover,
     ToolsList,
+}
+
+impl CacheableMethod {
+    pub fn timeout_message(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize timed out",
+            Self::ServerDiscover => "server/discover discovery timed out",
+            Self::ToolsList => "tools/list discovery timed out",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,10 +51,18 @@ pub struct PendingWaiter {
 }
 
 #[derive(Debug, Default)]
-pub struct ToolsListCache {
-    pub cached_result: Option<Value>,
-    pub waiters: Vec<PendingWaiter>,
-    pub in_flight: Option<SharedDeadline>,
+pub struct ServerDiscoveryCache {
+    pub requests: RequestCache,
+    pub support: DiscoverySupport,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum DiscoverySupport {
+    #[default]
+    Unknown,
+    Modern,
+    Legacy,
+    Unsupported,
 }
 
 #[derive(Debug, Default)]
@@ -60,7 +82,8 @@ pub enum Initialization {
 #[derive(Debug, Default)]
 pub struct HandshakeCache {
     pub initialize: Initialization,
-    pub tools_list: ToolsListCache,
+    pub server_discovery: ServerDiscoveryCache,
+    pub tools_list: RequestCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +94,7 @@ pub enum RecoveryReason {
 pub fn cacheable_method(method: &str) -> Option<CacheableMethod> {
     match method {
         "initialize" => Some(CacheableMethod::Initialize),
+        "server/discover" => Some(CacheableMethod::ServerDiscover),
         "tools/list" => Some(CacheableMethod::ToolsList),
         _ => None,
     }
@@ -144,19 +168,35 @@ pub fn is_session_not_found_error(value: &Value) -> bool {
     code_matches && message_matches
 }
 
+pub fn is_definitive_discovery_unsupported(value: &Value) -> bool {
+    let Some(error) = value.get("error") else {
+        return false;
+    };
+    error
+        .get("code")
+        .and_then(Value::as_i64)
+        .is_some_and(|code| crate::mcp_protocol::discovery_unsupported(code, error.get("data")))
+}
+
 impl HandshakeCache {
+    #[cfg(test)]
     pub fn get(&self, method: &str) -> Option<Value> {
         match cacheable_method(method) {
             Some(CacheableMethod::Initialize) => match &self.initialize {
                 Initialization::Ready { result, .. } => Some(result.clone()),
                 _ => None,
             },
-            Some(CacheableMethod::ToolsList) => self.tools_list.cached_result.clone(),
+            Some(CacheableMethod::ServerDiscover) => self.server_discovery.requests.get(),
+            Some(CacheableMethod::ToolsList) => self.tools_list.get(),
             None => None,
         }
     }
 
     pub fn store(&mut self, method: &str, result: Value) {
+        self.store_result(method, result);
+    }
+
+    pub fn store_result(&mut self, method: &str, result: Value) {
         match cacheable_method(method) {
             Some(CacheableMethod::Initialize) => {
                 self.initialize = Initialization::Ready {
@@ -164,22 +204,30 @@ impl HandshakeCache {
                     notification_forwarded: false,
                 }
             }
+            Some(CacheableMethod::ServerDiscover) => {
+                if let Ok(modern_supported) = crate::mcp_protocol::discovery_offers_modern(&result)
+                {
+                    self.server_discovery.support = if modern_supported {
+                        DiscoverySupport::Modern
+                    } else {
+                        DiscoverySupport::Legacy
+                    };
+                }
+                self.server_discovery.requests.store(result);
+            }
             Some(CacheableMethod::ToolsList) => {
-                self.tools_list.cached_result = Some(result);
+                self.tools_list.store(result);
             }
             None => {}
         }
     }
 
     pub fn invalidate_tools_list(&mut self) {
-        self.tools_list.cached_result = None;
+        self.tools_list.invalidate();
     }
 
     pub fn clear_all(&mut self) {
-        self.initialize = Initialization::Empty;
-        self.tools_list.cached_result = None;
-        self.tools_list.waiters.clear();
-        self.tools_list.in_flight = None;
+        *self = Self::default();
     }
 
     pub fn swallow_initialized(&mut self, value: &Value) -> bool {
@@ -207,8 +255,32 @@ impl HandshakeCache {
                 Initialization::InFlight { deadline, .. } => Some(deadline.clone()),
                 _ => None,
             },
+            CacheableMethod::ServerDiscover => self.server_discovery.requests.in_flight.clone(),
             CacheableMethod::ToolsList => self.tools_list.in_flight.clone(),
         }
+    }
+
+    pub fn clear_expired_results(&mut self) {
+        self.server_discovery.requests.clear_expired();
+        self.tools_list.clear_expired();
+    }
+}
+
+fn cache_deadline(result: &Value) -> Option<Instant> {
+    if result
+        .get("cacheScope")
+        .and_then(Value::as_str)
+        .is_some_and(|scope| scope != "public")
+    {
+        // This generation has no authorization partition, so private results
+        // cannot be retained in its shared cache.
+        return Some(Instant::now());
+    }
+    let ttl = result.get("ttlMs").and_then(Value::as_u64);
+    match ttl {
+        Some(0) => Some(Instant::now()),
+        Some(milliseconds) => Instant::now().checked_add(Duration::from_millis(milliseconds)),
+        None => None,
     }
 }
 
@@ -243,6 +315,10 @@ mod tests {
             Some(CacheableMethod::Initialize)
         );
         assert_eq!(
+            cacheable_method("server/discover"),
+            Some(CacheableMethod::ServerDiscover)
+        );
+        assert_eq!(
             cacheable_method("tools/list"),
             Some(CacheableMethod::ToolsList)
         );
@@ -272,7 +348,45 @@ mod tests {
             cacheable_request(&json!({"method":"initialize"})),
             Some(CacheableMethod::Initialize)
         );
+        assert_eq!(
+            cacheable_request(&json!({"method":"server/discover","params":{}})),
+            Some(CacheableMethod::ServerDiscover)
+        );
         assert_eq!(cacheable_request(&json!({"method":"tools/call"})), None);
+    }
+
+    #[test]
+    fn explicit_cache_ttls_control_tools_and_discovery_retention() {
+        let mut cache = HandshakeCache::default();
+        cache.store("tools/list", json!({"tools":[],"ttlMs":0}));
+        cache.store(
+            "server/discover",
+            json!({"supportedVersions":["2025-11-25"],"ttlMs":0}),
+        );
+        assert!(cache.get("tools/list").is_none());
+        assert!(cache.get("server/discover").is_none());
+
+        cache.store("tools/list", json!({"tools":[],"ttlMs":1}));
+        cache.store(
+            "server/discover",
+            json!({"supportedVersions":["2025-11-25"],"ttlMs":1}),
+        );
+        cache.tools_list.cached_until = Some(Instant::now() - Duration::from_secs(1));
+        cache.server_discovery.requests.cached_until =
+            Some(Instant::now() - Duration::from_secs(1));
+        assert!(cache.get("tools/list").is_none());
+        assert!(cache.get("server/discover").is_none());
+
+        cache.store(
+            "tools/list",
+            json!({"tools":[],"ttlMs":1000,"cacheScope":"private"}),
+        );
+        assert!(cache.get("tools/list").is_none());
+        cache.store(
+            "tools/list",
+            json!({"tools":[],"ttlMs":1000,"cacheScope":"public"}),
+        );
+        assert!(cache.get("tools/list").is_some());
     }
 
     #[test]
@@ -316,6 +430,25 @@ mod tests {
         assert!(is_session_not_found_error(&error));
         assert!(!is_session_not_found_error(&wrong_code));
         assert!(!is_session_not_found_error(&wrong_message));
+    }
+
+    #[test]
+    fn discovery_unsupported_only_accepts_definitive_error_shapes() {
+        assert!(is_definitive_discovery_unsupported(
+            &json!({"error":{"code":-32601,"message":"Method not found"}})
+        ));
+        for status in [400, 404, 405, 415] {
+            assert!(is_definitive_discovery_unsupported(&json!({
+                "error":{"code":-32004,"data":{"httpStatus":status}}
+            })));
+        }
+        for value in [
+            json!({"error":{"code":-32004,"data":{"httpStatus":401}}}),
+            json!({"error":{"code":-32000,"data":{"httpStatus":404}}}),
+            json!({"error":{"code":-32602}}),
+        ] {
+            assert!(!is_definitive_discovery_unsupported(&value));
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -7,7 +8,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::mcp_client::McpClient;
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
-use crate::tool_arguments::{self, AdHoc, Output};
+use crate::tool_arguments::{AdHoc, Output};
 use crate::{config_commands, daemon_commands, tool_discovery, tool_output};
 
 #[path = "cli_context.rs"]
@@ -30,6 +31,8 @@ pub(crate) use persistence::persist as persist_ad_hoc;
 mod help;
 #[path = "tool_call.rs"]
 mod invocation;
+#[path = "mcp_resource.rs"]
+mod resources;
 pub(crate) use help::command_help;
 
 const COMMANDS: &[&str] = &[
@@ -44,6 +47,7 @@ const COMMANDS: &[&str] = &[
     "config",
     "daemon",
     "serve",
+    "import",
 ];
 
 pub fn handles(arguments: &[String]) -> bool {
@@ -55,10 +59,13 @@ pub fn handles(arguments: &[String]) -> bool {
 pub async fn run(arguments: Vec<String>) -> Result<()> {
     let context::ContextOptions {
         path,
+        root,
         command,
         arguments,
         oauth_timeout,
+        plain,
     } = context::parse(arguments)?;
+    crate::cli_progress::set_plain_output(plain);
     if oauth_timeout.is_some()
         && command != "auth"
         && !(command == "config"
@@ -79,16 +86,23 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         return Ok(());
     }
     if command == "config" {
-        return config_commands::run_with_timeout(path, arguments, oauth_timeout).await;
+        return config_commands::run_with_timeout(path, root.as_deref(), arguments, oauth_timeout)
+            .await;
+    }
+    if command == "import" {
+        return crate::config_import::run(path, root.as_deref(), arguments).await;
     }
     if command == "daemon" {
         return daemon_commands::daemon(arguments).await;
     }
-    let configuration = load(path)?;
+    let configuration = crate::server_config::load_at(path, root.as_deref())?;
+    for warning in &configuration.warnings {
+        context::warning(warning);
+    }
     match command.as_str() {
         "list" | "describe" | "list-tools" => tool_discovery::run(configuration, arguments).await,
         "call" => invocation::run(&configuration, arguments).await,
-        "resource" | "resources" => resource(&configuration, arguments).await,
+        "resource" | "resources" => resources::run(&configuration, arguments).await,
         "auth" => {
             daemon_commands::auth_with_timeout(&configuration, arguments, oauth_timeout).await
         }
@@ -96,14 +110,6 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
         "serve" => crate::mcp_bridge::run(configuration, arguments).await,
         _ => bail!("Unknown MCP command '{command}'"),
     }
-}
-
-pub(crate) fn load(path: Option<PathBuf>) -> Result<ServerConfiguration> {
-    let configuration = crate::server_config::load(path)?;
-    for warning in &configuration.warnings {
-        context::warning(warning);
-    }
-    Ok(configuration)
 }
 
 pub(crate) fn server(
@@ -165,7 +171,8 @@ pub(crate) fn server(
             object.insert("description".to_owned(), json!(description));
         }
     }
-    let source = std::env::current_dir()?.join(".mcporter-adhoc.json");
+    let credential_scope = configuration.credential_scope.clone();
+    let source = std::env::current_dir()?.join(".mcp-adhoc.json");
     let mut configuration = crate::server_config::parse_config(
         &source,
         &serde_json::to_string(&json!({
@@ -179,9 +186,17 @@ pub(crate) fn server(
     if let Some(path) = &ephemeral.persist {
         selected.source = persistence::destination(path)?;
     }
+    selected.definition.credential_scope =
+        if ephemeral.persist.is_some() && credential_scope.is_some() {
+            selected.source.parent().map(std::path::Path::to_path_buf)
+        } else {
+            credential_scope
+        };
     selected.definition.configuration_entry = Some(crate::config::ConfigurationEntry {
         source: selected.source.clone(),
         name: selected.name.clone(),
+        scope: selected.definition.credential_scope.clone(),
+        credential_store: None,
     });
     Ok(selected)
 }
@@ -203,58 +218,39 @@ pub(crate) async fn connect(
     McpClient::connect(&name, &definition, Duration::from_millis(timeout)).await
 }
 
-async fn resource(configuration: &ServerConfiguration, arguments: Vec<String>) -> Result<()> {
-    let mut tokens = std::collections::VecDeque::from(arguments);
-    let mut output = Output::Auto;
-    let mut no_oauth = false;
-    let mut timeout = None;
-    let mut positional = Vec::new();
-    while let Some(token) = tokens.pop_front() {
-        match token.as_str() {
-            "--output" => output = Output::parse(&tool_arguments::value(&mut tokens, &token)?)?,
-            "--raw" => output = Output::Raw,
-            "--json" => output = Output::Json,
-            "--no-oauth" => no_oauth = true,
-            "--timeout" => {
-                timeout = Some(tool_arguments::positive_milliseconds(
-                    &tool_arguments::value(&mut tokens, &token)?,
-                )?)
-            }
-            _ if token.starts_with("--") => bail!("Unknown resource argument '{token}'"),
-            _ => positional.push(token),
-        }
+pub(crate) async fn discover_server(
+    server: &ConfiguredServer,
+    timeout: Option<u64>,
+    no_oauth: bool,
+    output: Output,
+) -> Result<()> {
+    let configuration = ServerConfiguration {
+        source: server.source.clone(),
+        credential_scope: server.definition.credential_scope.clone(),
+        servers: std::collections::BTreeMap::from([(server.name.clone(), server.clone())]),
+        warnings: Vec::new(),
+    };
+    let mut arguments = vec![server.name.clone()];
+    if matches!(output, Output::Json | Output::Raw) {
+        arguments.push("--json".into());
     }
-    if positional.is_empty() || positional.len() > 2 {
-        bail!("Usage: resource SERVER [URI] [--output FORMAT]");
+    if let Some(timeout) = timeout {
+        arguments.extend(["--timeout".into(), timeout.to_string()]);
     }
-    let name = positional.first().context("Missing server")?;
-    let selected = server(configuration, name, &AdHoc::default())?;
-    let mut progress =
-        crate::cli_progress::Progress::new(!matches!(output, Output::Json | Output::Raw));
-    let outcome = async {
-        let mut client = progress
-            .wait(
-                "Connecting to MCP server",
-                connect(&selected, timeout, no_oauth),
-            )
-            .await?;
-        if let Some(uri) = positional.get(1) {
-            progress
-                .wait(
-                    "Reading MCP resource",
-                    client.request("resources/read", json!({"uri":uri})),
-                )
-                .await
-        } else {
-            progress
-                .wait("Discovering MCP resources", client.list_resources())
-                .await
-                .map(|resources| json!({"resources":resources}))
-        }
+    if no_oauth {
+        arguments.push("--no-oauth".into());
     }
-    .await;
-    progress.finish();
-    print_outcome(&selected, None, outcome, output)
+    tool_discovery::run(configuration, arguments).await
+}
+
+pub(crate) fn resolve_tool(
+    server: &ConfiguredServer,
+    tools: &[Value],
+    requested: &str,
+) -> Result<String> {
+    invocation::resolve_tool(&server.name, tools, Some(requested), |name| {
+        tool_allowed(server, name)
+    })
 }
 
 pub(crate) fn print_outcome(
@@ -473,6 +469,8 @@ mod tests {
         definition.configuration_entry = Some(crate::config::ConfigurationEntry {
             source: PathBuf::from("metadata.json"),
             name: "metadata-only".to_owned(),
+            scope: None,
+            credential_store: None,
         });
         assert_eq!(original, pool_name(selected, &definition)?);
         Ok(())

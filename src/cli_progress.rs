@@ -1,6 +1,13 @@
 use std::future::Future;
 use std::io::{self, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+static PLAIN_OUTPUT: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn set_plain_output(plain: bool) {
+    PLAIN_OUTPUT.store(plain, Ordering::Relaxed);
+}
 
 pub(crate) struct Progress<Writer: Write = io::Stderr> {
     line: Option<Line<Writer>>,
@@ -16,7 +23,7 @@ struct Line<Writer: Write> {
 impl Progress {
     pub(crate) fn new(human_output: bool) -> Self {
         let enabled = enabled(
-            human_output,
+            human_output && !PLAIN_OUTPUT.load(Ordering::Relaxed),
             io::stdout().is_terminal(),
             io::stderr().is_terminal(),
             std::env::var("TERM").ok().as_deref(),
