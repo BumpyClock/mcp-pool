@@ -62,6 +62,63 @@ async fn server_discovery_displays_complete_docs_and_keeps_brief_and_json_modes(
 }
 
 #[tokio::test]
+async fn referenced_schema_examples_match_real_calls_and_preserve_json_metadata() -> io::Result<()>
+{
+    let fixture = Fixture::new().await?;
+    let mut configuration: Value = serde_json::from_slice(&tokio::fs::read(&fixture.config).await?)
+        .map_err(io::Error::other)?;
+    configuration
+        .pointer_mut("/mcpServers/fixture/env")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("missing fixture environment"))?
+        .insert("MCP_POOL_TEST_REFERENCED_SCHEMA".to_owned(), json!("1"));
+    tokio::fs::write(&fixture.config, configuration.to_string()).await?;
+    fixture.warm("fixture").await?;
+    let output = fixture.success(&["list", "fixture.echo"]).await?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("function echo(count: 2 | 3, flags: false[], counts: (2 | 3)[]);"));
+    let payload = text
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("mcp-pool call fixture.echo --args '")
+        })
+        .and_then(|line| line.strip_suffix('\''))
+        .ok_or_else(|| io::Error::other("missing generated example"))?;
+    let expected = json!({"count":2,"flags":[false],"counts":[2]});
+    assert_eq!(
+        serde_json::from_str::<Value>(payload).map_err(io::Error::other)?,
+        expected
+    );
+    let result = parse_json(
+        &fixture
+            .success(&[
+                "call",
+                "fixture.echo",
+                "--args",
+                payload,
+                "--output",
+                "json",
+            ])
+            .await?,
+    )?;
+    assert_eq!(result.get("arguments"), Some(&expected));
+    let metadata = parse_json(&fixture.success(&["list", "fixture.echo", "--json"]).await?)?;
+    assert_eq!(
+        metadata.pointer("/tools/0/inputSchema/properties/count"),
+        Some(&json!({"$ref":"#/$defs/count"}))
+    );
+    assert_eq!(
+        metadata.pointer("/tools/0/options/0"),
+        Some(
+            &json!({"property":"count","cliName":"count","required":true,
+            "type":"unknown","placeholder":"<count>"})
+        )
+    );
+    fixture.finish().await
+}
+
+#[tokio::test]
 async fn delayed_piped_commands_preserve_results_without_progress_output() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     fixture.warm("fixture").await?;

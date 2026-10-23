@@ -19,6 +19,20 @@ fn record(event: &str) -> io::Result<()> {
 }
 
 fn tool(name: &str) -> Value {
+    if std::env::var_os("MCP_POOL_TEST_REFERENCED_SCHEMA").is_some() {
+        return json!({"name":name,"inputSchema":{
+            "$defs":{
+                "count":{"type":"integer","enum":[2,3]},
+                "flag":{"type":"boolean","enum":[false]},
+                "counts":{"type":"array","items":{"$ref":"#/$defs/count"}}
+            },
+            "type":"object","required":["count","flags","counts"],"properties":{
+                "count":{"$ref":"#/$defs/count"},
+                "flags":{"type":"array","items":{"$ref":"#/$defs/flag"}},
+                "counts":{"$ref":"#/$defs/counts"}
+            }
+        }});
+    }
     json!({
         "name": name, "description": format!("Fixture {name}"),
         "inputSchema": {"type":"object", "properties":{
