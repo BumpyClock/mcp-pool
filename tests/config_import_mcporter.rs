@@ -184,11 +184,15 @@ async fn imported_unavailable_server_reports_failure_with_opt_in_health_exit_cod
     let warned = fixture.success(&["list", "offline", "--no-oauth"]).await?;
     assert!(String::from_utf8_lossy(&warned.stderr).contains("legacy import"));
     for arguments in [
-        ["list", "offline", "--quiet"],
-        ["list", "not-configured", "--quiet"],
-        ["list", "--not-a-discovery-flag", "--quiet"],
+        &["list", "offline", "--quiet"][..],
+        &["list", "not-configured", "--quiet"],
+        &["list", "--not-a-discovery-flag", "--quiet"],
+        &["list", "offline", "--oauth-timeout", "5", "--quiet"],
+        &["--root", "relative-root", "list", "offline", "--quiet"],
     ] {
-        let quiet = fixture.run(&arguments).await?;
+        let loud = fixture.run(&arguments[..arguments.len() - 1]).await?;
+        assert!(!loud.stderr.is_empty(), "{arguments:?}");
+        let quiet = fixture.run(arguments).await?;
         assert!(!quiet.status.success(), "{arguments:?}");
         assert!(quiet.stdout.is_empty(), "{arguments:?}");
         assert!(quiet.stderr.is_empty(), "{arguments:?} {quiet:?}");

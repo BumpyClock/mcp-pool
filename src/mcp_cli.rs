@@ -57,6 +57,26 @@ pub fn handles(arguments: &[String]) -> bool {
 }
 
 pub async fn run(arguments: Vec<String>) -> Result<()> {
+    let quiet_discovery = context::command_index(&arguments).is_some_and(|index| {
+        arguments
+            .get(index)
+            .is_some_and(|command| matches!(command.as_str(), "list" | "describe" | "list-tools"))
+            && arguments
+                .iter()
+                .skip(index + 1)
+                .any(|argument| argument == "--quiet")
+    });
+    if !quiet_discovery {
+        return run_command(arguments, true).await;
+    }
+    // mcporter's quiet health check reports every failure only through its exit status.
+    run_command(arguments, false).await.map_err(|error| {
+        crate::diagnostics::log(format!("quiet_discovery_failed error={error:#}"));
+        tool_discovery::QuietFailure.into()
+    })
+}
+
+async fn run_command(arguments: Vec<String>, show_warnings: bool) -> Result<()> {
     let context::ContextOptions {
         path,
         root,
@@ -95,22 +115,8 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
     if command == "daemon" {
         return daemon_commands::daemon(arguments).await;
     }
-    if matches!(command.as_str(), "list" | "describe" | "list-tools")
-        && arguments.iter().any(|argument| argument == "--quiet")
-    {
-        // mcporter's quiet health check reports every failure only through its exit status.
-        let quiet_failure = |error: anyhow::Error| {
-            crate::diagnostics::log(format!("quiet_discovery_failed error={error:#}"));
-            anyhow::Error::from(tool_discovery::QuietFailure)
-        };
-        let configuration =
-            crate::server_config::load_at(path, root.as_deref()).map_err(quiet_failure)?;
-        return tool_discovery::run(configuration, arguments)
-            .await
-            .map_err(quiet_failure);
-    }
     let configuration = crate::server_config::load_at(path, root.as_deref())?;
-    for warning in &configuration.warnings {
+    for warning in configuration.warnings.iter().filter(|_| show_warnings) {
         context::warning(warning);
     }
     match command.as_str() {
