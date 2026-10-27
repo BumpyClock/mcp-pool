@@ -10,6 +10,34 @@ mod support;
 
 use support::{Fixture, RpcProcess, initialize, parse_json};
 
+#[tokio::test]
+async fn missing_tool_discovery_fails_and_quiet_health_checks_remain_silent() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    fixture.warm("fixture").await?;
+    for command in ["list", "describe", "list-tools"] {
+        let output = fixture
+            .command(&[command, "fixture.unknown_tool", "--json", "--no-oauth"])
+            .await?;
+        assert!(!output.status.success(), "{output:?}");
+        let report = parse_json(&output)?;
+        assert_eq!(report.get("status"), Some(&json!("error")));
+        assert!(
+            report
+                .get("error")
+                .and_then(Value::as_str)
+                .is_some_and(|error| error.contains("unknown_tool"))
+        );
+    }
+    let quiet = fixture
+        .command(&["list", "fixture.unknown_tool", "--quiet", "--no-oauth"])
+        .await?;
+    assert!(!quiet.status.success());
+    assert!(quiet.stdout.is_empty());
+    assert!(quiet.stderr.is_empty());
+    assert_eq!(fixture.event_count("tools/call").await?, 0);
+    fixture.finish().await
+}
+
 async fn configure_synthetic(
     fixture: &Fixture,
     names: &[&str],

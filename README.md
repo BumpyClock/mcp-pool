@@ -157,9 +157,11 @@ without connecting, or `pool list` to list the same configured servers.
 `list`, `describe`, and `list-tools` accept `--schema`, `--brief`/`--signatures`,
 `--all-parameters`, `--json`, `--status`, `--sources`, and `--timeout MILLISECONDS`.
 `--brief` cannot be combined with `--schema`, `--json`, or `--status`.
-An all-server list reports failures but exits successfully unless `--exit-code`
-is set. `--quiet` suppresses output and enables that failure exit code. A failed
-single-server discovery exits unsuccessfully.
+Discovery reports server failures but exits successfully unless `--exit-code`
+is set, matching mcporter for both single-server and all-server lists. `--quiet`
+suppresses stdout and stderr and enables that failure exit code. Invalid
+arguments, unknown servers or tool selectors, and invalid configuration still
+exit unsuccessfully.
 
 `list SERVER` shows a formatted tool reference: wrapped descriptions, parameter
 documentation, typed signatures, examples, and a transport summary. Interactive

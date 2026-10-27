@@ -56,6 +56,10 @@
 
 ### Fixed
 
+- Single-server discovery now matches mcporter's default exit status. Failures
+  remain visible in the report; `--exit-code` and `--quiet` return a failure
+  status for health checks. Unknown tool selectors still fail, and quiet
+  health checks suppress both stdout and stderr.
 - macOS release builds and retirement of naturally exited upstream processes.
   Socket-name length budgets now account for canonical paths such as `/private/tmp`.
 - Inferred server-first calls preserve JSON payloads and selector aliases

@@ -155,7 +155,9 @@ async fn legacy_modes_negotiate_once_and_pins_never_fall_back() -> io::Result<()
     for preference in ["auto", "legacy", "2026-07-28"] {
         let fixture = Fixture::new().await?;
         configure(&fixture, "legacy", preference).await?;
-        let listed = fixture.command(&["list", "protocol", "--json"]).await?;
+        let listed = fixture
+            .command(&["list", "protocol", "--json", "--exit-code"])
+            .await?;
         if preference == "2026-07-28" {
             assert!(!listed.status.success(), "{listed:?}");
             assert_eq!(fixture.event_count("initialize").await?, 0);

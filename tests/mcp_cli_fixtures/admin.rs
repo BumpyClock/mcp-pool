@@ -261,6 +261,11 @@ async fn discovery_reports_auth_failure_and_quiet_health_exit_code() -> io::Resu
     let quiet = fixture.command(&["list", "--quiet"]).await?;
     assert!(!quiet.status.success());
     assert!(quiet.stdout.is_empty());
+    assert!(quiet.stderr.is_empty());
+    let quiet_json = fixture.command(&["list", "--json", "--quiet"]).await?;
+    assert!(!quiet_json.status.success());
+    assert!(quiet_json.stdout.is_empty());
+    assert!(quiet_json.stderr.is_empty());
     let strict = fixture.command(&["list", "--json", "--exit-code"]).await?;
     assert!(!strict.status.success());
     assert_eq!(
@@ -311,7 +316,7 @@ async fn caller_read_only_policy_reaches_existing_daemon_without_refresh_or_writ
         Some(&json!(true))
     );
     for arguments in [
-        vec!["list", "guarded", "--json"],
+        vec!["list", "guarded", "--json", "--exit-code"],
         vec!["call", "guarded.headers", "--output", "json"],
     ] {
         let output = fixture

@@ -37,6 +37,11 @@ mod upstream_process;
 mod upstream_stdio;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    cli::run().await
+async fn main() -> anyhow::Result<std::process::ExitCode> {
+    match cli::run().await {
+        Err(error) if error.is::<tool_discovery::QuietFailure>() => {
+            Ok(std::process::ExitCode::FAILURE)
+        }
+        outcome => outcome.map(|()| std::process::ExitCode::SUCCESS),
+    }
 }
