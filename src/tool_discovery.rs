@@ -342,9 +342,6 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
         println!("No MCP servers configured.");
     }
     if failure && (tool_selection_failed || flags.exit_code) {
-        if flags.quiet {
-            return Err(QuietFailure.into());
-        }
         bail!("MCP discovery failed");
     }
     Ok(())

@@ -177,6 +177,22 @@ async fn imported_unavailable_server_reports_failure_with_opt_in_health_exit_cod
     assert!(!quiet.status.success());
     assert!(quiet.stdout.is_empty());
     assert!(quiet.stderr.is_empty());
+    fixture.write(
+        &fixture.project.join(".mcp").join("config.json"),
+        &json!({"mcpServers":{},"imports":["cursor"]}),
+    )?;
+    let warned = fixture.success(&["list", "offline", "--no-oauth"]).await?;
+    assert!(String::from_utf8_lossy(&warned.stderr).contains("legacy import"));
+    for arguments in [
+        ["list", "offline", "--quiet"],
+        ["list", "not-configured", "--quiet"],
+        ["list", "--not-a-discovery-flag", "--quiet"],
+    ] {
+        let quiet = fixture.run(&arguments).await?;
+        assert!(!quiet.status.success(), "{arguments:?}");
+        assert!(quiet.stdout.is_empty(), "{arguments:?}");
+        assert!(quiet.stderr.is_empty(), "{arguments:?} {quiet:?}");
+    }
     let unknown = fixture.run(&["list", "not-configured", "--json"]).await?;
     assert!(!unknown.status.success());
     fixture.finish().await

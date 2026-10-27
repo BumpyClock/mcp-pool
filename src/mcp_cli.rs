@@ -95,6 +95,20 @@ pub async fn run(arguments: Vec<String>) -> Result<()> {
     if command == "daemon" {
         return daemon_commands::daemon(arguments).await;
     }
+    if matches!(command.as_str(), "list" | "describe" | "list-tools")
+        && arguments.iter().any(|argument| argument == "--quiet")
+    {
+        // mcporter's quiet health check reports every failure only through its exit status.
+        let quiet_failure = |error: anyhow::Error| {
+            crate::diagnostics::log(format!("quiet_discovery_failed error={error:#}"));
+            anyhow::Error::from(tool_discovery::QuietFailure)
+        };
+        let configuration =
+            crate::server_config::load_at(path, root.as_deref()).map_err(quiet_failure)?;
+        return tool_discovery::run(configuration, arguments)
+            .await
+            .map_err(quiet_failure);
+    }
     let configuration = crate::server_config::load_at(path, root.as_deref())?;
     for warning in &configuration.warnings {
         context::warning(warning);
