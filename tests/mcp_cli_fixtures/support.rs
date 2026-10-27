@@ -1,7 +1,6 @@
 use std::io;
 use std::path::PathBuf;
 use std::process::{Output, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -9,7 +8,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_mcp-pool");
-static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+#[path = "../common/fixture_home.rs"]
+mod fixture_home;
 
 pub struct Fixture {
     pub home: PathBuf,
@@ -22,14 +23,7 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn new() -> io::Result<Self> {
-        let home = std::env::current_dir()?
-            .join(".test-artifacts")
-            .join(format!(
-                "mcp-cli-{}-{}",
-                std::process::id(),
-                SEQUENCE.fetch_add(1, Ordering::SeqCst)
-            ));
-        tokio::fs::create_dir_all(&home).await?;
+        let home = fixture_home::create("mcp-cli")?;
         let home = tokio::fs::canonicalize(home).await?;
         let config = home.join("config.json");
         let working_directory = home.join("working directory");
@@ -273,7 +267,7 @@ impl Drop for Fixture {
     }
 }
 
-fn isolated_command(home: &std::path::Path, config: &std::path::Path) -> Command {
+pub(super) fn isolated_command(home: &std::path::Path, config: &std::path::Path) -> Command {
     let mut command = Command::new(BINARY);
     command
         .env("MCP_POOL_HOME", home)

@@ -26,8 +26,8 @@ async fn installer_atomically_replaces_an_executable_and_preserves_it_on_build_f
         .map_err(io::Error::other)?
         .as_nanos();
     let fixture = Fixture(
-        repository
-            .join("target")
+        std::env::temp_dir()
+            .canonicalize()?
             .join(format!("unix-installer-{}-{nonce}", std::process::id())),
     );
     let source = fixture

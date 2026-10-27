@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Output;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::process::Command;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_mcp-pool");
-static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+#[path = "../common/fixture_home.rs"]
+mod fixture_home;
 
 pub struct Fixture {
     pub directory: PathBuf,
@@ -17,12 +18,8 @@ pub struct Fixture {
 
 impl Fixture {
     pub fn new() -> Result<Self> {
-        let directory = std::env::temp_dir().join(format!(
-            "mcp-import-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(directory.join("project"))?;
+        let directory = fixture_home::create("mi")?;
+        std::fs::create_dir(directory.join("project"))?;
         let directory = std::fs::canonicalize(directory)?;
         #[cfg(windows)]
         let directory = PathBuf::from(

@@ -14,6 +14,10 @@ use errors::attach_error;
 use errors::category;
 pub(crate) use errors::issue;
 
+#[derive(Debug, thiserror::Error)]
+#[error("MCP discovery failed")]
+pub(crate) struct QuietFailure;
+
 #[derive(Default)]
 struct Flags {
     json: bool,
@@ -140,6 +144,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     let detailed = (flags.target.is_some() || flags.ephemeral.present()) && !flags.status;
     let mut entries = Vec::new();
     let mut failure = false;
+    let mut tool_selection_failed = false;
     let total = selected.len();
     let mut pending = VecDeque::from(selected);
     let mut tasks = tokio::task::JoinSet::new();
@@ -197,6 +202,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
                     }),
                     Err(error) => {
                         failure = true;
+                        tool_selection_failed = true;
                         tools.clear();
                         attach_error(
                             &mut entry,
@@ -312,7 +318,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
         }
         entries.push(entry);
     }
-    if flags.json && (!flags.quiet || !detailed) {
+    if flags.json && !flags.quiet {
         let output = if detailed {
             entries
                 .into_iter()
@@ -335,7 +341,7 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     } else if next_index == 0 && !flags.quiet {
         println!("No MCP servers configured.");
     }
-    if failure && (detailed || flags.exit_code) {
+    if failure && (tool_selection_failed || flags.exit_code) {
         bail!("MCP discovery failed");
     }
     Ok(())

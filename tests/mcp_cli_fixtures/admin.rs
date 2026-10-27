@@ -261,6 +261,11 @@ async fn discovery_reports_auth_failure_and_quiet_health_exit_code() -> io::Resu
     let quiet = fixture.command(&["list", "--quiet"]).await?;
     assert!(!quiet.status.success());
     assert!(quiet.stdout.is_empty());
+    assert!(quiet.stderr.is_empty());
+    let quiet_json = fixture.command(&["list", "--json", "--quiet"]).await?;
+    assert!(!quiet_json.status.success());
+    assert!(quiet_json.stdout.is_empty());
+    assert!(quiet_json.stderr.is_empty());
     let strict = fixture.command(&["list", "--json", "--exit-code"]).await?;
     assert!(!strict.status.success());
     assert_eq!(
@@ -311,7 +316,7 @@ async fn caller_read_only_policy_reaches_existing_daemon_without_refresh_or_writ
         Some(&json!(true))
     );
     for arguments in [
-        vec!["list", "guarded", "--json"],
+        vec!["list", "guarded", "--json", "--exit-code"],
         vec!["call", "guarded.headers", "--output", "json"],
     ] {
         let output = fixture
@@ -345,28 +350,22 @@ async fn daemon_relative_log_is_bounded_and_filters_logical_server_names() -> io
     let log_file = fixture.home.join("selected-daemon.log");
     tokio::fs::write(&log_file, "synthetic older log\n".repeat(300_000)).await?;
     assert!(tokio::fs::metadata(&log_file).await?.len() > 5 * 1024 * 1024);
-    let project_directory = std::env::current_dir()?.canonicalize()?;
-    let relative_log_file = log_file
-        .strip_prefix(&project_directory)
-        .map_err(io::Error::other)?;
-    assert!(!relative_log_file.is_absolute());
-    let relative_log_file = relative_log_file
-        .to_str()
-        .ok_or_else(|| io::Error::other("non-Unicode relative log path"))?;
-    let started = parse_json(
-        &fixture
-            .success(&[
-                "daemon",
-                "start",
-                "--log",
-                "--log-file",
-                relative_log_file,
-                "--log-servers",
-                "fixture",
-                "--json",
-            ])
-            .await?,
-    )?;
+    let started = super::support::isolated_command(&fixture.home, &fixture.config)
+        .current_dir(&fixture.home)
+        .args([
+            "daemon",
+            "start",
+            "--log",
+            "--log-file",
+            "selected-daemon.log",
+            "--log-servers",
+            "fixture",
+            "--json",
+        ])
+        .output()
+        .await?;
+    assert!(started.status.success(), "{started:?}");
+    let started = parse_json(&started)?;
     assert_eq!(started.get("running"), Some(&json!(true)));
 
     fixture.warm("fixture").await?;

@@ -5,6 +5,9 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+#[path = "common/fixture_home.rs"]
+mod fixture_home;
+
 const FIXTURE: &str = "MCP_POOL_STDERR_FIXTURE";
 
 #[test]
@@ -23,12 +26,7 @@ fn diagnostic_fixture() -> io::Result<()> {
 
 #[tokio::test]
 async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-    let home = std::env::temp_dir().join(format!("pool-stderr-{}-{nonce}", std::process::id()));
-    tokio::fs::create_dir(&home).await?;
+    let home = fixture_home::create("ps")?;
     let binary = env!("CARGO_BIN_EXE_mcp-pool");
     let fixture = std::env::current_exe()?.to_string_lossy().into_owned();
     let mut add = Command::new(binary);
