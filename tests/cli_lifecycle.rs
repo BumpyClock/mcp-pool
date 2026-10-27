@@ -12,7 +12,8 @@ use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_mcp-pool");
-static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+#[path = "common/fixture_home.rs"]
+mod fixture_home;
 
 struct Daemon {
     home: PathBuf,
@@ -21,12 +22,7 @@ struct Daemon {
 
 impl Daemon {
     async fn launch(config: &str) -> io::Result<Self> {
-        let home = std::env::temp_dir().join(format!(
-            "mcp-pool-cli-{}-{}",
-            std::process::id(),
-            SEQUENCE.fetch_add(1, Ordering::SeqCst)
-        ));
-        tokio::fs::create_dir(&home).await?;
+        let home = fixture_home::create("mcp-pool-cli")?;
         tokio::fs::create_dir(home.join("config")).await?;
         let legacy: toml::Value = toml::from_str(config).map_err(io::Error::other)?;
         let legacy = serde_json::to_value(legacy).map_err(io::Error::other)?;
