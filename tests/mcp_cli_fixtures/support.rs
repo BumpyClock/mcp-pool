@@ -22,12 +22,16 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn new() -> io::Result<Self> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .subsec_nanos();
         let home = std::env::temp_dir().join(format!(
-            "mcp-cli-{}-{}",
+            "mcp-cli-{}-{}-{nonce:x}",
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::SeqCst)
         ));
-        tokio::fs::create_dir_all(&home).await?;
+        tokio::fs::create_dir(&home).await?;
         let home = tokio::fs::canonicalize(home).await?;
         let config = home.join("config.json");
         let working_directory = home.join("working directory");
