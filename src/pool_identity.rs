@@ -49,7 +49,7 @@ pub(crate) fn pool_name(server: &ConfiguredServer, definition: &ServerDef) -> Re
     #[cfg(unix)]
     let budget = {
         use std::os::unix::ffi::OsStrExt;
-        let overhead = crate::config::server_socket_path("x")
+        let overhead = crate::config_paths::absolute(&crate::config::server_socket_path("x"))?
             .as_os_str()
             .as_bytes()
             .len()

@@ -22,13 +22,11 @@ pub struct Fixture {
 
 impl Fixture {
     pub async fn new() -> io::Result<Self> {
-        let home = std::env::current_dir()?
-            .join(".test-artifacts")
-            .join(format!(
-                "mcp-cli-{}-{}",
-                std::process::id(),
-                SEQUENCE.fetch_add(1, Ordering::SeqCst)
-            ));
+        let home = std::env::temp_dir().join(format!(
+            "mcp-cli-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::SeqCst)
+        ));
         tokio::fs::create_dir_all(&home).await?;
         let home = tokio::fs::canonicalize(home).await?;
         let config = home.join("config.json");
@@ -273,7 +271,7 @@ impl Drop for Fixture {
     }
 }
 
-fn isolated_command(home: &std::path::Path, config: &std::path::Path) -> Command {
+pub(super) fn isolated_command(home: &std::path::Path, config: &std::path::Path) -> Command {
     let mut command = Command::new(BINARY);
     command
         .env("MCP_POOL_HOME", home)

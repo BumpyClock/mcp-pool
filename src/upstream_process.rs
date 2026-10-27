@@ -55,16 +55,32 @@ impl OwnedProcess {
 
     /// Terminates the owned process tree even if the immediate child has exited.
     pub(crate) async fn retire(&mut self) -> io::Result<()> {
-        self.ownership.terminate()?;
+        if let Err(error) = self.ownership.terminate() {
+            // macOS can reject a zombie-only group before its leader becomes waitable.
+            if !cfg!(target_os = "macos") || error.kind() != io::ErrorKind::PermissionDenied {
+                return Err(error);
+            }
+            crate::diagnostics::log(format!(
+                "upstream_group_signal_denied awaiting_verified_retirement error={error}"
+            ));
+        }
         tokio::time::timeout(Duration::from_secs(5), self.child.wait())
             .await
             .map_err(|_| io::Error::other("upstream child retirement timed out"))??;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if self.ownership.is_empty()? {
-                #[cfg(unix)]
-                self.ownership.disarm();
-                return Ok(());
+            match self.ownership.is_empty() {
+                Ok(true) => {
+                    #[cfg(unix)]
+                    self.ownership.disarm();
+                    return Ok(());
+                }
+                // Killed descendants can remain zombies until their parent reaps them.
+                Err(error)
+                    if cfg!(target_os = "macos")
+                        && error.kind() == io::ErrorKind::PermissionDenied => {}
+                Ok(false) => {}
+                Err(error) => return Err(error),
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(io::Error::other(

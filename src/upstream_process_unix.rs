@@ -75,22 +75,24 @@ impl Ownership {
             .process_group
             .ok_or_else(|| io::Error::other("upstream process group was not established"))?;
         loop {
-            let mut information: libc::siginfo_t = unsafe { std::mem::zeroed() };
-            if unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    process_group as libc::id_t,
-                    &mut information,
-                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
-                )
-            } != 0
             {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error);
+                let mut information: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                if unsafe {
+                    libc::waitid(
+                        libc::P_PID,
+                        process_group as libc::id_t,
+                        &mut information,
+                        libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                    )
+                } != 0
+                {
+                    let error = io::Error::last_os_error();
+                    if error.kind() != io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                } else if unsafe { information.si_pid() } != 0 {
+                    return Ok(());
                 }
-            } else if unsafe { information.si_pid() } != 0 {
-                return Ok(());
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

@@ -27,7 +27,7 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
-    let home = std::env::temp_dir().join(format!("pool-stderr-{}-{nonce}", std::process::id()));
+    let home = std::env::temp_dir().join(format!("ps-{}-{nonce:x}", std::process::id()));
     tokio::fs::create_dir(&home).await?;
     let binary = env!("CARGO_BIN_EXE_mcp-pool");
     let fixture = std::env::current_exe()?.to_string_lossy().into_owned();

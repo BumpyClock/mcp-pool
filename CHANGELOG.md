@@ -56,6 +56,8 @@
 
 ### Fixed
 
+- macOS release builds and retirement of naturally exited upstream processes.
+  Socket-name length budgets now account for canonical paths such as `/private/tmp`.
 - Inferred server-first calls preserve JSON payloads and selector aliases
   before the tool name. Routing and explicit calls share one typed option model.
 - Atomic config writes reject malformed legacy `imports` fields before
