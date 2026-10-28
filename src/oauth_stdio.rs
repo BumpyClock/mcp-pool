@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use super::{AuthOptions, context, ensure_writable};
+use super::{AuthOptions, context_with_settings, ensure_writable};
 use crate::server_config::ConfiguredServer;
 use crate::upstream_process::OwnedProcess;
 
@@ -12,15 +12,18 @@ pub(super) async fn authorize(
     options: AuthOptions,
     timeout_ms: Option<u64>,
 ) -> Result<Value> {
-    let authentication = context(server)?;
+    let settings = server.oauth_settings();
+    let authentication = context_with_settings(server, &settings)?;
     ensure_writable(&authentication)?;
     if options.reset {
         let server = server.clone();
         tokio::task::spawn_blocking(move || super::vault_clear(&server)).await??;
     }
-    let helper = server.raw.get("oauthCommand").or_else(|| server.raw.get("oauth_command"))
-        .and_then(|value| value.get("args")).and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("stdio server has no configured oauthCommand; configure its real authorization helper"))?;
+    let helper = settings.helper_arguments.ok_or_else(|| {
+        anyhow::anyhow!(
+            "stdio server has no configured oauthCommand; configure its real authorization helper"
+        )
+    })?;
     #[cfg(windows)]
     let executable = crate::upstream_stdio::resolve_windows_command(
         &server.definition.command,

@@ -131,7 +131,6 @@ pub struct Call {
     pub raw_values: BTreeMap<String, String>,
     pub generic_flags: BTreeSet<String>,
     pub literal_values: BTreeSet<String>,
-    pub stdin: bool,
     pub inputs: Inputs,
     pub output: Output,
     pub timeout: Option<u64>,
@@ -261,9 +260,6 @@ pub fn call(arguments: Vec<String>) -> Result<Call> {
             }
             Some(CallOption::Json) => {
                 let content = value(&mut tokens, &token)?;
-                if content == "-" {
-                    result.stdin = true;
-                }
                 result.inputs.json(&content)?;
             }
             None if token.starts_with("--") => {

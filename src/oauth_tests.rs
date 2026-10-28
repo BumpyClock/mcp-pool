@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use super::test_support::{Fixture, Mock};
 use super::{
-    AuthOptions, authorization_header, authorize, context, credential_status, files, flow, prepare,
-    store, vault_clear, vault_set,
+    AuthOptions, authorization_header, authorize_with_timeout, context, credential_status, files,
+    flow, prepare, store, vault_clear, vault_set,
 };
 
 #[tokio::test]
@@ -22,13 +22,14 @@ async fn cached_credentials_reuse_without_discovery_or_login() -> Result<()> {
     assert!(
         authorization_header(&authentication).await?.as_deref() == Some("Bearer synthetic-current")
     );
-    let response = authorize(
+    let response = authorize_with_timeout(
         &fixture.server,
         AuthOptions {
             reset: false,
             no_browser: true,
             json: true,
         },
+        None,
     )
     .await?;
     assert!(response.get("reused") == Some(&json!(true)));
@@ -85,13 +86,14 @@ async fn read_only_validation_reuses_valid_tokens_and_blocks_all_writes() -> Res
     );
     assert!(vault_clear(&fixture.server).is_err());
     assert!(
-        authorize(
+        authorize_with_timeout(
             &fixture.server,
             AuthOptions {
                 reset: false,
                 no_browser: true,
                 json: true
-            }
+            },
+            None,
         )
         .await
         .is_err()
@@ -146,6 +148,57 @@ fn vault_v1_identity_and_v2_binding_are_preserved() -> Result<()> {
         )
         .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn oauth_context_uses_alias_precedence_and_source_relative_cache() -> Result<()> {
+    let mut fixture = Fixture::new("https://synthetic.invalid/mcp")?;
+    fixture.server.raw = json!({
+        "auth":"OAUTH",
+        "tokenCacheDir":" ",
+        "token_cache_dir":"relative-cache",
+        "clientName":false,
+        "client_name":"snake-client",
+        "oauthClientId":"camel-id",
+        "oauth_client_id":"snake-id",
+        "oauthClientSecretEnv":"",
+        "oauth_client_secret_env":"SECRET_NAME",
+        "oauthTokenEndpointAuthMethod":17,
+        "oauth_token_endpoint_auth_method":"client_secret_post",
+        "oauthRedirectUrl":"http://127.0.0.1:8000/callback",
+        "oauthClientMetadataUrl":null,
+        "oauth_client_metadata_url":"https://example.invalid/client",
+        "oauthRequestedScope":"requested-camel",
+        "oauth_requested_scope":"requested-snake",
+        "oauthScope":"fallback"
+    });
+    let authentication = context(&fixture.server)?;
+    assert!(authentication.directory_primary);
+    assert_eq!(
+        authentication.directory_stores,
+        vec![fixture.root.join(".mcp").join("relative-cache")]
+    );
+    assert_eq!(authentication.client_name, "snake-client");
+    assert_eq!(authentication.client_id.as_deref(), Some("camel-id"));
+    assert_eq!(
+        authentication.client_secret_env.as_deref(),
+        Some("SECRET_NAME")
+    );
+    assert_eq!(
+        authentication.token_auth_method.as_deref(),
+        Some("client_secret_post")
+    );
+    assert_eq!(
+        authentication.redirect_url.as_deref(),
+        Some("http://127.0.0.1:8000/callback")
+    );
+    assert_eq!(
+        authentication.client_metadata_url.as_deref(),
+        Some("https://example.invalid/client")
+    );
+    assert_eq!(authentication.scope.as_deref(), Some("requested-camel"));
+    assert!(super::identity_definition(&fixture.server)?.auth.is_some());
     Ok(())
 }
 

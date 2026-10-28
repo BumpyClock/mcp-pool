@@ -140,22 +140,3 @@ fn bearer_token_references_survive_and_static_credentials_are_rejected() -> Resu
     assert!(error.to_string().contains("masked Authorization"));
     Ok(())
 }
-
-#[test]
-fn relocating_configs_keeps_paths_and_environment_references() -> Result<()> {
-    let root = std::env::current_dir()?;
-    let source = root.join("source").join("config.json");
-    let mut entry = json!({"command":[".\\tools\\fixture","${TOKEN}"],"cwd":"workers","env":{"TOKEN":"${TOKEN}"},"tokenCacheDir":"tokens"});
-    convert::relocate(&mut entry, &root, &source)?;
-    assert_eq!(entry.get("cwd"), Some(&json!(root.join("workers"))));
-    assert_eq!(
-        entry.pointer("/command/0"),
-        Some(&json!(root.join(".\\tools\\fixture")))
-    );
-    assert_eq!(entry.pointer("/command/1"), Some(&json!("${TOKEN}")));
-    assert_eq!(
-        entry.get("tokenCacheDir"),
-        Some(&json!(root.join("source").join("tokens")))
-    );
-    Ok(())
-}

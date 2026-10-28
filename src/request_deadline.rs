@@ -37,10 +37,7 @@ impl SharedDeadline {
                 biased;
                 result = &mut future => return Ok(result),
                 changed = changes.changed() => {
-                    if changed.is_err() {
-                        return tokio::time::timeout_at(deadline.into(), &mut future)
-                            .await.map_err(|_| ());
-                    }
+                    changed.map_err(|_| ())?;
                 }
                 _ = tokio::time::sleep_until(deadline.into()) => {
                     if Instant::now() >= self.current() {

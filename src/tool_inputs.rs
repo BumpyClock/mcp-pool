@@ -20,6 +20,10 @@ enum Input {
 pub struct Inputs(Vec<Input>);
 
 impl Inputs {
+    pub(crate) fn has_stdin(&self) -> bool {
+        self.0.iter().any(|input| matches!(input, Input::Stdin))
+    }
+
     pub(super) fn json(&mut self, contents: &str) -> Result<()> {
         if contents == "-" {
             self.0.push(Input::Stdin);

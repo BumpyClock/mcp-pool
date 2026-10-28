@@ -132,7 +132,7 @@ async fn failed_shutdown_preserves_poison_and_allows_unrelated_pool_operations()
         Some(RETIREMENT_ERROR.to_string())
     );
     retired.send_replace(Some(Ok(())));
-    assert!(pool.stop_server("healthy-server").await?);
+    pool.stop_server("healthy-server").await?;
     drop(responses);
     retained_failure(&pool);
     Ok(())

@@ -50,5 +50,5 @@ async fn full_response_queue_does_not_hold_natural_exit_completion() -> io::Resu
     tokio::time::timeout(Duration::from_secs(15), handle.wait_for_exit())
         .await
         .map_err(io::Error::other)??;
-    handle.wait_for_exit().await
+    handle.shutdown().await
 }

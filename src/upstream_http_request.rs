@@ -13,11 +13,14 @@ pub(super) struct Request {
     pub(super) initialization_barrier: bool,
     timeout_ms: Option<u64>,
     shared: bool,
-    pub(super) budget: Option<SharedDeadline>,
+    pub(super) budget: SharedDeadline,
 }
 
 impl Request {
-    pub(super) fn parse(envelope: crate::upstream::UpstreamRequest) -> Result<Self, String> {
+    pub(super) fn parse(
+        envelope: crate::upstream::UpstreamRequest,
+        options: &Options,
+    ) -> Result<Self, String> {
         let line = envelope.line;
         if line.len() > sse_parser::FRAME_LIMIT {
             return Err("HTTP request exceeds size limit".into());
@@ -57,6 +60,15 @@ impl Request {
         } else {
             line
         };
+        let budget = match envelope.deadline {
+            Some(budget) => budget,
+            None => {
+                let deadline = std::time::Instant::now()
+                    .checked_add(Self::deadline(timeout_ms, shared, options))
+                    .ok_or("HTTP request deadline exceeds the clock range")?;
+                SharedDeadline::new(deadline)
+            }
+        };
         Ok(Self {
             line,
             identifier,
@@ -68,15 +80,15 @@ impl Request {
             initialization_barrier,
             timeout_ms,
             shared,
-            budget: envelope.deadline,
+            budget,
         })
     }
 
-    pub(super) fn deadline(&self, options: &Options) -> Duration {
-        match self.timeout_ms {
+    fn deadline(timeout_ms: Option<u64>, shared: bool, options: &Options) -> Duration {
+        match timeout_ms {
             Some(milliseconds) => {
                 let duration = Duration::from_millis(milliseconds);
-                if self.shared {
+                if shared {
                     duration.max(options.request_timeout)
                 } else {
                     duration
@@ -88,20 +100,10 @@ impl Request {
 
     pub(super) fn read_deadline(&self, options: &Options) -> Duration {
         if self.timeout_ms.is_some() {
-            self.deadline(options)
+            Self::deadline(self.timeout_ms, self.shared, options)
         } else {
             options.read_timeout
         }
-    }
-
-    pub(super) fn establish_budget(&mut self, options: &Options) -> Result<(), String> {
-        if self.budget.is_none() {
-            let deadline = std::time::Instant::now()
-                .checked_add(self.deadline(options))
-                .ok_or("HTTP request deadline exceeds the clock range")?;
-            self.budget = Some(SharedDeadline::new(deadline));
-        }
-        Ok(())
     }
 
     pub(super) async fn read_chunk(
@@ -109,10 +111,8 @@ impl Request {
         response: &mut reqwest::Response,
         options: &Options,
     ) -> Result<Option<Vec<u8>>, String> {
-        if self.shared
-            && let Some(budget) = &self.budget
-        {
-            read_chunk_with_deadline(response, budget).await
+        if self.shared {
+            read_chunk_with_deadline(response, &self.budget).await
         } else {
             read_chunk_with_timeout(response, self.read_deadline(options)).await
         }
@@ -129,7 +129,7 @@ impl Request {
         }
         Ok(crate::upstream::UpstreamRequest {
             line: value.to_string(),
-            deadline: self.budget.clone(),
+            deadline: Some(self.budget.clone()),
         })
     }
 }

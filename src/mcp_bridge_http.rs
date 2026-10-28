@@ -197,14 +197,13 @@ async fn handle_request(State(state): State<HttpState>, request: Request) -> Res
             );
         }
         match rpc::listen_subscription(&message) {
-            Some(Ok(subscription)) => {
+            Ok(subscription) => {
                 let mut response =
                     sse::start(state, subscription, only_server.as_deref(), request_permit).await;
                 set_protocol_version(&mut response, response_version.as_deref());
                 return response;
             }
-            Some(Err(response)) => return json_response(response, response_version.as_deref()),
-            None => {}
+            Err(response) => return json_response(response, response_version.as_deref()),
         }
     } else if modern_transport_headers && !accepts_streamable_json(&headers) {
         return text_response(

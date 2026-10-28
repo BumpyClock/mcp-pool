@@ -225,6 +225,13 @@ async fn daemon_administration_and_native_namespace_keep_their_meanings() -> io:
         parse_json(&fixture.success(&["daemon", "status", "--json"]).await?)?,
         json!({"running":false})
     );
+    fixture.success(&["daemon", "stop"]).await?;
+    fixture.success(&["config", "remove", "array"]).await?;
+    assert_eq!(
+        parse_json(&fixture.success(&["daemon", "status", "--json"]).await?)?,
+        json!({"running":false})
+    );
+    assert!(!fixture.counter.exists());
     let started = parse_json(&fixture.success(&["daemon", "start", "--json"]).await?)?;
     assert_eq!(started.get("running"), Some(&json!(true)));
     fixture.finish().await

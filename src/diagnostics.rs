@@ -88,35 +88,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn summarize_keeps_short_lines_unchanged() {
-        let line = "upstream_stderr ready on port 1234";
-        assert_eq!(summarize_log_line(line), line);
+    fn lines_within_the_limit_are_unchanged() {
+        for line in [
+            "upstream_stderr ready on port 1234".to_owned(),
+            "a".repeat(MAX_LOG_LINE_LEN),
+        ] {
+            assert_eq!(summarize_log_line(&line), line);
+        }
     }
 
     #[test]
-    fn summarize_keeps_boundary_length_line_unchanged() {
-        let line = "a".repeat(MAX_LOG_LINE_LEN);
-        assert_eq!(summarize_log_line(&line), line);
-    }
-
-    #[test]
-    fn summarize_truncates_long_lines_with_marker_and_no_full_tail() {
-        let body = "x".repeat(10_000);
-        let out = summarize_log_line(&body);
-        assert!(out.contains("truncated=true"), "marker present: {out:.40}");
-        assert!(
-            out.contains("original_len=10000"),
-            "original length recorded"
+    fn long_lines_keep_the_longest_utf8_prefix_and_original_length() {
+        let ascii = "x".repeat(10_000);
+        assert_eq!(
+            summarize_log_line(&ascii),
+            format!(
+                "{} truncated=true original_len=10000",
+                "x".repeat(MAX_LOG_LINE_LEN)
+            )
         );
-        assert!(out.len() < body.len(), "output shorter than input");
-        assert!(!out.contains(&"x".repeat(10_000)));
-        assert!(out.starts_with(&"x".repeat(MAX_LOG_LINE_LEN)));
-    }
-
-    #[test]
-    fn summarize_does_not_split_multibyte_char() {
-        let body = "é".repeat(3000);
-        let out = summarize_log_line(&body);
-        assert!(out.contains("truncated=true"));
+        let limit_inside_two_byte_character = format!("a{}", "é".repeat(3000));
+        assert_eq!(
+            summarize_log_line(&limit_inside_two_byte_character),
+            format!(
+                "a{} truncated=true original_len=6001",
+                "é".repeat((MAX_LOG_LINE_LEN - 1) / 2)
+            )
+        );
     }
 }

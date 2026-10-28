@@ -41,6 +41,9 @@
 
 ### Changed
 
+- Internal config and command operations no longer rebuild JSON text or CLI
+  arguments. Shared-request transitions and daemon ownership selection have
+  explicit owners. The bridge uses the pooled MCP client directly.
 - All commands now use `~/.mcp/config.json` merged with
   `PROJECT/.mcp/config.json`, with project entries taking precedence.
   `MCP_POOL_CONFIG` replaces `MCPORTER_CONFIG`; explicit `--config` selects one
@@ -56,6 +59,8 @@
 
 ### Fixed
 
+- Tool arguments preserve exact schema property names when another property's
+  kebab-case alias has the same spelling.
 - Single-server discovery now matches mcporter's default exit status. Failures
   remain visible in the report; `--exit-code` and `--quiet` return a failure
   status for health checks. Unknown tool selectors still fail, and quiet

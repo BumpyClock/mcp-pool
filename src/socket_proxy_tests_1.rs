@@ -1,393 +1,300 @@
+use super::initialize_tests::{Fixture, connect, read, send};
 use super::*;
 use serde_json::json;
 
-fn channel_client(
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
-    id: &str,
-) -> mpsc::Receiver<String> {
-    let (tx, rx) = mpsc::channel::<String>(8);
-    clients.lock().insert(id.to_string(), tx);
-    rx
+pub(super) async fn reply(fixture: &Fixture, value: Value) -> io::Result<()> {
+    fixture
+        .responses
+        .send(value.to_string())
+        .await
+        .map_err(io::Error::other)
 }
 
-fn last_active(client_id: Option<&str>) -> Arc<Mutex<Option<String>>> {
-    Arc::new(Mutex::new(client_id.map(str::to_string)))
-}
-
-fn empty_cache() -> HandshakeCacheRef {
-    Arc::new(Mutex::new(HandshakeCache::default()))
-}
-
-fn pending_request(
-    client_id: &str,
-    original_id: Value,
-    method: Option<&str>,
-) -> PendingRequestInfo {
-    PendingRequestInfo {
-        client_id: client_id.to_string(),
-        original_id,
-        method: method.map(str::to_string),
-        cache_key: method.and_then(cacheable_method),
-        tool: None,
-        inserted_at: Instant::now(),
-        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
-    }
-}
-
-async fn route_response(
-    line: &str,
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
-    request_map: &RequestMap,
-    handshake_cache: &HandshakeCacheRef,
-    last_active_client: &Arc<Mutex<Option<String>>>,
-) -> mpsc::Receiver<RecoveryReason> {
-    let (recovery_tx, recovery_rx) = mpsc::channel::<RecoveryReason>(8);
-    let client_capabilities = Arc::new(Mutex::new(HashMap::new()));
-    if let Some(client_id) = last_active_client.lock().clone() {
-        client_capabilities.lock().insert(
-            client_id,
-            ClientCapabilities {
-                sampling: true,
-                roots: true,
-            },
-        );
-    }
-    let request_tx = Arc::new(Mutex::new(None));
-    super::route_response(
-        line,
-        clients,
-        request_map,
-        handshake_cache,
-        last_active_client,
-        &client_capabilities,
-        &request_tx,
-        &recovery_tx,
+pub(super) async fn client(fixture: &mut Fixture) -> io::Result<BufReader<LocalStream>> {
+    let mut client = BufReader::new(connect(&fixture.proxy).await?);
+    send(
+        client.get_mut(),
+        json!({"jsonrpc":"2.0","id":"connected","method":"ping"}),
     )
-    .await;
-    recovery_rx
-}
-
-async fn route_response_with_capabilities(
-    line: &str,
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
-    client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
-) {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    let cache = empty_cache();
-    let last_active = last_active(Some("clientA"));
-    let (recovery_tx, _recovery_rx) = mpsc::channel::<RecoveryReason>(8);
-    super::route_response(
-        line,
-        clients,
-        &request_map,
-        &cache,
-        &last_active,
-        client_capabilities,
-        request_tx,
-        &recovery_tx,
+    .await?;
+    let request = fixture.request().await?;
+    reply(
+        fixture,
+        json!({"jsonrpc":"2.0","id":request.get("id"),"result":{}}),
     )
-    .await;
-}
-
-#[tokio::test]
-async fn route_response_restores_ids_without_cross_wiring() {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    request_map
-        .lock()
-        .insert("1".into(), pending_request("clientA", json!(1), None));
-    request_map
-        .lock()
-        .insert("2".into(), pending_request("clientB", json!(1), None));
-
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let mut rx_b = channel_client(&clients, "clientB");
-    let cache = empty_cache();
-    let last_active = last_active(None);
-
-    route_response(
-        r#"{"jsonrpc":"2.0","id":1,"result":"A"}"#,
-        &clients,
-        &request_map,
-        &cache,
-        &last_active,
-    )
-    .await;
-    route_response(
-        r#"{"jsonrpc":"2.0","id":2,"result":"B"}"#,
-        &clients,
-        &request_map,
-        &cache,
-        &last_active,
-    )
-    .await;
-
-    let a: Value =
-        serde_json::from_str(&rx_a.try_recv().expect("clientA response")).expect("valid json");
-    let b: Value =
-        serde_json::from_str(&rx_b.try_recv().expect("clientB response")).expect("valid json");
-    assert_eq!(a["id"], json!(1), "clientA original id restored");
-    assert_eq!(a["result"], json!("A"));
-    assert_eq!(b["id"], json!(1), "clientB original id restored");
-    assert_eq!(b["result"], json!("B"));
-
-    assert!(rx_a.try_recv().is_err());
-    assert!(rx_b.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn route_response_routes_server_request_to_single_client() {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let mut rx_b = channel_client(&clients, "clientB");
-    let last_active = last_active(Some("clientA"));
-
-    route_response(
-        r#"{"jsonrpc":"2.0","id":42,"method":"sampling/createMessage"}"#,
-        &clients,
-        &request_map,
-        &empty_cache(),
-        &last_active,
-    )
-    .await;
-
-    let received: Value =
-        serde_json::from_str(&rx_a.try_recv().expect("clientA receives server request"))
-            .expect("valid json");
-    assert_eq!(received["id"], json!(42), "server id preserved verbatim");
-    assert_eq!(received["method"], json!("sampling/createMessage"));
-    assert!(rx_b.try_recv().is_err(), "server request not broadcast");
-}
-
-#[tokio::test]
-async fn sampling_server_request_routes_to_sampling_capable_client() {
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let mut rx_b = channel_client(&clients, "clientB");
-    let capabilities = Arc::new(Mutex::new(HashMap::new()));
-    capabilities.lock().insert(
-        "clientA".to_string(),
-        ClientCapabilities {
-            sampling: false,
-            roots: false,
-        },
-    );
-    capabilities.lock().insert(
-        "clientB".to_string(),
-        ClientCapabilities {
-            sampling: true,
-            roots: false,
-        },
-    );
-    let request_tx = Arc::new(Mutex::new(None));
-
-    route_response_with_capabilities(
-        r#"{"jsonrpc":"2.0","id":42,"method":"sampling/createMessage"}"#,
-        &clients,
-        &capabilities,
-        &request_tx,
-    )
-    .await;
-
-    assert!(rx_a.try_recv().is_err(), "incapable last-active not used");
-    let received: Value =
-        serde_json::from_str(&rx_b.try_recv().expect("sampling client receives request"))
-            .expect("valid json");
-    assert_eq!(received["method"], json!("sampling/createMessage"));
-}
-
-#[tokio::test]
-async fn roots_server_request_routes_to_roots_capable_client() {
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let mut rx_b = channel_client(&clients, "clientB");
-    let capabilities = Arc::new(Mutex::new(HashMap::new()));
-    capabilities.lock().insert(
-        "clientA".to_string(),
-        ClientCapabilities {
-            sampling: true,
-            roots: false,
-        },
-    );
-    capabilities.lock().insert(
-        "clientB".to_string(),
-        ClientCapabilities {
-            sampling: false,
-            roots: true,
-        },
-    );
-    let request_tx = Arc::new(Mutex::new(None));
-
-    route_response_with_capabilities(
-        r#"{"jsonrpc":"2.0","id":43,"method":"roots/list"}"#,
-        &clients,
-        &capabilities,
-        &request_tx,
-    )
-    .await;
-
-    assert!(rx_a.try_recv().is_err(), "roots-incapable client not used");
-    let received: Value =
-        serde_json::from_str(&rx_b.try_recv().expect("roots client receives request"))
-            .expect("valid json");
-    assert_eq!(received["method"], json!("roots/list"));
-}
-
-#[tokio::test]
-async fn no_capable_client_sends_error_response_upstream() {
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let capabilities = Arc::new(Mutex::new(HashMap::new()));
-    capabilities.lock().insert(
-        "clientA".to_string(),
-        ClientCapabilities {
-            sampling: false,
-            roots: false,
-        },
-    );
-    let (upstream_tx, mut upstream_rx) = mpsc::channel::<crate::upstream::UpstreamRequest>(8);
-    let request_tx = Arc::new(Mutex::new(Some(upstream_tx)));
-
-    route_response_with_capabilities(
-        r#"{"jsonrpc":"2.0","id":44,"method":"sampling/createMessage"}"#,
-        &clients,
-        &capabilities,
-        &request_tx,
-    )
-    .await;
-
-    assert!(
-        rx_a.try_recv().is_err(),
-        "request not sent to incapable client"
-    );
-    let response: Value =
-        serde_json::from_str(&upstream_rx.try_recv().expect("upstream receives error"))
-            .expect("valid json");
-    assert_eq!(response["id"], json!(44));
-    assert_eq!(response["error"]["code"], json!(-32001));
+    .await?;
     assert_eq!(
-        response["error"]["message"],
-        json!("no capable downstream client connected for sampling/createMessage")
+        read(&mut client).await?.get("id"),
+        Some(&json!("connected"))
     );
-    assert!(upstream_rx.try_recv().is_err(), "single upstream error");
+    Ok(client)
 }
 
-#[tokio::test]
-async fn route_response_broadcasts_notifications() {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let mut rx_b = channel_client(&clients, "clientB");
-    let last_active = last_active(None);
-
-    route_response(
-        r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
-        &clients,
-        &request_map,
-        &empty_cache(),
-        &last_active,
-    )
-    .await;
-    assert!(rx_a.try_recv().is_ok(), "notification fans out to clientA");
-    assert!(rx_b.try_recv().is_ok(), "notification fans out to clientB");
-}
-
-#[tokio::test]
-async fn route_response_drops_when_origin_client_gone() {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    request_map
-        .lock()
-        .insert("5".into(), pending_request("ghost", json!(1), None));
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_other = channel_client(&clients, "other");
-    let last_active = last_active(None);
-
-    route_response(
-        r#"{"jsonrpc":"2.0","id":5,"result":"X"}"#,
-        &clients,
-        &request_map,
-        &empty_cache(),
-        &last_active,
-    )
-    .await;
-
+pub(super) async fn no_response(client: &mut BufReader<LocalStream>) {
     assert!(
-        rx_other.try_recv().is_err(),
-        "orphan response not broadcast"
+        tokio::time::timeout(Duration::from_millis(50), client.fill_buf())
+            .await
+            .is_err()
     );
 }
 
-#[tokio::test]
-async fn uncorrelated_errors_do_not_consume_pending_requests() {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    request_map.lock().insert(
-        "10".into(),
-        pending_request("clientA", json!(99), Some("tools/call")),
-    );
-
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let mut rx_b = channel_client(&clients, "clientB");
-    let last_active = last_active(None);
-
-    for line in [
-        r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
-        r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Session not found"}}"#,
-        r#"{"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"}}"#,
-    ] {
-        route_response(line, &clients, &request_map, &empty_cache(), &last_active).await;
+async fn initialize(
+    fixture: &mut Fixture,
+    client: &mut BufReader<LocalStream>,
+    capabilities: Value,
+) -> io::Result<()> {
+    let cached = fixture.proxy.readiness().mcp_initialize_result_received;
+    send(
+        client.get_mut(),
+        json!({
+            "jsonrpc":"2.0","id":"init","method":"initialize","params":{"capabilities":capabilities}
+        }),
+    )
+    .await?;
+    if !cached {
+        let request = fixture.request().await?;
+        reply(
+            fixture,
+            json!({"jsonrpc":"2.0","id":request.get("id"),"result":{"capabilities":{}}}),
+        )
+        .await?;
     }
-
-    assert!(rx_a.try_recv().is_err(), "uncorrelated error not guessed");
-    assert!(rx_b.try_recv().is_err(), "malformed error not broadcast");
-    assert_eq!(request_map.lock().len(), 1, "pending request kept");
+    assert_eq!(read(client).await?.get("id"), Some(&json!("init")));
+    Ok(())
 }
 
 #[tokio::test]
-async fn empty_id_success_is_dropped_as_orphan() {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    request_map.lock().insert(
-        "10".into(),
-        pending_request("clientA", json!(99), Some("tools/call")),
-    );
-
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let last_active = last_active(None);
-
-    route_response(
-        r#"{"jsonrpc":"2.0","id":"","result":{"ok":true}}"#,
-        &clients,
-        &request_map,
-        &empty_cache(),
-        &last_active,
+async fn route_response_restores_ids_without_cross_wiring() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    let mut second = client(&mut fixture).await?;
+    send(
+        first.get_mut(),
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call"}),
     )
-    .await;
-
-    assert!(
-        rx_a.try_recv().is_err(),
-        "empty-id success not fallback routed"
+    .await?;
+    let first_request = fixture.request().await?;
+    send(
+        second.get_mut(),
+        json!({"jsonrpc":"2.0","id":"1","method":"tools/call"}),
+    )
+    .await?;
+    let second_request = fixture.request().await?;
+    assert_ne!(first_request.get("id"), second_request.get("id"));
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":second_request.get("id"),"result":"B"}),
+    )
+    .await?;
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":first_request.get("id"),"result":"A"}),
+    )
+    .await?;
+    assert_eq!(
+        read(&mut first).await?,
+        json!({"jsonrpc":"2.0","id":1,"result":"A"})
     );
-    assert_eq!(request_map.lock().len(), 1, "pending request kept");
+    assert_eq!(
+        read(&mut second).await?,
+        json!({"jsonrpc":"2.0","id":"1","result":"B"})
+    );
+    no_response(&mut first).await;
+    no_response(&mut second).await;
+    fixture.stop().await
 }
 
 #[tokio::test]
-async fn empty_id_error_without_pending_request_is_orphaned() {
-    let request_map: RequestMap = Arc::new(Mutex::new(HashMap::new()));
-    let clients: Arc<Mutex<HashMap<String, ClientSender>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut rx_a = channel_client(&clients, "clientA");
-    let last_active = last_active(None);
+async fn route_response_routes_server_request_to_single_client() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    let mut second = client(&mut fixture).await?;
+    initialize(&mut fixture, &mut first, json!({"sampling":{}})).await?;
+    initialize(&mut fixture, &mut second, json!({"sampling":{}})).await?;
+    let callback = json!({"jsonrpc":"2.0","id":"server-id","method":"sampling/createMessage"});
+    reply(&fixture, callback.clone()).await?;
+    assert_eq!(read(&mut first).await?, callback);
+    no_response(&mut second).await;
+    fixture.stop().await
+}
 
-    route_response(
-        r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
-        &clients,
-        &request_map,
-        &empty_cache(),
-        &last_active,
+async fn capable_callback(method: &str, capabilities: Value) -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    initialize(&mut fixture, &mut first, json!({})).await?;
+    let mut second = client(&mut fixture).await?;
+    initialize(&mut fixture, &mut second, capabilities).await?;
+    send(
+        first.get_mut(),
+        json!({"jsonrpc":"2.0","id":"active","method":"ping"}),
     )
-    .await;
+    .await?;
+    let active = fixture.request().await?;
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":active.get("id"),"result":{}}),
+    )
+    .await?;
+    read(&mut first).await?;
+    let callback = json!({"jsonrpc":"2.0","id":42,"method":method});
+    reply(&fixture, callback.clone()).await?;
+    assert_eq!(read(&mut second).await?, callback);
+    no_response(&mut first).await;
+    fixture.stop().await
+}
 
-    assert!(rx_a.try_recv().is_err(), "malformed error not broadcast");
+#[tokio::test]
+async fn sampling_server_request_routes_to_sampling_capable_client() -> io::Result<()> {
+    capable_callback("sampling/createMessage", json!({"sampling":{}})).await
+}
+
+#[tokio::test]
+async fn roots_server_request_routes_to_roots_capable_client() -> io::Result<()> {
+    capable_callback("roots/list", json!({"roots":{}})).await
+}
+
+#[tokio::test]
+async fn no_capable_client_sends_error_response_upstream() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    initialize(&mut fixture, &mut first, json!({})).await?;
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":44,"method":"sampling/createMessage"}),
+    )
+    .await?;
+    assert_eq!(
+        fixture.request().await?,
+        json!({
+            "jsonrpc":"2.0","id":44,"error":{
+                "code":-32001,"message":"no capable downstream client connected for sampling/createMessage"
+            }
+        })
+    );
+    no_response(&mut first).await;
+    assert!(fixture.requests.try_recv().is_err());
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn route_response_broadcasts_notifications() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    let mut second = client(&mut fixture).await?;
+    let notification = json!({"jsonrpc":"2.0","method":"notifications/progress"});
+    reply(&fixture, notification.clone()).await?;
+    assert_eq!(read(&mut first).await?, notification);
+    assert_eq!(read(&mut second).await?, notification);
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn route_response_drops_when_origin_client_gone() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut origin = client(&mut fixture).await?;
+    let mut other = client(&mut fixture).await?;
+    send(
+        origin.get_mut(),
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+    )
+    .await?;
+    let request = fixture.request().await?;
+    drop(origin);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while fixture.proxy.connection_count() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":request.get("id"),"result":{"tools":[]}}),
+    )
+    .await?;
+    no_response(&mut other).await;
+    send(
+        other.get_mut(),
+        json!({"jsonrpc":"2.0","id":"cached","method":"tools/list"}),
+    )
+    .await?;
+    assert_eq!(
+        read(&mut other).await?,
+        json!({"jsonrpc":"2.0","id":"cached","result":{"tools":[]}})
+    );
+    assert!(fixture.requests.try_recv().is_err());
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn uncorrelated_errors_do_not_consume_pending_requests() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    let mut second = client(&mut fixture).await?;
+    send(
+        first.get_mut(),
+        json!({"jsonrpc":"2.0","id":99,"method":"tools/call"}),
+    )
+    .await?;
+    let request = fixture.request().await?;
+    for error in [
+        json!({"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}),
+        json!({"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Session not found"}}),
+        json!({"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found"}}),
+    ] {
+        reply(&fixture, error).await?;
+    }
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":request.get("id"),"result":"still routable"}),
+    )
+    .await?;
+    assert_eq!(
+        read(&mut first).await?,
+        json!({"jsonrpc":"2.0","id":99,"result":"still routable"})
+    );
+    no_response(&mut second).await;
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn empty_id_success_is_dropped_as_orphan() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    send(
+        first.get_mut(),
+        json!({"jsonrpc":"2.0","id":99,"method":"tools/call"}),
+    )
+    .await?;
+    let request = fixture.request().await?;
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":"","result":{"ok":true}}),
+    )
+    .await?;
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":request.get("id"),"result":"correct"}),
+    )
+    .await?;
+    assert_eq!(
+        read(&mut first).await?,
+        json!({"jsonrpc":"2.0","id":99,"result":"correct"})
+    );
+    no_response(&mut first).await;
+    fixture.stop().await
+}
+
+#[tokio::test]
+async fn empty_id_error_without_pending_request_is_orphaned() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut first = client(&mut fixture).await?;
+    reply(
+        &fixture,
+        json!({"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}),
+    )
+    .await?;
+    no_response(&mut first).await;
+    assert!(fixture.proxy.readiness().upstream_transport_ready);
+    fixture.stop().await
 }

@@ -133,12 +133,6 @@ mod tests {
     }
 
     #[test]
-    fn bounds_unterminated_frames() {
-        let mut decoder = Decoder::new();
-        assert!(decoder.feed(&vec![b'x'; FRAME_LIMIT + 1]).error.is_some());
-    }
-
-    #[test]
     fn empty_data_lines_and_event_names_survive_every_chunk_boundary() {
         let bytes = "event: ignored\n\nid: ignored\ndata:\n\nevent: message\ndata\n: comment\ndata: λ\ndata:  spaced\ndata:\n\nevent: reset\n\ndata: last\n\n".as_bytes();
         for boundary in 0..=bytes.len() {

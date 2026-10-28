@@ -7,7 +7,6 @@ use anyhow::{Result, bail};
 pub(crate) struct Options {
     pub foreground: bool,
     pub json: bool,
-    pub log: bool,
     pub log_file: Option<PathBuf>,
     pub servers: BTreeSet<String>,
 }
@@ -23,18 +22,18 @@ fn parse_with_environment(
 ) -> Result<Options> {
     let mut options = Options {
         foreground: environment("MCPORTER_DAEMON_CHILD").as_deref() == Some("1"),
-        log: environment("MCPORTER_DAEMON_LOG").as_deref() == Some("1"),
         log_file: environment("MCPORTER_DAEMON_LOG_PATH")
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from),
         ..Options::default()
     };
+    let mut log = environment("MCPORTER_DAEMON_LOG").as_deref() == Some("1");
     let mut servers = environment("MCPORTER_DAEMON_LOG_SERVERS");
     while let Some(argument) = arguments.pop_front() {
         match argument.as_str() {
             "--json" => options.json = true,
             "--foreground" if matches!(command, "start" | "restart") => options.foreground = true,
-            "--log" if matches!(command, "start" | "restart") => options.log = true,
+            "--log" if matches!(command, "start" | "restart") => log = true,
             "--log-file" if matches!(command, "start" | "restart") => {
                 options.log_file = Some(PathBuf::from(crate::tool_arguments::value(
                     &mut arguments,
@@ -55,8 +54,8 @@ fn parse_with_environment(
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .collect();
-    options.log |= options.log_file.is_some() || !options.servers.is_empty();
-    if options.log && matches!(command, "start" | "restart") {
+    log |= options.log_file.is_some() || !options.servers.is_empty();
+    if log && matches!(command, "start" | "restart") {
         let selected = options
             .log_file
             .take()
@@ -96,16 +95,68 @@ mod tests {
         let options = parse_with_environment("start", arguments, |name| {
             (name == "MCPORTER_DAEMON_LOG_PATH").then(|| "ignored.log".to_owned())
         })?;
-        assert!(options.foreground && options.log && options.json);
+        assert!(options.foreground && options.json);
         assert_eq!(options.servers.len(), 2);
-        assert!(
-            options
-                .log_file
-                .is_some_and(|path| path.ends_with("fixture.log"))
+        assert_eq!(
+            options.log_file,
+            Some(std::env::current_dir()?.join("fixture.log"))
         );
         assert!(
             parse_with_environment("stop", ["--foreground".to_owned()].into(), |_| None).is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn log_switches_and_environment_resolve_to_log_paths() -> Result<()> {
+        let no_logging = parse_with_environment("start", VecDeque::new(), |_| None)?;
+        assert!(no_logging.log_file.is_none());
+
+        let default_path = crate::config::state_dir()?.join("logs").join("daemon.log");
+        let default_path = if default_path.is_absolute() {
+            default_path
+        } else {
+            std::env::current_dir()?.join(default_path)
+        };
+        let flag = parse_with_environment("start", ["--log".into()].into(), |_| None)?;
+        assert_eq!(flag.log_file.as_ref(), Some(&default_path));
+
+        let env_flag = parse_with_environment("restart", VecDeque::new(), |name| {
+            (name == "MCPORTER_DAEMON_LOG").then(|| "1".into())
+        })?;
+        assert_eq!(env_flag.log_file.as_ref(), Some(&default_path));
+
+        let server_only = parse_with_environment(
+            "start",
+            ["--log-servers".into(), "fixture".into()].into(),
+            |_| None,
+        )?;
+        assert_eq!(server_only.log_file.as_ref(), Some(&default_path));
+        assert!(server_only.servers.contains("fixture"));
+
+        let env_path = parse_with_environment("start", VecDeque::new(), |name| {
+            (name == "MCPORTER_DAEMON_LOG_PATH").then(|| "environment.log".into())
+        })?;
+        assert_eq!(
+            env_path.log_file,
+            Some(std::env::current_dir()?.join("environment.log"))
+        );
+
+        let env_servers = parse_with_environment(
+            "start",
+            ["--log-servers".into(), "explicit".into()].into(),
+            |name| match name {
+                "MCPORTER_DAEMON_LOG_SERVERS" => Some("environment".into()),
+                "MCPORTER_DAEMON_LOG_PATH" => Some("environment.log".into()),
+                _ => None,
+            },
+        )?;
+        assert_eq!(
+            env_servers.log_file,
+            Some(std::env::current_dir()?.join("environment.log"))
+        );
+        assert!(env_servers.servers.contains("explicit"));
+        assert!(!env_servers.servers.contains("environment"));
         Ok(())
     }
 }

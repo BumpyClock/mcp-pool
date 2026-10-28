@@ -61,7 +61,7 @@ async fn dispatch_with_capabilities(
         "server/discover" if modern_request => discover_result(only_server, supports_listen),
         "ping" => Ok(json!({})),
         "tools/list" => state
-            .list_tools(only_server, only_server.is_some())
+            .list_tools(only_server)
             .await
             .map(|tools| json!({"tools":tools})),
         "tools/call" => call_tool(state, &request.params, only_server).await,
@@ -109,50 +109,43 @@ pub(super) fn modern_protocol_version(message: &Value) -> Option<&str> {
 
 pub(super) fn listen_subscription(
     message: &Value,
-) -> Option<std::result::Result<ListenSubscription, Value>> {
-    if message.get("method").and_then(Value::as_str) != Some("subscriptions/listen") {
-        return None;
-    }
+) -> std::result::Result<ListenSubscription, Value> {
     let request = match parse_request(message.clone()) {
         Ok(request) => request,
-        Err((id, code, message)) => return Some(Err(error_response(id, code, message))),
+        Err((id, code, message)) => return Err(error_response(id, code, message)),
     };
     let Some(id) = request.id else {
-        return Some(Err(error_response(
+        return Err(error_response(
             Value::Null,
             -32600,
             "Subscription requests must include an id.",
-        )));
+        ));
     };
     let Some(params) = request.params.as_object() else {
-        return Some(Err(error_response(
-            id,
-            -32602,
-            "Invalid MCP bridge parameters.",
-        )));
+        return Err(error_response(id, -32602, "Invalid MCP bridge parameters."));
     };
     let Some(notifications) = params.get("notifications").and_then(Value::as_object) else {
-        return Some(Err(error_response(
+        return Err(error_response(
             id,
             -32602,
             "Invalid MCP notification filter.",
-        )));
+        ));
     };
     if notifications.values().any(|value| !value.is_boolean()) {
-        return Some(Err(error_response(
+        return Err(error_response(
             id,
             -32602,
             "Invalid MCP notification filter.",
-        )));
+        ));
     }
     let tools_list_changed = notifications
         .get("toolsListChanged")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    Some(Ok(ListenSubscription {
+    Ok(ListenSubscription {
         id,
         tools_list_changed,
-    }))
+    })
 }
 
 pub(super) fn subscription_acknowledgement(id: &Value, tools_list_changed: bool) -> Value {

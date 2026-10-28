@@ -46,15 +46,12 @@ pub(crate) async fn run(
     }
     let project = crate::config_paths::project_directory(root)?;
     let home = dirs::home_dir().context("Home directory unavailable")?;
-    let mut batch =
+    let batch =
         crate::config_import_sources::collect(&source, from.as_deref(), &project, &home, &names)?;
     for name in &names {
         if !batch.servers.contains_key(name) {
             bail!("Import source has no server named '{name}'");
         }
-    }
-    if !names.is_empty() {
-        batch.servers.retain(|name, _| names.contains(name));
     }
     for warning in &batch.warnings {
         crate::mcp_cli::context::warning(warning);

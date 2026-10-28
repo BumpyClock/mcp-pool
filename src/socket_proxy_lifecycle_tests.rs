@@ -186,10 +186,10 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
         .lock()
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
-    previous
-        .handshake_cache
-        .lock()
-        .store("initialize", serde_json::json!({"version":"old"}));
+    previous.handshake_cache.lock().complete(
+        CacheableMethod::Initialize,
+        &serde_json::json!({"result":{"version":"old"}}),
+    );
     previous.client_capabilities.lock().insert(
         "old".to_string(),
         ClientCapabilities {
@@ -220,7 +220,7 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
     next_setup
         .send(Ok(next_handle))
         .map_err(|_| io::Error::other("setup lost"))?;
-    assert!(restart.await.map_err(io::Error::other)??);
+    restart.await.map_err(io::Error::other)??;
     let current = proxy
         .generation
         .lock()
@@ -510,7 +510,7 @@ async fn pool_concurrent_start_is_idempotent_and_stop_waits_for_retirement() -> 
     shutdown.await.map_err(io::Error::other)?;
     assert!(!stop.is_finished());
     retired.send_replace(Some(Ok(())));
-    assert!(stop.await.map_err(io::Error::other)??);
+    stop.await.map_err(io::Error::other)??;
     assert_eq!(pool.get_status().server_count, 0);
     drop(responses);
     Ok(())

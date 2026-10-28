@@ -1,5 +1,4 @@
 use anyhow::{Result, bail};
-use serde_json::Value;
 
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 
@@ -164,7 +163,7 @@ fn is_keep_alive(server: &ConfiguredServer) -> bool {
     if disabled.matches(&candidates) {
         return false;
     }
-    if let Some(configured) = configured_lifecycle(&server.raw) {
+    if let Some(configured) = server.configured_lifecycle() {
         return configured;
     }
     if std::iter::once(server.definition.command.as_str())
@@ -182,20 +181,6 @@ fn is_keep_alive(server: &ConfiguredServer) -> bool {
             "chrome-devtools" | "mobile-mcp" | "playwright" | "cloudbase"
         )
     })
-}
-
-fn configured_lifecycle(raw: &Value) -> Option<bool> {
-    let lifecycle = raw.get("lifecycle")?;
-    match lifecycle {
-        Value::String(value) if value == "keep-alive" => Some(true),
-        Value::String(value) if value == "ephemeral" => Some(false),
-        Value::Object(_) => match lifecycle.get("mode").and_then(Value::as_str) {
-            Some("keep-alive") => Some(true),
-            Some("ephemeral") => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 fn default_keep_alive_name(server: &ConfiguredServer) -> Option<String> {

@@ -59,44 +59,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_is_tagged_with_op() {
-        let serialized = serde_json::to_string(&ControlRequest::Stop {
-            name: "echo".into(),
-        })
-        .unwrap();
-        assert!(serialized.contains("\"op\":\"stop\""), "{serialized}");
-        assert!(serialized.contains("\"name\":\"echo\""), "{serialized}");
-        let back: ControlRequest = serde_json::from_str(&serialized).unwrap();
-        assert!(matches!(back, ControlRequest::Stop { name } if name == "echo"));
-    }
-
-    #[test]
-    fn all_request_variants_round_trip() {
-        let serializations = [
-            serde_json::to_string(&ControlRequest::Stop { name: "a".into() }).unwrap(),
-            serde_json::to_string(&ControlRequest::Restart { name: "a".into() }).unwrap(),
-            serde_json::to_string(&ControlRequest::Status { name: None }).unwrap(),
-            serde_json::to_string(&ControlRequest::Status {
-                name: Some("a".into()),
-            })
-            .unwrap(),
-            serde_json::to_string(&ControlRequest::Shutdown).unwrap(),
-        ];
-        for serialized in serializations {
-            let _: ControlRequest = serde_json::from_str(&serialized).unwrap();
+    fn requests_use_the_lowercase_op_wire_tag() -> serde_json::Result<()> {
+        for (request, expected) in [
+            (
+                ControlRequest::Stop {
+                    name: "echo".into(),
+                },
+                serde_json::json!({"op":"stop","name":"echo"}),
+            ),
+            (
+                ControlRequest::Restart {
+                    name: "echo".into(),
+                },
+                serde_json::json!({"op":"restart","name":"echo"}),
+            ),
+            (
+                ControlRequest::Status { name: None },
+                serde_json::json!({"op":"status","name":null}),
+            ),
+            (
+                ControlRequest::Status {
+                    name: Some("echo".into()),
+                },
+                serde_json::json!({"op":"status","name":"echo"}),
+            ),
+            (
+                ControlRequest::Shutdown,
+                serde_json::json!({"op":"shutdown"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&request)?, expected);
+            let decoded: ControlRequest = serde_json::from_value(expected.clone())?;
+            assert_eq!(serde_json::to_value(&decoded)?, expected);
         }
-    }
-
-    #[test]
-    fn response_helpers() {
-        assert!(ControlResponse::ok().ok);
-        assert!(!ControlResponse::err("boom").ok);
-        assert_eq!(ControlResponse::err("boom").error.as_deref(), Some("boom"));
-        assert!(
-            ControlResponse::data(serde_json::json!({ "x": 1 }))
-                .data
-                .is_some()
-        );
+        Ok(())
     }
 
     #[test]

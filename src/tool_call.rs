@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use super::{artifacts, connect, persist_ad_hoc, print_outcome, server, stdin, tool_allowed};
-use crate::server_config::{ConfiguredServer, ServerConfiguration};
+use super::{artifacts, connect, persist_ad_hoc, print_outcome, server, stdin};
+use crate::server_config::ServerConfiguration;
 use crate::tool_arguments;
 
 #[path = "tool_resolution.rs"]
@@ -14,7 +14,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         .iter()
         .any(|argument| matches!(argument.as_str(), "--args" | "--params" | "--json"));
     let mut parsed = tool_arguments::call(arguments)?;
-    if parsed.stdin {
+    if parsed.inputs.has_stdin() {
         tool_arguments::merge_stdin(&mut parsed, &stdin().await?)?;
     }
     let selected = server(
@@ -30,6 +30,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     let mut tool = parsed.tool.clone();
     let mut discovery_fallback = None;
     let outcome: Result<Value> = async {
+        let filter = selected.tool_filter()?;
         let mut client = progress
             .wait(
                 "Connecting to MCP server",
@@ -44,7 +45,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
             && !has_real_tool(&tools, requested)
         {
             if has_explicit_json_input
-                || parsed.stdin
+                || parsed.inputs.has_stdin()
                 || !parsed.arguments.is_empty()
                 || !parsed.positionals.is_empty()
                 || !parsed.generic_flags.is_empty()
@@ -54,7 +55,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
             discovery_fallback = Some((parsed.timeout, parsed.no_oauth, parsed.output));
             return Ok(Value::Null);
         }
-        let resolved = select_tool(&selected, &tools, tool.as_deref())?;
+        let resolved = super::resolve_tool(&selected, &tools, tool.as_deref(), &filter)?;
         tool = Some(resolved.clone());
         let metadata = tools
             .iter()
@@ -81,7 +82,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     progress.finish();
     if let Some((timeout, no_oauth, output)) = discovery_fallback {
         outcome?;
-        crate::mcp_cli::discover_server(&selected, timeout, no_oauth, output).await?;
+        crate::tool_discovery::single_server(selected, timeout, no_oauth, output).await?;
         return Ok(());
     }
     let log_result = outcome.as_ref().ok().cloned();
@@ -99,14 +100,4 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         artifacts::tail_log(&result).await?;
     }
     rendered
-}
-
-pub(super) fn select_tool(
-    server: &ConfiguredServer,
-    tools: &[Value],
-    requested: Option<&str>,
-) -> Result<String> {
-    resolve_tool(&server.name, tools, requested, |name| {
-        tool_allowed(server, name)
-    })
 }

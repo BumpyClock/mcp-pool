@@ -10,21 +10,8 @@ pub(crate) fn pool_name(server: &ConfiguredServer, definition: &ServerDef) -> Re
     if let Some(object) = definition.as_object_mut() {
         object.remove("configuration_entry");
         if let Some(environment) = object.get_mut("env").and_then(Value::as_object_mut) {
-            let configured = server.raw.get("env").and_then(Value::as_object);
-            environment.retain(|name, _| {
-                configured.is_some_and(|keys| {
-                    keys.keys().any(|key| {
-                        #[cfg(windows)]
-                        {
-                            key.eq_ignore_ascii_case(name)
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            key == name
-                        }
-                    })
-                })
-            });
+            let configured = server.configured_environment();
+            environment.retain(|name, _| configured.contains(name));
             if environment.is_empty() {
                 object.remove("env");
             }
@@ -145,6 +132,40 @@ mod tests {
         assert_ne!(original, legacy);
         assert_ne!(original, modern);
         assert_ne!(legacy, modern);
+        Ok(())
+    }
+
+    #[test]
+    fn identity_hash_retains_only_configured_environment() -> Result<()> {
+        let mut server = ConfiguredServer {
+            name: "docs".to_owned(),
+            definition: ServerDef {
+                command: "node".to_owned(),
+                env: std::collections::BTreeMap::from([
+                    ("CONFIGURED".to_owned(), "one".to_owned()),
+                    ("AMBIENT".to_owned(), "inherited".to_owned()),
+                ]),
+                ..ServerDef::default()
+            },
+            raw: json!({"env":{"CONFIGURED":"one"}}),
+            source: std::path::PathBuf::from("fixture.json"),
+        };
+        let original = pool_name(&server, &server.definition)?;
+        assert!(original.ends_with("b28413122c238dfa317f44751655f974"));
+        let mut changed = server.definition.clone();
+        changed
+            .env
+            .insert("AMBIENT".to_owned(), "changed".to_owned());
+        assert_eq!(pool_name(&server, &changed)?, original);
+        changed
+            .env
+            .insert("CONFIGURED".to_owned(), "two".to_owned());
+        assert_ne!(pool_name(&server, &changed)?, original);
+        server.raw = json!({"env":{"configured":"one"}});
+        assert_eq!(
+            pool_name(&server, &server.definition)? == original,
+            cfg!(windows)
+        );
         Ok(())
     }
 }

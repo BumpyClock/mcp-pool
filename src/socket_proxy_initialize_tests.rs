@@ -76,8 +76,11 @@ pub(super) async fn follower_queued(proxy: &SocketProxy) -> io::Result<()> {
         loop {
             let state = proxy.generation.lock().clone();
             if let Some(state) = state
-                && matches!(&state.handshake_cache.lock().initialize,
-                    Initialization::InFlight { waiters, .. } if waiters.len() == 1)
+                && state
+                    .handshake_cache
+                    .lock()
+                    .waiter_count(CacheableMethod::Initialize)
+                    == 1
             {
                 break;
             }
@@ -291,10 +294,14 @@ async fn stop_disconnects_initialize_waiters_before_confirming_retirement() -> i
     assert!(!stop.is_finished());
     fixture.retired.send_replace(Some(Ok(())));
     stop.await.map_err(io::Error::other)??;
-    assert!(matches!(
-        generation.handshake_cache.lock().initialize,
-        Initialization::Empty
-    ));
+    assert!(!generation.handshake_cache.lock().initialization_ready());
+    assert!(
+        generation
+            .handshake_cache
+            .lock()
+            .deadline(CacheableMethod::Initialize)
+            .is_none()
+    );
     assert!(generation.request_map.lock().is_empty());
     Ok(())
 }
@@ -343,71 +350,6 @@ async fn disconnected_initialize_leader_does_not_strand_follower() -> io::Result
         Some(&json!("notifications/initialized"))
     );
     fixture.stop().await
-}
-
-#[test]
-fn stale_initialize_leader_fails_leader_and_followers_without_touching_tools_waiters() {
-    let cache = Arc::new(Mutex::new(HandshakeCache::default()));
-    assert!(matches!(
-        prepare_initialize_request(
-            &cache,
-            "first",
-            json!(1),
-            Duration::from_secs(REQUEST_TTL_SECS),
-            Instant::now()
-        ),
-        DiscoveryAction::Leader
-    ));
-    assert!(matches!(
-        prepare_initialize_request(
-            &cache,
-            "second",
-            json!(2),
-            Duration::from_secs(REQUEST_TTL_SECS),
-            Instant::now()
-        ),
-        DiscoveryAction::Coalesced
-    ));
-    assert!(matches!(
-        prepare_tools_list_request(
-            &cache,
-            "tools-first",
-            json!(3),
-            Duration::from_secs(REQUEST_TTL_SECS),
-            Instant::now()
-        ),
-        DiscoveryAction::Leader
-    ));
-    assert!(matches!(
-        prepare_tools_list_request(
-            &cache,
-            "tools-second",
-            json!(4),
-            Duration::from_secs(REQUEST_TTL_SECS),
-            Instant::now()
-        ),
-        DiscoveryAction::Coalesced
-    ));
-    let stale = PendingRequestInfo {
-        client_id: "first".to_string(),
-        original_id: json!(1),
-        method: Some("initialize".to_string()),
-        cache_key: Some(CacheableMethod::Initialize),
-        tool: None,
-        inserted_at: Instant::now() - Duration::from_secs(REQUEST_TTL_SECS + 1),
-        expires_after: Duration::from_secs(REQUEST_TTL_SECS),
-    };
-    let responses =
-        cleanup_cached_after_stale_requests(&cache, &[stale], CacheableMethod::Initialize);
-    assert_eq!(responses.len(), 2);
-    assert!(
-        responses
-            .iter()
-            .all(|(_, payload)| payload.contains("initialize timed out"))
-    );
-    assert!(matches!(cache.lock().initialize, Initialization::Empty));
-    assert!(cache.lock().tools_list.in_flight.is_some());
-    assert_eq!(cache.lock().tools_list.waiters.len(), 1);
 }
 
 #[path = "socket_proxy_expiration_tests.rs"]

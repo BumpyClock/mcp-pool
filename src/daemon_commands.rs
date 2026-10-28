@@ -1,16 +1,16 @@
 use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::control::{ControlRequest, ControlResponse};
+use crate::daemon_client::existing_control_request;
+use crate::daemon_client::ownership::{self, Selection};
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 use crate::tool_arguments::{AdHoc, value};
 
-#[path = "daemon_launch.rs"]
-pub(crate) mod launch;
 pub(crate) use crate::diagnostics::logging;
 #[path = "daemon_migration.rs"]
 mod migration;
@@ -143,73 +143,66 @@ pub(crate) async fn retire_pool_views(server: &ConfiguredServer) -> Result<()> {
             None
         },
     };
-    let Some(response) = direct(&ControlRequest::Status { name: None }).await? else {
+    retire_selection(&Selection::Credentials(&entry)).await
+}
+
+pub(crate) async fn retire_configuration(source: &std::path::Path, name: &str) -> Result<()> {
+    let source = crate::config_paths::absolute(source)?;
+    retire_selection(&Selection::Configuration {
+        source: &source,
+        name,
+    })
+    .await
+}
+
+async fn retire_selection(selection: &Selection<'_>) -> Result<()> {
+    retire_selection_with(selection, |request| async move {
+        existing_control_request(&request).await
+    })
+    .await
+}
+
+async fn retire_selection_with<Control, Response>(
+    selection: &Selection<'_>,
+    mut control: Control,
+) -> Result<()>
+where
+    Control: FnMut(ControlRequest) -> Response,
+    Response: std::future::Future<Output = Result<Option<ControlResponse>>>,
+{
+    let Some(response) = control(ControlRequest::Status { name: None }).await? else {
         return Ok(());
     };
-    let status = checked(response)?;
-    retire_matching(&status, &entry, |request| async move {
-        crate::daemon_client::control_request(&request).await
+    let status = ownership::status(&response)?;
+    retire_matching(&status, selection, |request| {
+        let response = control(request);
+        async move {
+            response.await?.context(
+                "Pool mutation blocked: daemon disappeared before confirming pool retirement",
+            )
+        }
     })
     .await
 }
 
 async fn retire_matching<F, Response>(
-    status: &Value,
-    entry: &crate::config::ConfigurationEntry,
+    status: &crate::types::PoolStatusResponse,
+    selection: &Selection<'_>,
     mut control: F,
 ) -> Result<()>
 where
     F: FnMut(ControlRequest) -> Response,
     Response: std::future::Future<Output = Result<ControlResponse>>,
 {
-    let active = status
-        .get("servers")
-        .and_then(Value::as_array)
-        .context("Daemon status omitted servers; pool mutation was not attempted")?;
-    for server in active {
-        let name = server
-            .get("name")
-            .and_then(Value::as_str)
-            .context("Daemon status server omitted its name")?;
-        let associated = match server.get("configuration_entry") {
-            None | Some(Value::Null) => None,
-            Some(value) => Some(
-                serde_json::from_value::<crate::config::ConfigurationEntry>(value.clone())
-                    .context("Daemon status has invalid configuration-entry ownership metadata")?,
-            ),
-        };
-        if associated.as_ref().is_some_and(|associated| {
-            associated.source == entry.source
-                && associated.name == entry.name
-                && entry.scope.is_some()
-                && associated.scope.is_none()
-        }) {
-            bail!(
-                "Pool mutation blocked: daemon lacks credential-scope ownership metadata; restart the daemon after upgrading"
-            );
-        }
-        // Vault URL bindings are per logical name, even across config sources.
-        if associated.as_ref().is_some_and(|associated| {
-            associated.name == entry.name
-                && ((associated.source == entry.source
-                    && entry
-                        .scope
-                        .as_ref()
-                        .is_none_or(|scope| associated.scope.as_ref() == Some(scope)))
-                    || entry
-                        .credential_store
-                        .as_ref()
-                        .is_some_and(|store| associated.credential_store.as_ref() == Some(store)))
-        }) {
-            if server.get("owned").and_then(Value::as_bool) != Some(true) {
+    for server in &status.servers {
+        let name = &server.name;
+        if selection.matches(server)? {
+            if !server.owned {
                 bail!(
                     "Pool mutation blocked: '{name}' is not a verified owned generation. Stop it through its owning runtime first."
                 );
             }
-            let response = control(ControlRequest::Stop {
-                name: name.to_owned(),
-            })
-            .await?;
+            let response = control(ControlRequest::Stop { name: name.clone() }).await?;
             if !response.ok {
                 bail!(
                     "Pool mutation blocked: {}",
@@ -238,10 +231,12 @@ pub async fn daemon(arguments: Vec<String>) -> Result<()> {
     let result = match command.as_str() {
         "status" => status().await?,
         "start" => {
-            if let Some(response) = direct(&ControlRequest::Status { name: None }).await? {
+            if let Some(response) =
+                existing_control_request(&ControlRequest::Status { name: None }).await?
+            {
                 running(checked(response)?)
             } else {
-                launch::start(&options).await?;
+                start(&options).await?;
                 status().await?
             }
         }
@@ -253,7 +248,7 @@ pub async fn daemon(arguments: Vec<String>) -> Result<()> {
             crate::diagnostics::log("daemon restart: retiring existing broker");
             stop().await?;
             crate::diagnostics::log("daemon restart: existing endpoint retired; starting broker");
-            launch::start(&options).await?;
+            start(&options).await?;
             crate::diagnostics::log("daemon restart: replacement ready");
             status().await?
         }
@@ -311,7 +306,7 @@ fn running(mut data: Value) -> Value {
 }
 
 async fn status() -> Result<Value> {
-    match direct(&ControlRequest::Status { name: None }).await? {
+    match existing_control_request(&ControlRequest::Status { name: None }).await? {
         Some(response) => Ok(running(checked(response)?)),
         None => Ok(json!({"running":false})),
     }
@@ -319,7 +314,7 @@ async fn status() -> Result<Value> {
 
 async fn stop() -> Result<()> {
     crate::diagnostics::log("daemon stop: requesting verified shutdown");
-    if let Some(response) = direct(&ControlRequest::Shutdown).await? {
+    if let Some(response) = existing_control_request(&ControlRequest::Shutdown).await? {
         checked(response)?;
     }
     crate::diagnostics::log("daemon stop: shutdown acknowledged; verifying endpoint disappearance");
@@ -327,17 +322,10 @@ async fn stop() -> Result<()> {
     loop {
         match crate::transport::connect(&crate::config::control_socket_path()).await {
             Ok(stream) => drop(stream),
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) =>
-            {
+            Err(error) if crate::daemon_client::endpoint_absent(&error) => {
                 return Ok(());
             }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    || (cfg!(windows) && error.raw_os_error() == Some(231)) => {}
+            Err(error) if crate::daemon_client::endpoint_busy(&error) => {}
             Err(error) => return Err(error).context("Verifying daemon endpoint retirement"),
         }
         if tokio::time::Instant::now() >= expires {
@@ -347,44 +335,47 @@ async fn stop() -> Result<()> {
     }
 }
 
-async fn direct(request: &ControlRequest) -> Result<Option<ControlResponse>> {
-    let path = crate::config::control_socket_path();
-    tokio::time::timeout(Duration::from_secs(15), async {
-        let stream = loop {
-            match crate::transport::connect(&path).await {
-                Ok(stream) => break stream,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    ) =>
-                {
-                    return Ok(None);
-                }
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        || (cfg!(windows) && error.raw_os_error() == Some(231)) =>
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await
-                }
-                Err(error) => return Err(error).context("Connecting to existing daemon"),
-            }
-        };
-        let mut stream = BufReader::new(stream);
-        let mut serialized = serde_json::to_vec(request)?;
-        serialized.push(b'\n');
-        stream.get_mut().write_all(&serialized).await?;
-        stream.get_mut().flush().await?;
-        let mut line = String::new();
-        if stream.read_line(&mut line).await? == 0 {
-            bail!("Daemon closed without confirming the operation");
+async fn start(options: &options::Options) -> Result<()> {
+    if options.foreground {
+        if let Some(path) = &options.log_file {
+            logging::configure(path.clone(), options.servers.clone())?;
         }
-        Ok(Some(
-            serde_json::from_str(&line).context("Invalid daemon control response")?,
-        ))
-    })
-    .await
-    .context("Daemon control deadline exceeded")?
+        return crate::daemon::serve().await;
+    }
+    let mut arguments: Vec<OsString> = ["daemon", "start", "--foreground"]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    if let Some(path) = &options.log_file {
+        arguments.push("--log-file".into());
+        arguments.push(path.as_os_str().to_owned());
+    }
+    if !options.servers.is_empty() {
+        arguments.push("--log-servers".into());
+        arguments.push(
+            options
+                .servers
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
+                .into(),
+        );
+    }
+    crate::daemon_client::launch::spawn_detached(&arguments)?;
+    let expires = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if existing_control_request(&ControlRequest::Status { name: None })
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= expires {
+            bail!("Daemon did not become ready within 10 seconds");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[cfg(test)]

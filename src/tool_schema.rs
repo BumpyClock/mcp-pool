@@ -60,22 +60,6 @@ pub fn hydrate(call: &mut Call, schema: &Value) -> Result<()> {
     }
     if let Some(properties) = properties {
         for (name, property) in properties {
-            let argument_name = if call.arguments.contains_key(name) {
-                name.clone()
-            } else {
-                crate::tool_output::kebab(name)
-            };
-            if argument_name != *name {
-                if let Some(value) = call.arguments.remove(&argument_name) {
-                    call.arguments.insert(name.clone(), value);
-                }
-                if let Some(value) = call.raw_values.remove(&argument_name) {
-                    call.raw_values.insert(name.clone(), value);
-                }
-                if call.literal_values.remove(&argument_name) {
-                    call.literal_values.insert(name.clone());
-                }
-            }
             let Some(argument) = call.arguments.get_mut(name) else {
                 continue;
             };

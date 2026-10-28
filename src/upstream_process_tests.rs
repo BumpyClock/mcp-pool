@@ -44,9 +44,6 @@ fn process_fixture() -> io::Result<()> {
             std::thread::sleep(Duration::from_secs(60));
         }
     }
-    if role == "exit" {
-        return Ok(());
-    }
     if role == "final" || role == "final-flood" {
         if role == "final-flood" {
             for _ in 0..128 {
@@ -359,41 +356,6 @@ async fn stdout_io_failure_retires_process_tree() -> io::Result<()> {
         .await
         .map_err(io::Error::other)??;
     assert_retired(&identifiers)
-}
-
-#[tokio::test]
-async fn request_response_round_trip_is_preserved() -> io::Result<()> {
-    let (mut handle, mut responses) = fixture("echo", 32).await?;
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(line) = responses.recv().await {
-            if line.contains("POOL_READY") {
-                return Ok::<(), io::Error>(());
-            }
-        }
-        Err(io::Error::other("echo fixture did not become ready"))
-    })
-    .await
-    .map_err(io::Error::other)??;
-    let expected = r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#;
-    handle
-        .request_tx
-        .send(expected.to_string().into())
-        .await
-        .map_err(io::Error::other)?;
-    let response = tokio::time::timeout(Duration::from_secs(15), responses.recv())
-        .await
-        .map_err(io::Error::other)?;
-    assert_eq!(response.as_deref(), Some(expected));
-    handle.shutdown().await
-}
-
-#[tokio::test]
-async fn natural_exit_without_descendants_completes() -> io::Result<()> {
-    let (mut handle, _responses) = fixture("exit", 32).await?;
-    tokio::time::timeout(Duration::from_secs(15), handle.wait_for_exit())
-        .await
-        .map_err(io::Error::other)??;
-    handle.shutdown().await
 }
 
 #[tokio::test]

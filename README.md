@@ -192,7 +192,7 @@ Arguments can use `key=value`, `key:value`, JSON through `--args`/`--params`, or
 property declaration order. Named `key=@FILE` values read a regular UTF-8 file
 as literal text, up to 16 MiB; `key=@@text` sends literal `@text`.
 Tool-option flags must match schema properties or their kebab-case spelling;
-unknown options are rejected.
+exact schema property names take precedence over aliases. Unknown options are rejected.
 Tool names resolve exactly first, then through a unique case-insensitive alias
 that ignores punctuation. For example, `list-pages` can select upstream
 `list_pages`. Ambiguous aliases fail; near-miss spellings only suggest a name and
@@ -685,9 +685,11 @@ that changes state.
 
 - `transport.rs` — unified local transport (Unix domain sockets / Windows named pipes)
 - `config.rs` — server definitions + paths (XDG-aware)
-- `server_config.rs` — selected JSONC config and resolved definitions
+- `server_config.rs` normalizes JSONC files and already-parsed documents.
+- `server_config_settings.rs` interprets borrowed settings without duplicating mutable config.
 - `mcp_cli.rs` / `tool_arguments.rs` / `tool_output.rs` / `tool_discovery.rs` — MCP command parsing, output, and discovery
-- `config_commands.rs` / `daemon_commands.rs` — JSON config operations, auth, vault, and daemon commands
+- `config_commands.rs` owns config mutations; `config_commands_input.rs` adapts CLI arguments.
+- `daemon_commands.rs` owns auth, vault, and daemon command orchestration.
 - `mcp_client.rs` / `mcp_client_wire.rs` — MCP requests through pooled local connections
 - `mcp_bridge.rs` / `mcp_bridge_*.rs` — keep-alive tool bridge over stdio or HTTP
 - `tool_filter.rs` — shared tool filtering for discovery, calls, and bridge exposure
@@ -695,9 +697,11 @@ that changes state.
 - `upstream.rs` — upstream ownership and confirmed shutdown contract
 - `upstream_stdio.rs` / `upstream_http.rs` — stdio and remote transport backends
 - `jsonrpc.rs` — JSON-RPC id translation (per-client ids rewritten to pool-unique ids)
-- `socket_proxy.rs` / `socket_proxy_*.rs` — lifecycle, client handling, routing, and discovery caching
+- `socket_proxy.rs` / `socket_proxy_*.rs` own generation lifecycle, client handling, and routing.
+- `mcp_session.rs` / `session_cache.rs` own shared-request transitions and cache state.
 - `pool.rs` — registry of pooled servers + socket discovery for daemon reattach
 - `control.rs` / `daemon.rs` — control protocol + long-lived daemon
-- `daemon_client.rs` — daemon control requests and pool startup
+- `daemon_client.rs` owns control exchange and launch mechanics with distinct connection policies.
+- `daemon_configuration_ownership.rs` selects pool views for native control and mutation retirement.
 - `proxy.rs` — per-agent stdio bridge to a pool socket (self-starts the upstream)
 - `cli.rs` / `cli_output.rs` / `main.rs` — subcommand dispatch and output

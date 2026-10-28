@@ -11,10 +11,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::{
-    AuthOptions, HttpAuth, checked_url, context, ensure_writable, files, protocol, read_snapshot,
-    setting, store, string,
+    AuthOptions, HttpAuth, checked_url, context_with_settings, ensure_writable, files, protocol,
+    read_snapshot, store, string,
 };
-use crate::server_config::ConfiguredServer;
+use crate::server_config::{ConfiguredServer, OAuthSettings};
 
 pub(super) async fn authorize(
     server: &ConfiguredServer,
@@ -48,7 +48,8 @@ where
     F: FnOnce(Url, Url) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let authentication = context(server)?;
+    let settings = server.oauth_settings();
+    let authentication = context_with_settings(server, &settings)?;
     ensure_writable(&authentication)?;
     let transaction = files::AsyncLocks::new(store::transaction_async(&authentication).await?);
     let snapshot = if options.reset {
@@ -67,7 +68,7 @@ where
     };
     let duration = Duration::from_millis(timeout_ms.unwrap_or(authentication.timeout_ms));
     let result = tokio::select! {
-        result = tokio::time::timeout(duration, exchange(server, &authentication, snapshot, observer)) => {
+        result = tokio::time::timeout(duration, exchange(server, &settings, &authentication, snapshot, observer)) => {
             result.map_err(|_| anyhow::anyhow!("OAuth authorization timed out; rerun explicit auth"))?
         }
         result = tokio::signal::ctrl_c() => {
@@ -81,6 +82,7 @@ where
 
 async fn exchange<F, Fut>(
     server: &ConfiguredServer,
+    settings: &OAuthSettings<'_>,
     authentication: &HttpAuth,
     snapshot: Value,
     observer: F,
@@ -103,8 +105,15 @@ where
     let issuer =
         string(metadata, "issuer").ok_or_else(|| anyhow::anyhow!("OAuth issuer missing"))?;
     let (listener, redirect) = listener(authentication, &snapshot).await?;
-    let client_info =
-        registration(server, authentication, &snapshot, &discovery, &redirect).await?;
+    let client_info = registration(
+        server,
+        settings,
+        authentication,
+        &snapshot,
+        &discovery,
+        &redirect,
+    )
+    .await?;
     let client = protocol::client(authentication, &client_info, &discovery)?.set_redirect_uri(
         RedirectUrl::new(redirect.to_string())
             .map_err(|_| anyhow::anyhow!("invalid OAuth redirect"))?,
@@ -210,6 +219,7 @@ async fn listener(authentication: &HttpAuth, snapshot: &Value) -> Result<(TcpLis
 
 async fn registration(
     server: &ConfiguredServer,
+    settings: &OAuthSettings<'_>,
     authentication: &HttpAuth,
     snapshot: &Value,
     discovery: &Value,
@@ -235,7 +245,7 @@ async fn registration(
             bail!("OAuth registered redirect differs; explicitly reset registration");
         }
         let mut info = info.clone();
-        configured_secret(server, authentication, &mut info)?;
+        configured_secret(server, settings, authentication, &mut info)?;
         return Ok(info);
     }
     if let Some(identifier) = authentication
@@ -259,10 +269,10 @@ async fn registration(
         }
         let mut info = json!({"client_id":identifier,"issuer":issuer,"redirect_uris":[redirect.as_str()],
             "token_endpoint_auth_method":authentication.token_auth_method.as_deref().unwrap_or(
-                if authentication.client_secret_env.is_some() || setting(&server.raw, "oauthClientSecret", "oauth_client_secret").is_some() {
+                if authentication.client_secret_env.is_some() || settings.client_secret.is_some() {
                     "client_secret_basic"
                 } else { "none" })});
-        configured_secret(server, authentication, &mut info)?;
+        configured_secret(server, settings, authentication, &mut info)?;
         return Ok(info);
     }
     let metadata = discovery
@@ -308,6 +318,7 @@ async fn registration(
 
 fn configured_secret(
     server: &ConfiguredServer,
+    settings: &OAuthSettings<'_>,
     authentication: &HttpAuth,
     info: &mut Value,
 ) -> Result<()> {
@@ -325,7 +336,7 @@ fn configured_secret(
                 })?,
         )
     } else {
-        setting(&server.raw, "oauthClientSecret", "oauth_client_secret").map(str::to_owned)
+        settings.client_secret.map(str::to_owned)
     };
     if let Some(secret) = secret
         && let Some(object) = info.as_object_mut()

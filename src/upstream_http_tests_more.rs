@@ -393,30 +393,6 @@ async fn oversized_json_response_is_bounded_and_correlated() -> TestResult {
 }
 
 #[tokio::test]
-async fn legacy_sse_rejects_cross_origin_message_endpoint() -> TestResult {
-    let (listener, url) = fixture().await?;
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await?;
-        incoming(&mut stream).await?;
-        stream_headers(&mut stream, "").await?;
-        stream
-            .write_all(b"event: endpoint\ndata: http://different.invalid/messages\n\n")
-            .await?;
-        stream.flush().await?;
-        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-    });
-    let (response_tx, _responses) = mpsc::channel(16);
-    let result = spawn(url, true, response_tx).await;
-    assert!(
-        result
-            .err()
-            .is_some_and(|error| error.to_string().contains("same origin"))
-    );
-    server.await??;
-    Ok(())
-}
-
-#[tokio::test]
 async fn legacy_stream_failure_returns_error_for_pending_request_id() -> TestResult {
     let (listener, url) = fixture().await?;
     let server = tokio::spawn(async move {

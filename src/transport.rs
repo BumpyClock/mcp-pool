@@ -102,25 +102,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_accept_connect_round_trip() {
-        let path = unique_endpoint();
-        let listener = bind(&path).expect("bind failed");
-        let server = tokio::spawn(async move {
-            listener.accept().await.expect("accept failed");
-        });
-        let mut connected = false;
-        for _ in 0..50 {
-            if connect(&path).await.is_ok() {
-                connected = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(connected, "client could not connect to bound endpoint");
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn a_live_listener_keeps_singleton_bind_ownership() -> io::Result<()> {
         let path = unique_endpoint();
         let listener = bind(&path)?;

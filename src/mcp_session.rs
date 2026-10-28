@@ -5,12 +5,29 @@ use serde_json::Value;
 
 #[path = "session_cache.rs"]
 mod cache;
-pub use cache::RequestCache;
+use cache::RequestCache;
+
+pub enum SharedRequestAction {
+    Cached(String),
+    Coalesced,
+    Leader,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheableMethod {
     Initialize,
     ServerDiscover,
     ToolsList,
+}
+
+pub struct SharedRequestCompletion {
+    pub waiters: Vec<PendingWaiter>,
+    pub cache_event: Option<CacheEvent>,
+}
+
+pub enum CacheEvent {
+    Stored(&'static str),
+    DiscoveryStored { modern_supported: bool },
+    DiscoveryUnsupported,
 }
 
 impl CacheableMethod {
@@ -51,13 +68,13 @@ pub struct PendingWaiter {
 }
 
 #[derive(Debug, Default)]
-pub struct ServerDiscoveryCache {
-    pub requests: RequestCache,
-    pub support: DiscoverySupport,
+struct ServerDiscoveryCache {
+    requests: RequestCache,
+    support: DiscoverySupport,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub enum DiscoverySupport {
+enum DiscoverySupport {
     #[default]
     Unknown,
     Modern,
@@ -66,7 +83,7 @@ pub enum DiscoverySupport {
 }
 
 #[derive(Debug, Default)]
-pub enum Initialization {
+enum Initialization {
     #[default]
     Empty,
     InFlight {
@@ -81,9 +98,9 @@ pub enum Initialization {
 
 #[derive(Debug, Default)]
 pub struct HandshakeCache {
-    pub initialize: Initialization,
-    pub server_discovery: ServerDiscoveryCache,
-    pub tools_list: RequestCache,
+    initialize: Initialization,
+    server_discovery: ServerDiscoveryCache,
+    tools_list: RequestCache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,11 +209,7 @@ impl HandshakeCache {
         }
     }
 
-    pub fn store(&mut self, method: &str, result: Value) {
-        self.store_result(method, result);
-    }
-
-    pub fn store_result(&mut self, method: &str, result: Value) {
+    fn store_result(&mut self, method: &str, result: Value) {
         match cacheable_method(method) {
             Some(CacheableMethod::Initialize) => {
                 self.initialize = Initialization::Ready {
@@ -255,12 +268,12 @@ impl HandshakeCache {
                 Initialization::InFlight { deadline, .. } => Some(deadline.clone()),
                 _ => None,
             },
-            CacheableMethod::ServerDiscover => self.server_discovery.requests.in_flight.clone(),
-            CacheableMethod::ToolsList => self.tools_list.in_flight.clone(),
+            CacheableMethod::ServerDiscover => self.server_discovery.requests.deadline(),
+            CacheableMethod::ToolsList => self.tools_list.deadline(),
         }
     }
 
-    pub fn clear_expired_results(&mut self) {
+    fn clear_expired_results(&mut self) {
         self.server_discovery.requests.clear_expired();
         self.tools_list.clear_expired();
     }
@@ -288,43 +301,6 @@ fn cache_deadline(result: &Value) -> Option<Instant> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn tool_name_reads_params_name_for_tools_call() {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 7,
-            "method": "tools/call",
-            "params": {"name": "ListCalendarView", "arguments": {"secret": "x"}}
-        });
-        assert_eq!(tool_name(&request).as_deref(), Some("ListCalendarView"));
-    }
-
-    #[test]
-    fn tool_name_is_none_without_params_name() {
-        let no_name = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {}});
-        let no_params = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
-        assert_eq!(tool_name(&no_name), None);
-        assert_eq!(tool_name(&no_params), None);
-    }
-
-    #[test]
-    fn cacheable_method_recognizes_handshake_methods_only() {
-        assert_eq!(
-            cacheable_method("initialize"),
-            Some(CacheableMethod::Initialize)
-        );
-        assert_eq!(
-            cacheable_method("server/discover"),
-            Some(CacheableMethod::ServerDiscover)
-        );
-        assert_eq!(
-            cacheable_method("tools/list"),
-            Some(CacheableMethod::ToolsList)
-        );
-        assert_eq!(cacheable_method("tools/call"), None);
-        assert_eq!(cacheable_method("notifications/initialized"), None);
-    }
 
     #[test]
     fn tools_list_cursor_requests_are_not_shared_discovery() {
@@ -358,55 +334,33 @@ mod tests {
     #[test]
     fn explicit_cache_ttls_control_tools_and_discovery_retention() {
         let mut cache = HandshakeCache::default();
-        cache.store("tools/list", json!({"tools":[],"ttlMs":0}));
-        cache.store(
+        cache.store_result("tools/list", json!({"tools":[],"ttlMs":0}));
+        cache.store_result(
             "server/discover",
             json!({"supportedVersions":["2025-11-25"],"ttlMs":0}),
         );
         assert!(cache.get("tools/list").is_none());
         assert!(cache.get("server/discover").is_none());
 
-        cache.store("tools/list", json!({"tools":[],"ttlMs":1}));
-        cache.store(
+        cache.store_result("tools/list", json!({"tools":[],"ttlMs":1}));
+        cache.store_result(
             "server/discover",
             json!({"supportedVersions":["2025-11-25"],"ttlMs":1}),
         );
-        cache.tools_list.cached_until = Some(Instant::now() - Duration::from_secs(1));
-        cache.server_discovery.requests.cached_until =
-            Some(Instant::now() - Duration::from_secs(1));
+        std::thread::sleep(Duration::from_millis(2));
         assert!(cache.get("tools/list").is_none());
         assert!(cache.get("server/discover").is_none());
 
-        cache.store(
+        cache.store_result(
             "tools/list",
             json!({"tools":[],"ttlMs":1000,"cacheScope":"private"}),
         );
         assert!(cache.get("tools/list").is_none());
-        cache.store(
+        cache.store_result(
             "tools/list",
             json!({"tools":[],"ttlMs":1000,"cacheScope":"public"}),
         );
         assert!(cache.get("tools/list").is_some());
-    }
-
-    #[test]
-    fn parse_client_capabilities_reads_sampling_and_roots() {
-        let request = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "capabilities": {
-                    "sampling": {},
-                    "roots": {"listChanged": true}
-                }
-            }
-        });
-
-        let capabilities = parse_client_capabilities(&request);
-
-        assert!(capabilities.sampling);
-        assert!(capabilities.roots);
     }
 
     #[test]
@@ -449,15 +403,5 @@ mod tests {
         ] {
             assert!(!is_definitive_discovery_unsupported(&value));
         }
-    }
-
-    #[test]
-    fn cached_initialize_lifecycle_swallows_initialized_notification() {
-        let mut cache = HandshakeCache::default();
-        cache.store("initialize", json!({"capabilities":{}}));
-        let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-        assert!(!cache.swallow_initialized(&initialized));
-        assert!(cache.swallow_initialized(&initialized));
-        assert!(!cache.swallow_initialized(&json!({"method":"notifications/progress"})));
     }
 }

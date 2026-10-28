@@ -1,18 +1,18 @@
 use super::*;
 
 pub(super) struct Generation {
-    pub request_tx: Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
-    pub clients: Arc<Mutex<HashMap<String, ClientSender>>>,
+    pub request_tx: Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
+    pub clients: Mutex<HashMap<String, ClientSender>>,
     pub request_map: RequestMap,
-    pub handshake_cache: HandshakeCacheRef,
-    pub client_capabilities: Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    pub last_active_client: Arc<Mutex<Option<String>>>,
-    pub id_allocator: Arc<IdAllocator>,
-    pub shutdown: Arc<AtomicBool>,
+    pub handshake_cache: Mutex<HandshakeCache>,
+    pub client_capabilities: Mutex<HashMap<String, ClientCapabilities>>,
+    pub last_active_client: Mutex<Option<String>>,
+    pub id_allocator: IdAllocator,
+    pub shutdown: AtomicBool,
     pub explicit_stop: AtomicBool,
-    pub shutdown_notify: Arc<Notify>,
-    pub upstream_ready: Arc<Notify>,
-    pub expiration_changed: Arc<Notify>,
+    pub shutdown_notify: Notify,
+    pub upstream_ready: Notify,
+    pub expiration_changed: Notify,
     pub startup: watch::Receiver<Completion>,
     startup_tx: watch::Sender<Completion>,
     pub completion: watch::Receiver<Completion>,
@@ -25,18 +25,18 @@ impl Generation {
         let (startup_tx, startup) = watch::channel(None);
         let (completion_tx, completion) = watch::channel(None);
         Self {
-            request_tx: Arc::new(Mutex::new(None)),
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            request_map: Arc::new(Mutex::new(HashMap::new())),
-            handshake_cache: Arc::new(Mutex::new(HandshakeCache::default())),
-            client_capabilities: Arc::new(Mutex::new(HashMap::new())),
-            last_active_client: Arc::new(Mutex::new(None)),
-            id_allocator: Arc::new(IdAllocator::new()),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            request_tx: Mutex::new(None),
+            clients: Mutex::new(HashMap::new()),
+            request_map: Mutex::new(HashMap::new()),
+            handshake_cache: Mutex::new(HandshakeCache::default()),
+            client_capabilities: Mutex::new(HashMap::new()),
+            last_active_client: Mutex::new(None),
+            id_allocator: IdAllocator::new(),
+            shutdown: AtomicBool::new(false),
             explicit_stop: AtomicBool::new(false),
-            shutdown_notify: Arc::new(Notify::new()),
-            upstream_ready: Arc::new(Notify::new()),
-            expiration_changed: Arc::new(Notify::new()),
+            shutdown_notify: Notify::new(),
+            upstream_ready: Notify::new(),
+            expiration_changed: Notify::new(),
             startup,
             startup_tx,
             completion,
@@ -66,8 +66,12 @@ impl Generation {
     fn clear(&self) {
         self.request_tx.lock().take();
         self.clients.lock().clear();
-        self.request_map.lock().clear();
-        *self.handshake_cache.lock() = HandshakeCache::default();
+        {
+            let mut requests = self.request_map.lock();
+            let mut cache = self.handshake_cache.lock();
+            requests.clear();
+            cache.clear_all();
+        }
         self.client_capabilities.lock().clear();
         *self.last_active_client.lock() = None;
     }
@@ -331,15 +335,7 @@ async fn accept_loop(
                     generation.clients.lock().insert(client_id.clone(), sender);
                     let state = generation.clone();
                     tasks.spawn(async move {
-                        handle_client(
-                            stream, client_id, state.request_tx.clone(),
-                            state.upstream_ready.clone(), state.id_allocator.clone(),
-                            state.request_map.clone(), state.handshake_cache.clone(),
-                            state.client_capabilities.clone(), state.last_active_client.clone(),
-                            state.clients.clone(), state.shutdown.clone(),
-                            state.shutdown_notify.clone(), state.expiration_changed.clone(),
-                            remote, shared_timeout, receiver,
-                        ).await;
+                        handle_client(stream, client_id, state, remote, shared_timeout, receiver).await;
                     });
                 }
                 Err(error) => {
@@ -379,30 +375,11 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
         if generation.shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let request_deadline = {
+        let deadline = {
             let requests = generation.request_map.lock();
             let cache = generation.handshake_cache.lock();
-            requests
-                .values()
-                .map(|pending| pending_expiration(pending, &cache))
-                .min()
+            cache.next_deadline(requests.values())
         };
-        let waiter_deadline = {
-            let cache = generation.handshake_cache.lock();
-            cache
-                .tools_list
-                .waiters
-                .iter()
-                .chain(cache.server_discovery.requests.waiters.iter())
-                .map(|waiter| {
-                    waiter
-                        .inserted_at
-                        .checked_add(waiter.expires_after)
-                        .unwrap_or_else(Instant::now)
-                })
-                .min()
-        };
-        let deadline = request_deadline.into_iter().chain(waiter_deadline).min();
         let wait_deadline = async {
             match deadline {
                 Some(deadline) => tokio::time::sleep_until(deadline.into()).await,

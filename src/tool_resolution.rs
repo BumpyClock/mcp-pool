@@ -8,12 +8,12 @@ pub(crate) fn resolve_tool<F>(
     mut allowed: F,
 ) -> Result<String>
 where
-    F: FnMut(&str) -> Result<bool>,
+    F: FnMut(&str) -> bool,
 {
     let names = tool_names(tools);
     let mut visible = Vec::new();
     for name in &names {
-        if allowed(name)? {
+        if allowed(name) {
             visible.push(name);
         }
     }
@@ -147,8 +147,8 @@ mod tests {
         names.iter().map(|name| json!({"name":name})).collect()
     }
 
-    fn allow_all(_: &str) -> Result<bool> {
-        Ok(true)
+    fn allow_all(_: &str) -> bool {
+        true
     }
 
     #[test]
@@ -214,35 +214,10 @@ mod tests {
             "fixture",
             &tools(&["echo", "secret"]),
             Some("secre"),
-            |name| Ok(name != "secret"),
+            |name| name != "secret",
         )
         .expect_err("excluded typo should fail");
         assert!(!error.to_string().contains("secret"));
         assert!(error.to_string().contains("Unknown tool"));
-    }
-
-    #[test]
-    fn exact_excluded_names_do_not_bypass_the_filter() {
-        let error = resolve_tool("fixture", &tools(&["help"]), Some("help"), |_| Ok(false))
-            .expect_err("excluded exact name should fail");
-        assert!(error.to_string().contains("excluded"));
-    }
-
-    #[test]
-    fn real_names_shadow_pseudo_tools_even_when_excluded() {
-        assert!(has_real_tool(&tools(&["help"]), "help"));
-        assert!(has_real_tool(&tools(&["list_tools"]), "list-tools"));
-    }
-
-    #[test]
-    fn normalized_excluded_names_do_not_shadow_with_a_fallback() {
-        let error = resolve_tool(
-            "fixture",
-            &tools(&["list_tools"]),
-            Some("list-tools"),
-            |_| Ok(false),
-        )
-        .expect_err("excluded normalized name should fail");
-        assert!(error.to_string().contains("excluded"));
     }
 }

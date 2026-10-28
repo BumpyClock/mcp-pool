@@ -22,6 +22,10 @@ pub(crate) fn is_server_entry(entry: &serde_json::Map<String, Value>) -> bool {
 mod values;
 pub(crate) use values::{command_tokens, existing_command_path};
 
+#[path = "server_config_settings.rs"]
+mod settings;
+pub(crate) use settings::OAuthSettings;
+
 #[cfg(test)]
 #[path = "configuration_reader_tests.rs"]
 mod tests;
@@ -38,7 +42,7 @@ pub struct ServerConfiguration {
 pub struct ConfiguredServer {
     pub name: String,
     pub definition: ServerDef,
-    /// Original entry for OAuth metadata. May contain secrets; do not log this value.
+    /// Original entry for settings, persistence, and output. May contain secrets.
     pub raw: Value,
     pub source: PathBuf,
 }
@@ -145,7 +149,7 @@ fn legacy_imports(document: &Value) -> Result<&[Value]> {
 
 pub(crate) fn load_at(path: Option<PathBuf>, root: Option<&Path>) -> Result<ServerConfiguration> {
     if let Some(source) = crate::config_paths::explicit(path)? {
-        let mut configuration = read(&source, false)?;
+        let mut configuration = parse_document(&source, &read_raw(&source, false)?)?;
         set_credential_scope(
             &mut configuration,
             source.parent().context("Config has no parent")?,
@@ -171,11 +175,11 @@ pub(crate) fn load_at(path: Option<PathBuf>, root: Option<&Path>) -> Result<Serv
             .context("Home config needs an mcpServers object")?;
         inherited.retain(|name, _| !local.contains_key(name));
     }
-    let mut configuration = parse_config(&home, &serde_json::to_string(&home_document)?)?;
+    let mut configuration = parse_document(&home, &home_document)?;
     if project != home {
-        let local = parse_config(
+        let local = parse_document(
             &project,
-            &serde_json::to_string(&project_document.context("Project config missing")?)?,
+            &project_document.context("Project config missing")?,
         )?;
         configuration.servers.extend(local.servers);
         configuration.warnings.extend(local.warnings);
@@ -200,13 +204,6 @@ fn set_credential_scope(configuration: &mut ServerConfiguration, directory: &Pat
     }
 }
 
-fn read(source: &Path, optional: bool) -> Result<ServerConfiguration> {
-    parse_config(
-        source,
-        &serde_json::to_string(&read_raw(source, optional)?)?,
-    )
-}
-
 fn read_raw(source: &Path, optional: bool) -> Result<Value> {
     let contents = match std::fs::read_to_string(source) {
         Ok(contents) => contents,
@@ -224,17 +221,21 @@ fn read_raw(source: &Path, optional: bool) -> Result<Value> {
 /// Parses JSONC without connecting to servers or changing user files.
 /// Relative command paths and cwd resolve from source; absent cwd uses its directory.
 /// Stdio definitions carry the caller's environment, overlaid by configured values.
+#[cfg(test)]
 pub fn parse_config(source: &Path, contents: &str) -> Result<ServerConfiguration> {
     parse_with_environment(
         source,
         contents,
-        &|name| match std::env::var(name) {
-            Ok(value) => Ok(Some(value)),
-            Err(std::env::VarError::NotPresent) => Ok(None),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                bail!("environment variable '{name}' is not valid Unicode")
-            }
-        },
+        &values::environment_variable,
+        &values::caller_environment,
+    )
+}
+
+pub(crate) fn parse_document(source: &Path, document: &Value) -> Result<ServerConfiguration> {
+    normalize_document(
+        absolute_source(source)?,
+        document,
+        &values::environment_variable,
         &values::caller_environment,
     )
 }
@@ -249,6 +250,7 @@ fn absolute_source(source: &Path) -> Result<PathBuf> {
 }
 
 /// Omits parser details from errors because they can contain credentials.
+#[cfg(test)]
 fn parse_with_environment(
     source: &Path,
     contents: &str,
@@ -257,6 +259,15 @@ fn parse_with_environment(
 ) -> Result<ServerConfiguration> {
     let source = absolute_source(source)?;
     let raw = parse_json(&source, contents)?;
+    normalize_document(source, &raw, environment, caller_environment)
+}
+
+fn normalize_document(
+    source: PathBuf,
+    raw: &Value,
+    environment: &impl Fn(&str) -> Result<Option<String>>,
+    caller_environment: &impl Fn() -> Result<BTreeMap<String, String>>,
+) -> Result<ServerConfiguration> {
     let object = raw
         .as_object()
         .ok_or_else(|| anyhow!("MCP config {} must be an object", source.display()))?;
@@ -266,7 +277,7 @@ fn parse_with_environment(
         .ok_or_else(|| anyhow!("MCP config {} needs an mcpServers object", source.display()))?;
     let mut warnings = Vec::new();
     let imports =
-        legacy_imports(&raw).map_err(|error| anyhow!("MCP config {} {error}", source.display()))?;
+        legacy_imports(raw).map_err(|error| anyhow!("MCP config {} {error}", source.display()))?;
     if !imports.is_empty() {
         warnings.push(format!(
                     "Ignoring {} legacy import(s) in {}; run `mcp-pool import SOURCE` to copy server definitions explicitly.",
@@ -359,13 +370,7 @@ fn normalize(
             definition
                 .env
                 .iter()
-                .find(|(configured, _)| {
-                    if cfg!(windows) {
-                        configured.eq_ignore_ascii_case(name)
-                    } else {
-                        configured.as_str() == name
-                    }
-                })
+                .find(|(configured, _)| settings::environment_names_match(configured, name))
                 .map_or_else(|| environment(name), |(_, value)| Ok(Some(value.clone())))
         };
         let expand = |value: &str| values::expand_environment(value, &effective_environment);
@@ -459,7 +464,7 @@ fn normalize(
     definition.env.retain(|name, _| {
         !configured_environment
             .keys()
-            .any(|configured| name.eq_ignore_ascii_case(configured))
+            .any(|configured| settings::environment_names_match(configured, name))
     });
     definition.env.extend(configured_environment);
     definition.clear_env = true;

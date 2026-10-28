@@ -224,7 +224,7 @@ async fn definitive_legacy_disconnect_allows_same_proxy_restart_without_replay()
     .await??;
     assert!(proxy.readiness().retirement_error.is_none());
     timeout(Duration::from_secs(2), replay_check).await??;
-    assert!(proxy.restart().await?);
+    proxy.restart().await?;
     let mut second = crate::transport::connect(&path).await?;
     second
         .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":\"after\",\"method\":\"tools/list\"}\n")

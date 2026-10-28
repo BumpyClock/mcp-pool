@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::config::ServerDef;
-use crate::server_config::ConfiguredServer;
+use crate::server_config::{ConfiguredServer, OAuthSettings};
 
 #[cfg(test)]
 #[path = "oauth_authorization_tests.rs"]
@@ -110,10 +110,12 @@ pub(crate) fn identity_definition(server: &ConfiguredServer) -> Result<ServerDef
     let mut definition = server.definition.clone();
     definition.auth = None;
     if definition.is_remote() {
-        let authentication = read_context(server)?;
+        let settings = server.oauth_settings();
+        let authentication = read_context(server, &settings)?;
         let snapshot = store::read(&authentication)?;
-        let configured =
-            string(&server.raw, "auth").is_some_and(|method| method.eq_ignore_ascii_case("oauth"));
+        let configured = settings
+            .auth
+            .is_some_and(|method| method.eq_ignore_ascii_case("oauth"));
         if let Some(entry) = definition.configuration_entry.as_mut() {
             entry.credential_store = Some(authentication.storage_identity()?);
         }
@@ -138,11 +140,6 @@ pub async fn authorization_header(authentication: &HttpAuth) -> Result<Option<St
             .to_owned()
     };
     Ok(Some(format!("Bearer {access_token}")))
-}
-
-#[cfg(test)]
-pub async fn authorize(server: &ConfiguredServer, options: AuthOptions) -> Result<Value> {
-    authorize_with_timeout(server, options, None).await
 }
 
 pub async fn authorize_with_timeout(
@@ -214,7 +211,7 @@ pub fn vault_clear(server: &ConfiguredServer) -> Result<()> {
 }
 
 pub fn credential_status(server: &ConfiguredServer) -> Result<Value> {
-    let authentication = read_context(server)?;
+    let authentication = read_context(server, &server.oauth_settings())?;
     let snapshot = store::read(&authentication)?;
     let binding_valid = store::validate_binding(&authentication, &snapshot).is_ok();
     let tokens = snapshot.get("tokens");
@@ -231,6 +228,13 @@ pub fn credential_status(server: &ConfiguredServer) -> Result<Value> {
 }
 
 pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
+    context_with_settings(server, &server.oauth_settings())
+}
+
+fn context_with_settings(
+    server: &ConfiguredServer,
+    settings: &OAuthSettings<'_>,
+) -> Result<HttpAuth> {
     let definition = &server.definition;
     let vault_root = definition
         .credential_scope
@@ -265,7 +269,7 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
     };
     let serialized = serde_json::to_string(&identity)?;
     let identity_key = format!("{}|{}", server.name, files::digest(&serialized));
-    let token_cache_directory = setting(&server.raw, "tokenCacheDir", "token_cache_dir");
+    let token_cache_directory = settings.token_cache_directory;
     let mut directory_stores = Vec::new();
     if let Some(directory) = token_cache_directory {
         let path = if directory == "~" {
@@ -297,33 +301,13 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
         directory_stores,
         identity_key,
         directory_primary: token_cache_directory.is_some(),
-        client_name: setting(&server.raw, "clientName", "client_name")
-            .unwrap_or("mcp-pool")
-            .to_owned(),
-        client_id: setting(&server.raw, "oauthClientId", "oauth_client_id").map(str::to_owned),
-        client_secret_env: setting(
-            &server.raw,
-            "oauthClientSecretEnv",
-            "oauth_client_secret_env",
-        )
-        .map(str::to_owned),
-        token_auth_method: setting(
-            &server.raw,
-            "oauthTokenEndpointAuthMethod",
-            "oauth_token_endpoint_auth_method",
-        )
-        .map(str::to_owned),
-        redirect_url: setting(&server.raw, "oauthRedirectUrl", "oauth_redirect_url")
-            .map(str::to_owned),
-        client_metadata_url: setting(
-            &server.raw,
-            "oauthClientMetadataUrl",
-            "oauth_client_metadata_url",
-        )
-        .map(str::to_owned),
-        scope: setting(&server.raw, "oauthRequestedScope", "oauth_requested_scope")
-            .or_else(|| setting(&server.raw, "oauthScope", "oauth_scope"))
-            .map(str::to_owned),
+        client_name: settings.client_name.unwrap_or("mcp-pool").to_owned(),
+        client_id: settings.client_id.map(str::to_owned),
+        client_secret_env: settings.client_secret_env.map(str::to_owned),
+        token_auth_method: settings.token_auth_method.map(str::to_owned),
+        redirect_url: settings.redirect_url.map(str::to_owned),
+        client_metadata_url: settings.client_metadata_url.map(str::to_owned),
+        scope: settings.scope.map(str::to_owned),
         timeout_ms: definition
             .timeout_ms
             .unwrap_or(300_000)
@@ -337,8 +321,8 @@ pub(crate) fn context(server: &ConfiguredServer) -> Result<HttpAuth> {
     })
 }
 
-fn read_context(server: &ConfiguredServer) -> Result<HttpAuth> {
-    let primary = context(server)?;
+fn read_context(server: &ConfiguredServer, settings: &OAuthSettings<'_>) -> Result<HttpAuth> {
+    let primary = context_with_settings(server, settings)?;
     if server.definition.credential_scope.is_none()
         || primary.directory_primary
         || store::present(&primary)?
@@ -353,10 +337,6 @@ fn read_context(server: &ConfiguredServer) -> Result<HttpAuth> {
     fallback.vault_path = home.join("credentials.json");
     fallback.directory_stores.clear();
     Ok(fallback)
-}
-
-pub(crate) fn setting<'a>(value: &'a Value, camel: &str, snake: &str) -> Option<&'a str> {
-    string(value, camel).or_else(|| string(value, snake))
 }
 
 pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {

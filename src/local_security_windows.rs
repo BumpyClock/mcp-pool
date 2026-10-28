@@ -47,18 +47,19 @@ pub(crate) fn create_named_pipe(name: &str, first_instance: bool) -> io::Result<
 }
 
 pub(crate) fn connect_named_pipe(path: &Path) -> io::Result<NamedPipeClient> {
-    let name = validate_pipe_name(path.to_str().ok_or_else(|| {
+    let name = path.to_str().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "named pipe path is not valid Unicode",
         )
-    })?)?;
-    let client = tokio::net::windows::named_pipe::ClientOptions::new().open(&name)?;
+    })?;
+    validate_pipe_name(name)?;
+    let client = tokio::net::windows::named_pipe::ClientOptions::new().open(name)?;
     verify_named_pipe_server(&client)?;
     Ok(client)
 }
 
-fn validate_pipe_name(name: &str) -> io::Result<String> {
+fn validate_pipe_name(name: &str) -> io::Result<()> {
     let prefix = r"\\.\pipe\";
     let Some(remainder) = name
         .get(..prefix.len())
@@ -76,7 +77,7 @@ fn validate_pipe_name(name: &str) -> io::Result<String> {
             "named pipe path must contain one local pipe name",
         ));
     }
-    Ok(name.to_owned())
+    Ok(())
 }
 
 fn verify_named_pipe_server(client: &NamedPipeClient) -> io::Result<()> {

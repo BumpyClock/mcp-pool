@@ -2,6 +2,16 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+pub(super) fn environment_variable(name: &str) -> Result<Option<String>> {
+    match std::env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            bail!("environment variable '{name}' is not valid Unicode")
+        }
+    }
+}
+
 pub(super) fn caller_environment() -> Result<std::collections::BTreeMap<String, String>> {
     environment_from_os(std::env::vars_os())
 }

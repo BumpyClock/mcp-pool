@@ -40,21 +40,13 @@ pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
                 object.insert(key.to_owned(), value.clone());
             }
         }
-        if let Some(environment) = server
-            .raw
-            .get("env")
-            .and_then(Value::as_object)
-            .filter(|environment| !environment.is_empty())
-        {
-            object.insert(
-                "env".to_owned(),
-                Value::Object(
-                    environment
-                        .keys()
-                        .map(|key| (key.clone(), json!("[redacted]")))
-                        .collect(),
-                ),
-            );
+        let environment = server.configured_environment();
+        let environment: serde_json::Map<String, Value> = environment
+            .keys()
+            .map(|key| (key.to_owned(), json!("[redacted]")))
+            .collect();
+        if !environment.is_empty() {
+            object.insert("env".to_owned(), Value::Object(environment));
         }
         if definition.is_remote() {
             object.insert(
