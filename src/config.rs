@@ -16,6 +16,7 @@ pub fn state_dir() -> io::Result<PathBuf> {
     Ok(base.join("mcp-pool"))
 }
 
+#[cfg(unix)]
 pub fn run_dir() -> io::Result<PathBuf> {
     Ok(state_dir()?.join("run"))
 }

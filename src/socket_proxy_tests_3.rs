@@ -135,7 +135,9 @@ fn stale_tools_list_leader_clears_in_flight_and_drains_waiters() {
 #[test]
 fn failed_tools_list_leader_fans_out_without_caching_error() {
     let cache = empty_cache();
-    cache.lock().store("tools/list", json!({"tools":["old"]}));
+    cache
+        .lock()
+        .store_result("tools/list", json!({"tools":["old"]}));
     cache.lock().invalidate_tools_list();
     cache.lock().tools_list.in_flight =
         Some(crate::request_deadline::SharedDeadline::new(Instant::now()));

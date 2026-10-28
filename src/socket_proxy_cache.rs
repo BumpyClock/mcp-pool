@@ -92,7 +92,7 @@ pub(super) fn complete_initialize_response(
     if value.get("error").is_none()
         && let Some(result) = value.get("result")
     {
-        cache.store("initialize", result.clone());
+        cache.store_result("initialize", result.clone());
         diagnostics::log("pool_cache_stored method=initialize");
     }
     fan_out_response(value, leader, waiters, "initialize")

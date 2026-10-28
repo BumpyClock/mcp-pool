@@ -41,14 +41,6 @@ impl Drop for Guard {
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn write_mutation(
-    path: &Path,
-    mutate: impl FnOnce(&mut Value) -> Result<()>,
-) -> Result<()> {
-    write_checked_mutation(path, mutate, |_| async { Ok(()) }).await
-}
-
 pub(crate) async fn write_checked_mutation<F, Before>(
     path: &Path,
     mutate: impl FnOnce(&mut Value) -> Result<()>,
@@ -196,13 +188,17 @@ mod tests {
                     json!({"mcpServers":{"fixture":{"command":"echo"}},"imports":imports})
                         .to_string();
                 std::fs::write(&path, &original)?;
-                let denied = write_mutation(&path, |document| {
-                    document
-                        .as_object_mut()
-                        .context("object")?
-                        .insert("custom".into(), json!(4));
-                    Ok(())
-                })
+                let denied = write_checked_mutation(
+                    &path,
+                    |document| {
+                        document
+                            .as_object_mut()
+                            .context("object")?
+                            .insert("custom".into(), json!(4));
+                        Ok(())
+                    },
+                    |_| async { Ok(()) },
+                )
                 .await;
                 assert!(denied.is_err(), "Malformed config must not be committed");
                 assert_eq!(std::fs::read_to_string(&path)?, original);

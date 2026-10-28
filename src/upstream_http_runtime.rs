@@ -28,10 +28,7 @@ pub(super) async fn run(
                     while workers.join_next().await.is_some() {}
                     return Ok(());
                 };
-                let request = match Request::parse(line.clone()).and_then(|mut request| {
-                    request.establish_budget(options)?;
-                    Ok(request)
-                }) {
+                let request = match Request::parse(line.clone(), options) {
                     Ok(request) => request,
                     Err(error) => {
                         let value = serde_json::from_str::<Value>(&line).ok();
@@ -58,7 +55,7 @@ pub(super) async fn run(
                             ).await;
                         });
                         if let Some(request) = establishment.await.map_err(|_| "HTTP initialization worker stopped")? {
-                            let handle = match legacy::spawn(client.clone(), url.clone(), response_tx.clone(), options.clone(), request.budget.clone()).await {
+                            let handle = match legacy::spawn(client.clone(), url.clone(), response_tx.clone(), options.clone(), Some(request.budget.clone())).await {
                                 Ok(handle) => handle,
                                 Err(_) => {
                                     send_error(&response_tx, request.identifier.as_ref(), "Legacy SSE fallback setup failed; initialize was not replayed").await;

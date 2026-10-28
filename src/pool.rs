@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+#[cfg(any(unix, test))]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+#[cfg(any(unix, test))]
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,7 +88,7 @@ impl Pool {
         proxy.start().await
     }
 
-    pub async fn stop_server(&self, name: &str) -> std::io::Result<bool> {
+    pub async fn stop_server(&self, name: &str) -> std::io::Result<()> {
         let _gate = self.shutdown_gate.read().await;
         let starting = self.proxies.read().get(name).cloned();
         if let Some(starting) = starting {
@@ -101,13 +104,11 @@ impl Pool {
         if let Some(proxy) = proxy {
             proxy.stop().await?;
             self.proxies.write().remove(name);
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        Ok(())
     }
 
-    pub async fn restart(&self, name: &str) -> std::io::Result<bool> {
+    pub async fn restart(&self, name: &str) -> std::io::Result<()> {
         let _gate = self.shutdown_gate.read().await;
         let operation = self.operation(name);
         let _operation = operation.lock().await;
@@ -118,13 +119,9 @@ impl Pool {
             let proxies = self.proxies.read();
             match proxies.get(name).cloned() {
                 Some(proxy) => proxy,
-                None => return Ok(false),
+                None => return Ok(()),
             }
         };
-
-        if !proxy.is_owned() {
-            return Ok(false);
-        }
 
         proxy.restart().await
     }
@@ -167,11 +164,8 @@ impl Pool {
 
     /// Registers live Unix sockets without taking upstream ownership.
     /// Windows named pipes cannot be enumerated.
+    #[cfg(unix)]
     pub fn discover_existing_sockets(&self) -> usize {
-        if cfg!(windows) {
-            return 0;
-        }
-
         let run_dir = match crate::config::run_dir() {
             Ok(dir) => dir,
             Err(_) => return 0,
@@ -216,6 +210,11 @@ impl Pool {
         }
 
         discovered
+    }
+
+    #[cfg(windows)]
+    pub fn discover_existing_sockets(&self) -> usize {
+        0
     }
 
     pub fn get_status(&self) -> PoolStatusResponse {
@@ -273,19 +272,12 @@ pub fn upstream_spec_from_def(def: &ServerDef) -> UpstreamSpec {
     }
 }
 
+#[cfg(unix)]
 pub fn socket_alive(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        std::os::unix::net::UnixStream::connect(path).is_ok()
-    }
-    #[cfg(windows)]
-    {
-        tokio::net::windows::named_pipe::ClientOptions::new()
-            .open(path.to_string_lossy().as_ref())
-            .is_ok()
-    }
+    std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
+#[cfg(any(unix, test))]
 pub fn socket_name_from_path(path: &Path) -> Option<String> {
     let file_name = path.file_name()?.to_string_lossy();
     file_name
@@ -316,6 +308,37 @@ mod options_tests {
                 "{filename}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn missing_and_borrowed_lifecycle_operations_remain_noops() -> std::io::Result<()> {
+        let pool = Pool::new();
+        pool.stop_server("missing").await?;
+        pool.restart("missing").await?;
+        assert_eq!(pool.get_status().server_count, 0);
+
+        pool.insert_test_proxy(
+            "borrowed",
+            Arc::new(SocketProxy::new(
+                "borrowed".into(),
+                "borrowed-endpoint".into(),
+                upstream_spec_from_def(&ServerDef::default()),
+                false,
+                None,
+            )),
+        );
+        pool.restart("borrowed").await?;
+        let status = pool.get_status();
+        let server = status
+            .servers
+            .first()
+            .ok_or_else(|| std::io::Error::other("missing borrowed server"))?;
+        assert_eq!(server.status, crate::types::ServerStatus::Running);
+        assert!(!server.owned);
+        assert_eq!(server.socket_path, "borrowed-endpoint");
+        pool.stop_server("borrowed").await?;
+        assert_eq!(pool.get_status().server_count, 0);
+        Ok(())
     }
 
     #[test]

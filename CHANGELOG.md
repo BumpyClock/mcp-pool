@@ -56,6 +56,8 @@
 
 ### Fixed
 
+- Tool arguments preserve exact schema property names when another property's
+  kebab-case alias has the same spelling.
 - Single-server discovery now matches mcporter's default exit status. Failures
   remain visible in the report; `--exit-code` and `--quiet` return a failure
   status for health checks. Unknown tool selectors still fail, and quiet

@@ -57,6 +57,7 @@ impl From<String> for UpstreamRequest {
     }
 }
 
+#[cfg(test)]
 impl From<&str> for UpstreamRequest {
     fn from(line: &str) -> Self {
         line.to_string().into()

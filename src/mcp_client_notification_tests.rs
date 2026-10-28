@@ -98,20 +98,6 @@ async fn listener_rejects_partial_eof_and_invalid_frames() -> Result<()> {
 }
 
 #[tokio::test]
-async fn cancelled_listener_read_retires_connection() -> Result<()> {
-    let (mut client, _server) = fixture(Duration::from_secs(1)).await?;
-    tokio::select! {
-        result = client.wait_for_notification() => {
-            anyhow::bail!("listener unexpectedly completed: {result:?}");
-        }
-        () = tokio::time::sleep(Duration::from_millis(20)) => {}
-    }
-    assert!(client.is_closed());
-    assert!(client.request("ping", json!({})).await.is_err());
-    Ok(())
-}
-
-#[tokio::test]
 async fn caller_deadline_bounds_listener_even_with_callback_traffic() -> Result<()> {
     let (mut client, mut server) = fixture(Duration::from_secs(1)).await?;
     let server_work = async {
@@ -182,5 +168,6 @@ async fn caller_cancellation_retires_unbounded_listener_socket() -> Result<()> {
     let mut frame = String::new();
     assert_eq!(server.read_line(&mut frame).await?, 0);
     assert!(client.wait_for_notification().await.is_err());
+    assert!(client.request("ping", json!({})).await.is_err());
     Ok(())
 }

@@ -22,8 +22,6 @@ pub(crate) async fn persist(server: &ConfiguredServer, options: &AdHoc) -> Resul
     let path = destination(path)?;
     let name = server.name.clone();
     let entry = persisted_entry(server);
-    let source = path.clone();
-    let previous_name = name.clone();
     crate::config_commands::write::write_checked_mutation(
         &path,
         move |document| {
@@ -43,9 +41,7 @@ pub(crate) async fn persist(server: &ConfiguredServer, options: &AdHoc) -> Resul
             servers.insert(name, entry);
             Ok(())
         },
-        move |document| async move {
-            crate::config_commands::retire_previous(&source, &document, &previous_name).await
-        },
+        |_| async { Ok(()) },
     )
     .await?;
     eprintln!("[mcp-pool] Saved ad-hoc server to {}", path.display());

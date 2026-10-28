@@ -256,14 +256,13 @@ impl SocketProxy {
         Ok(())
     }
 
-    pub async fn restart(self: &Arc<Self>) -> io::Result<bool> {
+    pub async fn restart(self: &Arc<Self>) -> io::Result<()> {
         if !self.owned {
-            return Ok(false);
+            return Ok(());
         }
         let _operation = self.operation.lock().await;
         self.stop_locked().await?;
-        self.start_locked().await?;
-        Ok(true)
+        self.start_locked().await
     }
 
     async fn recover(self: &Arc<Self>, previous: Arc<Generation>) {

@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use super::test_support::{Fixture, Mock};
 use super::{
-    AuthOptions, authorization_header, authorize, context, credential_status, files, flow, prepare,
-    store, vault_clear, vault_set,
+    AuthOptions, authorization_header, authorize_with_timeout, context, credential_status, files,
+    flow, prepare, store, vault_clear, vault_set,
 };
 
 #[tokio::test]
@@ -22,13 +22,14 @@ async fn cached_credentials_reuse_without_discovery_or_login() -> Result<()> {
     assert!(
         authorization_header(&authentication).await?.as_deref() == Some("Bearer synthetic-current")
     );
-    let response = authorize(
+    let response = authorize_with_timeout(
         &fixture.server,
         AuthOptions {
             reset: false,
             no_browser: true,
             json: true,
         },
+        None,
     )
     .await?;
     assert!(response.get("reused") == Some(&json!(true)));
@@ -85,13 +86,14 @@ async fn read_only_validation_reuses_valid_tokens_and_blocks_all_writes() -> Res
     );
     assert!(vault_clear(&fixture.server).is_err());
     assert!(
-        authorize(
+        authorize_with_timeout(
             &fixture.server,
             AuthOptions {
                 reset: false,
                 no_browser: true,
                 json: true
-            }
+            },
+            None,
         )
         .await
         .is_err()

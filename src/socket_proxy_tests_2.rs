@@ -80,8 +80,10 @@ async fn uncorrelated_session_error_preserves_caches_and_generation() {
     let cache = empty_cache();
     cache
         .lock()
-        .store("initialize", json!({"capabilities": {}}));
-    cache.lock().store("tools/list", json!({"tools":["t1"]}));
+        .store_result("initialize", json!({"capabilities": {}}));
+    cache
+        .lock()
+        .store_result("tools/list", json!({"tools":["t1"]}));
 
     let mut recovery_rx = route_response(
         r#"{"jsonrpc":"2.0","id":"","error":{"code":-32001,"message":"Session not found"}}"#,
@@ -111,7 +113,7 @@ async fn non_session_error_does_not_signal_recovery() {
     let cache = empty_cache();
     cache
         .lock()
-        .store("initialize", json!({"capabilities": {}}));
+        .store_result("initialize", json!({"capabilities": {}}));
 
     let mut recovery_rx = route_response(
         r#"{"jsonrpc":"2.0","id":10,"error":{"code":-32001,"message":"rate limited"}}"#,
@@ -270,8 +272,12 @@ async fn tools_list_cache_invalidated_on_list_changed() {
     let last_active = last_active(None);
 
     let cache = empty_cache();
-    cache.lock().store("tools/list", json!({"tools":["t1"]}));
-    cache.lock().store("initialize", json!({"capabilities":{}}));
+    cache
+        .lock()
+        .store_result("tools/list", json!({"tools":["t1"]}));
+    cache
+        .lock()
+        .store_result("initialize", json!({"capabilities":{}}));
 
     route_response(
         r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
@@ -300,7 +306,7 @@ fn cached_response_restored_with_new_client_id() {
     let cache = Arc::new(Mutex::new(HandshakeCache::default()));
     cache
         .lock()
-        .store("tools/list", json!({"tools":["t1","t2"]}));
+        .store_result("tools/list", json!({"tools":["t1","t2"]}));
 
     let result = cache.lock().get("tools/list").expect("tools/list cached");
     let line = build_success_response(json!(99), result);

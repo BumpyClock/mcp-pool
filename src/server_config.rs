@@ -145,7 +145,7 @@ fn legacy_imports(document: &Value) -> Result<&[Value]> {
 
 pub(crate) fn load_at(path: Option<PathBuf>, root: Option<&Path>) -> Result<ServerConfiguration> {
     if let Some(source) = crate::config_paths::explicit(path)? {
-        let mut configuration = read(&source, false)?;
+        let mut configuration = read(&source)?;
         set_credential_scope(
             &mut configuration,
             source.parent().context("Config has no parent")?,
@@ -200,11 +200,8 @@ fn set_credential_scope(configuration: &mut ServerConfiguration, directory: &Pat
     }
 }
 
-fn read(source: &Path, optional: bool) -> Result<ServerConfiguration> {
-    parse_config(
-        source,
-        &serde_json::to_string(&read_raw(source, optional)?)?,
-    )
+fn read(source: &Path) -> Result<ServerConfiguration> {
+    parse_config(source, &serde_json::to_string(&read_raw(source, false)?)?)
 }
 
 fn read_raw(source: &Path, optional: bool) -> Result<Value> {

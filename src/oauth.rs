@@ -140,11 +140,6 @@ pub async fn authorization_header(authentication: &HttpAuth) -> Result<Option<St
     Ok(Some(format!("Bearer {access_token}")))
 }
 
-#[cfg(test)]
-pub async fn authorize(server: &ConfiguredServer, options: AuthOptions) -> Result<Value> {
-    authorize_with_timeout(server, options, None).await
-}
-
 pub async fn authorize_with_timeout(
     server: &ConfiguredServer,
     options: AuthOptions,

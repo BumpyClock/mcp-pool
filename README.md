@@ -192,7 +192,7 @@ Arguments can use `key=value`, `key:value`, JSON through `--args`/`--params`, or
 property declaration order. Named `key=@FILE` values read a regular UTF-8 file
 as literal text, up to 16 MiB; `key=@@text` sends literal `@text`.
 Tool-option flags must match schema properties or their kebab-case spelling;
-unknown options are rejected.
+exact schema property names take precedence over aliases. Unknown options are rejected.
 Tool names resolve exactly first, then through a unique case-insensitive alias
 that ignores punctuation. For example, `list-pages` can select upstream
 `list_pages`. Ambiguous aliases fail; near-miss spellings only suggest a name and

@@ -14,9 +14,6 @@ pub(super) async fn start(options: &Options) -> Result<()> {
         .into_iter()
         .map(OsString::from)
         .collect();
-    if options.log {
-        arguments.push("--log".into());
-    }
     if let Some(path) = &options.log_file {
         arguments.push("--log-file".into());
         arguments.push(path.as_os_str().to_owned());

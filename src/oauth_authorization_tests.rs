@@ -218,13 +218,14 @@ async fn explicit_stdio_helper_is_owned_and_success_is_verified() -> Result<()> 
     let mut fixture = Fixture::new("https://synthetic.invalid/mcp")?;
     fixture.server.definition.url.clear();
     configure_stdio_helper(&mut fixture, "success");
-    let response = super::authorize(
+    let response = super::authorize_with_timeout(
         &fixture.server,
         AuthOptions {
             reset: false,
             no_browser: true,
             json: true,
         },
+        None,
     )
     .await?;
     assert!(response.get("status") == Some(&json!("helper_completed")));
@@ -238,13 +239,14 @@ async fn failed_and_timed_out_stdio_helpers_do_not_report_authorization_success(
     fixture.server.definition.timeout_ms = Some(1000);
     for mode in ["failure", "timeout"] {
         configure_stdio_helper(&mut fixture, mode);
-        let result = super::authorize(
+        let result = super::authorize_with_timeout(
             &fixture.server,
             AuthOptions {
                 reset: false,
                 no_browser: true,
                 json: true,
             },
+            None,
         )
         .await;
         assert!(
@@ -378,13 +380,14 @@ async fn cached_reads_reject_resource_binding_before_reuse_or_refresh() -> Resul
     let errors = [
         super::prepare(&fixture.server, false).await.err(),
         authorization_header(&authentication).await.err(),
-        super::authorize(
+        super::authorize_with_timeout(
             &fixture.server,
             AuthOptions {
                 reset: false,
                 no_browser: true,
                 json: true,
             },
+            None,
         )
         .await
         .err(),

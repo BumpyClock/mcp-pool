@@ -192,10 +192,6 @@ impl HandshakeCache {
         }
     }
 
-    pub fn store(&mut self, method: &str, result: Value) {
-        self.store_result(method, result);
-    }
-
     pub fn store_result(&mut self, method: &str, result: Value) {
         match cacheable_method(method) {
             Some(CacheableMethod::Initialize) => {
@@ -358,16 +354,16 @@ mod tests {
     #[test]
     fn explicit_cache_ttls_control_tools_and_discovery_retention() {
         let mut cache = HandshakeCache::default();
-        cache.store("tools/list", json!({"tools":[],"ttlMs":0}));
-        cache.store(
+        cache.store_result("tools/list", json!({"tools":[],"ttlMs":0}));
+        cache.store_result(
             "server/discover",
             json!({"supportedVersions":["2025-11-25"],"ttlMs":0}),
         );
         assert!(cache.get("tools/list").is_none());
         assert!(cache.get("server/discover").is_none());
 
-        cache.store("tools/list", json!({"tools":[],"ttlMs":1}));
-        cache.store(
+        cache.store_result("tools/list", json!({"tools":[],"ttlMs":1}));
+        cache.store_result(
             "server/discover",
             json!({"supportedVersions":["2025-11-25"],"ttlMs":1}),
         );
@@ -377,12 +373,12 @@ mod tests {
         assert!(cache.get("tools/list").is_none());
         assert!(cache.get("server/discover").is_none());
 
-        cache.store(
+        cache.store_result(
             "tools/list",
             json!({"tools":[],"ttlMs":1000,"cacheScope":"private"}),
         );
         assert!(cache.get("tools/list").is_none());
-        cache.store(
+        cache.store_result(
             "tools/list",
             json!({"tools":[],"ttlMs":1000,"cacheScope":"public"}),
         );
@@ -454,7 +450,7 @@ mod tests {
     #[test]
     fn cached_initialize_lifecycle_swallows_initialized_notification() {
         let mut cache = HandshakeCache::default();
-        cache.store("initialize", json!({"capabilities":{}}));
+        cache.store_result("initialize", json!({"capabilities":{}}));
         let initialized = json!({"jsonrpc":"2.0","method":"notifications/initialized"});
         assert!(!cache.swallow_initialized(&initialized));
         assert!(cache.swallow_initialized(&initialized));

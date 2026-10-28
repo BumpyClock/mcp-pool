@@ -37,9 +37,13 @@ struct Flags {
 
 struct Discovery {
     server: ConfiguredServer,
-    tools: Vec<Value>,
     duration: u64,
-    error: Option<String>,
+    outcome: Result<DiscoveryData, String>,
+}
+
+struct DiscoveryData {
+    tools: Vec<Value>,
+    filter: crate::tool_filter::ToolFilter,
     connection_info: Option<crate::mcp_protocol::ConnectionInfo>,
 }
 
@@ -173,126 +177,137 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     for (_, discovered) in completed {
         let Discovery {
             server,
-            mut tools,
             duration,
-            error,
-            connection_info,
+            outcome,
         } = discovered;
         let mut entry = base(&server, duration);
-        if let Some(info) = &connection_info
-            && let Some(object) = entry.as_object_mut()
-            && let Value::Object(metadata) = serde_json::to_value(info)?
-        {
-            object.extend(metadata);
-        }
-        if let Some(error) = error {
-            failure = true;
-            attach_error(&mut entry, &server.name, &error);
-        } else {
-            tools.sort_by(|left, right| {
-                left.get("name")
-                    .and_then(Value::as_str)
-                    .cmp(&right.get("name").and_then(Value::as_str))
-            });
-            tools.dedup_by(|left, right| left.get("name") == right.get("name"));
-            if let Some(tool) = &selected_tool {
-                match crate::mcp_cli::resolve_tool(&server, &tools, tool) {
-                    Ok(resolved) => tools.retain(|entry| {
-                        entry.get("name").and_then(Value::as_str) == Some(resolved.as_str())
-                    }),
-                    Err(error) => {
-                        failure = true;
-                        tool_selection_failed = true;
-                        tools.clear();
-                        attach_error(
-                            &mut entry,
-                            &server.name,
-                            &crate::mcp_cli::safe_error(&server, &error),
-                        );
-                    }
-                }
+        match outcome {
+            Err(error) => {
+                failure = true;
+                attach_error(&mut entry, &server.name, &error);
             }
-            let rendered_tools: Vec<Value> = tools
-                .iter()
-                .map(|tool| {
-                    let mut metadata = serde_json::Map::new();
-                    for key in ["name", "description"] {
-                        if let Some(value) = tool.get(key) {
-                            metadata.insert(key.to_owned(), value.clone());
+            Ok(DiscoveryData {
+                mut tools,
+                filter,
+                connection_info,
+            }) => {
+                if let Some(info) = &connection_info
+                    && let Some(object) = entry.as_object_mut()
+                    && let Value::Object(metadata) = serde_json::to_value(info)?
+                {
+                    object.extend(metadata);
+                }
+                tools.sort_by(|left, right| {
+                    left.get("name")
+                        .and_then(Value::as_str)
+                        .cmp(&right.get("name").and_then(Value::as_str))
+                });
+                tools.dedup_by(|left, right| left.get("name") == right.get("name"));
+                if let Some(tool) = &selected_tool {
+                    match crate::mcp_cli::resolve_tool(&server, &tools, Some(tool), &filter) {
+                        Ok(resolved) => tools.retain(|entry| {
+                            entry.get("name").and_then(Value::as_str) == Some(resolved.as_str())
+                        }),
+                        Err(error) => {
+                            failure = true;
+                            tool_selection_failed = true;
+                            tools.clear();
+                            attach_error(
+                                &mut entry,
+                                &server.name,
+                                &crate::mcp_cli::safe_error(&server, &error),
+                            );
                         }
                     }
-                    if detailed || flags.schema {
-                        for key in ["inputSchema", "outputSchema"] {
+                } else {
+                    tools.retain(|tool| {
+                        tool.get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| filter.permits(name))
+                    });
+                }
+                let rendered_tools: Vec<Value> = tools
+                    .iter()
+                    .map(|tool| {
+                        let mut metadata = serde_json::Map::new();
+                        for key in ["name", "description"] {
                             if let Some(value) = tool.get(key) {
                                 metadata.insert(key.to_owned(), value.clone());
                             }
                         }
-                    }
+                        if detailed || flags.schema {
+                            for key in ["inputSchema", "outputSchema"] {
+                                if let Some(value) = tool.get(key) {
+                                    metadata.insert(key.to_owned(), value.clone());
+                                }
+                            }
+                        }
+                        if detailed {
+                            metadata.insert(
+                                "options".to_owned(),
+                                json!(crate::tool_output::options(tool)),
+                            );
+                        }
+                        Value::Object(metadata)
+                    })
+                    .collect();
+                if let Some(object) = entry.as_object_mut() {
+                    object.insert("tools".to_owned(), json!(rendered_tools));
+                }
+                if !flags.json && !flags.quiet {
                     if detailed {
-                        metadata.insert(
-                            "options".to_owned(),
-                            json!(crate::tool_output::options(tool)),
-                        );
-                    }
-                    Value::Object(metadata)
-                })
-                .collect();
-            if let Some(object) = entry.as_object_mut() {
-                object.insert("tools".to_owned(), json!(rendered_tools));
-            }
-            if !flags.json && !flags.quiet {
-                if detailed {
-                    if server.definition.description.is_empty() {
-                        println!("{}", style.heading(&server.name));
-                    } else {
-                        println!(
-                            "{} - {}",
-                            style.heading(&server.name),
-                            style.muted(&server.definition.description)
-                        );
-                    }
-                    println!();
-                    if let Some(instructions) = connection_info
-                        .as_ref()
-                        .and_then(|info| info.instructions.as_deref())
-                        .filter(|instructions| !instructions.is_empty())
-                    {
-                        println!("{}\n", style.muted(instructions));
-                    }
-                    let mut optional_hidden = false;
-                    for tool in &tools {
-                        if flags.brief {
-                            println!("  {}", style.brief(tool));
+                        if server.definition.description.is_empty() {
+                            println!("{}", style.heading(&server.name));
                         } else {
-                            let documentation = style.render(tool, flags.all);
-                            optional_hidden |= documentation.hidden_parameters;
-                            println!("{}", documentation.text);
+                            println!(
+                                "{} - {}",
+                                style.heading(&server.name),
+                                style.muted(&server.definition.description)
+                            );
                         }
-                        if flags.schema
-                            && let Some(schema) = tool.get("inputSchema")
+                        println!();
+                        if let Some(instructions) = connection_info
+                            .as_ref()
+                            .and_then(|info| info.instructions.as_deref())
+                            .filter(|instructions| !instructions.is_empty())
                         {
-                            println!("{}", serde_json::to_string_pretty(schema)?);
+                            println!("{}\n", style.muted(instructions));
                         }
+                        let mut optional_hidden = false;
+                        for tool in &tools {
+                            if flags.brief {
+                                println!("  {}", style.brief(tool));
+                            } else {
+                                let documentation = style.render(tool, flags.all);
+                                optional_hidden |= documentation.hidden_parameters;
+                                println!("{}", documentation.text);
+                            }
+                            if flags.schema
+                                && let Some(schema) = tool.get("inputSchema")
+                            {
+                                println!("{}", serde_json::to_string_pretty(schema)?);
+                            }
+                        }
+                        if !flags.brief
+                            && let Some(tool) = tools.first()
+                        {
+                            println!("  {}", style.heading("Examples:"));
+                            println!("    {}\n", style.example(&server.name, tool));
+                        }
+                        if optional_hidden {
+                            println!("{}\n", style.muted("  Optional parameters hidden; run with --all-parameters to view all fields."));
+                        }
+                        println!(
+                            "{}",
+                            style.muted(&format!(
+                                "  {} tools · {duration}ms · {}",
+                                tools.len(),
+                                display_transport(&server)
+                            ))
+                        );
+                    } else {
+                        println!("{} ({} tools; {duration}ms)", server.name, tools.len());
                     }
-                    if !flags.brief
-                        && let Some(tool) = tools.first()
-                    {
-                        println!("  {}", style.heading("Examples:"));
-                        println!("    {}\n", style.example(&server.name, tool));
-                    }
-                    if optional_hidden {
-                        println!("{}\n", style.muted("  Optional parameters hidden; run with --all-parameters to view all fields."));
-                    }
-                    println!(
-                        "{}",
-                        style.muted(&format!(
-                            "  {} tools · {duration}ms · {}",
-                            tools.len(),
-                            display_transport(&server)
-                        ))
-                    );
-                } else {
-                    println!("{} ({} tools; {duration}ms)", server.name, tools.len());
                 }
             }
         }
@@ -358,50 +373,26 @@ async fn discover(server: ConfiguredServer, timeout: Option<u64>, no_oauth: bool
     );
     let duration = Duration::from_millis(timeout);
     let outcome = tokio::time::timeout(duration, async {
+        let filter = crate::mcp_cli::tool_filter(&server)?;
         let mut client = crate::mcp_cli::connect(&server, Some(timeout), no_oauth).await?;
         let tools = client.list_tools().await?;
-        crate::mcp_cli::tool_allowed(&server, "")?;
-        Ok::<_, anyhow::Error>((
-            tools
-                .into_iter()
-                .filter(|tool| {
-                    tool.get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| {
-                            crate::mcp_cli::tool_allowed(&server, name).unwrap_or(false)
-                        })
-                })
-                .collect(),
-            client.connection_info().cloned(),
-        ))
+        Ok::<_, anyhow::Error>(DiscoveryData {
+            tools,
+            filter,
+            connection_info: client.connection_info().cloned(),
+        })
     })
     .await;
     let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    match outcome {
-        Ok(Ok((tools, connection_info))) => Discovery {
-            server,
-            tools,
-            duration,
-            error: None,
-            connection_info,
-        },
-        Ok(Err(error)) => {
-            let message = crate::mcp_cli::safe_error(&server, &error);
-            Discovery {
-                server,
-                tools: Vec::new(),
-                duration,
-                error: Some(message),
-                connection_info: None,
-            }
-        }
-        Err(_) => Discovery {
-            server,
-            tools: Vec::new(),
-            duration,
-            error: Some("Server discovery timed out".to_owned()),
-            connection_info: None,
-        },
+    let outcome = match outcome {
+        Ok(Ok(data)) => Ok(data),
+        Ok(Err(error)) => Err(crate::mcp_cli::safe_error(&server, &error)),
+        Err(_) => Err("Server discovery timed out".to_owned()),
+    };
+    Discovery {
+        server,
+        duration,
+        outcome,
     }
 }
 
@@ -475,6 +466,25 @@ mod tests {
         assert!(parsed.quiet && parsed.exit_code);
         assert!(parse(vec!["--brief".into(), "--json".into()]).is_err());
         assert!(parse(vec!["--timeout".into(), "0".into()]).is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_filters_fail_before_connecting() -> Result<()> {
+        let server = ConfiguredServer {
+            name: "fixture".to_owned(),
+            definition: crate::config::ServerDef::default(),
+            raw: json!({"allowedTools":[],"blockedTools":[]}),
+            source: std::path::PathBuf::from("fixture.json"),
+        };
+        let result = discover(server, None, false).await;
+        assert!(
+            result
+                .outcome
+                .err()
+                .as_deref()
+                .is_some_and(|error| error.contains("invalid tool filters"))
+        );
         Ok(())
     }
 

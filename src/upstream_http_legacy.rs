@@ -266,10 +266,7 @@ async fn run_requests(
                     while workers.join_next().await.is_some() {}
                     return Ok(());
                 };
-                let request = match Request::parse(line.clone()).and_then(|mut request| {
-                    request.establish_budget(options)?;
-                    Ok(request)
-                }) {
+                let request = match Request::parse(line.clone(), options) {
                     Ok(request) => request,
                     Err(error) => {
                         let value = serde_json::from_str::<Value>(&line).ok();
@@ -308,16 +305,8 @@ async fn execute(
 ) {
     let key = request.identifier.as_ref().map(Value::to_string);
     let answered = Arc::new(AtomicBool::new(false));
-    let Some(budget) = &request.budget else {
-        send_error(
-            response_tx,
-            request.identifier.as_ref(),
-            "Legacy SSE request budget missing",
-        )
-        .await;
-        return;
-    };
-    let result = budget
+    let result = request
+        .budget
         .wait(async {
             let state = session.lock().await.clone();
             if matches!(state, Session::Expired) {

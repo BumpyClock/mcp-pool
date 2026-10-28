@@ -355,6 +355,34 @@ fn aliases_are_normalized_before_positional_allocation_and_keep_assignment_order
     ])?;
     hydrate(&mut parsed, &schema)?;
     assert_eq!(parsed.arguments.get("pageSize"), Some(&json!(7)));
+    let mut parsed = parse(&[
+        "docs.search",
+        "--args",
+        r#"{"pageSize":7}"#,
+        "--page-size",
+        "3",
+        "hello",
+    ])?;
+    hydrate(&mut parsed, &schema)?;
+    assert_eq!(parsed.arguments.get("pageSize"), Some(&json!(3)));
+    assert_eq!(parsed.arguments.get("query"), Some(&json!("hello")));
+    Ok(())
+}
+
+#[test]
+fn exact_schema_properties_are_not_reinterpreted_as_aliases() -> Result<()> {
+    let schema = json!({"additionalProperties":false,"required":["page-size"],"properties":{
+        "pageSize":{"type":"integer"},"page-size":{"type":"integer"}
+    }});
+    let mut parsed = parse(&["docs.search", "--page-size", "3"])?;
+    hydrate(&mut parsed, &schema)?;
+    assert_eq!(parsed.arguments.get("page-size"), Some(&json!(3)));
+    assert!(!parsed.arguments.contains_key("pageSize"));
+
+    let mut both = parse(&["docs.search", "--page-size", "3", "pageSize=7"])?;
+    hydrate(&mut both, &schema)?;
+    assert_eq!(both.arguments.get("page-size"), Some(&json!(3)));
+    assert_eq!(both.arguments.get("pageSize"), Some(&json!(7)));
     Ok(())
 }
 
@@ -367,6 +395,7 @@ fn stdin_json_inputs_preserve_chunk_and_flag_assignment_order() -> Result<()> {
         "--params",
         "-",
     ])?;
+    assert!(earlier.inputs.has_stdin());
     merge_stdin(&mut earlier, r#"{"value":"stdin"}"#)?;
     assert_eq!(earlier.arguments.get("value"), Some(&json!("stdin")));
     let mut later = parse(&[
@@ -395,6 +424,11 @@ fn stdin_json_inputs_preserve_chunk_and_flag_assignment_order() -> Result<()> {
         &json!({"properties":{"value":{"type":"string"}}}),
     )?;
     assert_eq!(schema.arguments.get("value"), Some(&json!("stdin")));
+    assert!(
+        !parse(&["docs.search", "--args", r#"{"value":"json"}"#])?
+            .inputs
+            .has_stdin()
+    );
     Ok(())
 }
 

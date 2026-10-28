@@ -4,6 +4,7 @@ use super::*;
 pub(super) async fn route_server_request(
     line: &str,
     value: &Value,
+    server_id: &Value,
     clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
     last_active_client: &Arc<Mutex<Option<String>>>,
     client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
@@ -21,15 +22,8 @@ pub(super) async fn route_server_request(
             return;
         }
 
-        let Some(server_id) = non_null_id(value).cloned() else {
-            diagnostics::log(format!(
-                "pool_server_request_dropped method={} reason=no_capable_client",
-                method
-            ));
-            return;
-        };
         let response = build_error_response(
-            server_id,
+            server_id.clone(),
             -32001,
             &format!("no capable downstream client connected for {method}"),
         );

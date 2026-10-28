@@ -21,17 +21,10 @@ struct Daemon {
 }
 
 impl Daemon {
-    async fn launch(config: &str) -> io::Result<Self> {
+    async fn launch(config: Value) -> io::Result<Self> {
         let home = fixture_home::create("mcp-pool-cli")?;
         tokio::fs::create_dir(home.join("config")).await?;
-        let legacy: toml::Value = toml::from_str(config).map_err(io::Error::other)?;
-        let legacy = serde_json::to_value(legacy).map_err(io::Error::other)?;
-        let servers = legacy.get("server").cloned().unwrap_or_else(|| json!({}));
-        tokio::fs::write(
-            home.join("config").join("config.json"),
-            json!({"mcpServers":servers}).to_string(),
-        )
-        .await?;
+        tokio::fs::write(home.join("config").join("config.json"), config.to_string()).await?;
         let child = Command::new(BINARY)
             .args(["pool", "serve"])
             .env("MCP_POOL_HOME", &home)
@@ -223,9 +216,9 @@ async fn exchange(
 #[tokio::test]
 async fn concurrent_proxy_clients_share_one_initialized_session() -> io::Result<()> {
     let (url, initializations, server) = fixture().await?;
-    let daemon = Daemon::launch(&format!(
-        "[server.echo]\nurl = {url:?}\ntransport = \"http\"\n"
-    ))
+    let daemon = Daemon::launch(json!({
+        "mcpServers": {"echo": {"url": url, "transport": "http"}}
+    }))
     .await?;
     let started = daemon.command(&["start", "echo"]).await?;
     assert!(started.status.success(), "start failed: {started:?}");
@@ -359,9 +352,10 @@ async fn concurrent_proxy_clients_share_one_initialized_session() -> io::Result<
 
 #[tokio::test]
 async fn start_reports_missing_executable_and_keeps_daemon_usable() -> io::Result<()> {
-    let daemon =
-        Daemon::launch("[server.broken]\ncommand = \"mcp-pool-definitely-missing-executable\"\n")
-            .await?;
+    let daemon = Daemon::launch(json!({
+        "mcpServers": {"broken": {"command": "mcp-pool-definitely-missing-executable"}}
+    }))
+    .await?;
     let output = daemon.command(&["start", "broken"]).await?;
     assert!(
         !output.status.success(),

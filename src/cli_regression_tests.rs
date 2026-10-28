@@ -123,16 +123,18 @@ fn bare_url_auth_preserves_modifiers_and_uses_non_secret_metadata() -> Result<()
 fn single_tool_inference_uses_actual_discovery_and_rejects_ambiguity() -> Result<()> {
     let configuration = configuration()?;
     let selected = configuration.servers.get("docs").context("docs")?;
+    let filter = tool_filter(selected)?;
     assert_eq!(
-        invocation::select_tool(selected, &[json!({"name":"echo"})], None)?,
+        resolve_tool(selected, &[json!({"name":"echo"})], None, &filter)?,
         "echo"
     );
-    assert!(invocation::select_tool(selected, &[], None).is_err());
+    assert!(resolve_tool(selected, &[], None, &filter).is_err());
     assert!(
-        invocation::select_tool(
+        resolve_tool(
             selected,
             &[json!({"name":"one"}), json!({"name":"two"})],
-            None
+            None,
+            &filter
         )
         .is_err()
     );
@@ -149,13 +151,15 @@ fn tool_filter_aliases_apply_to_calls_discovery_and_single_tool_inference() -> R
         json!({"allowedTools":["lookup"],"allowed_tools":["delete"]}),
     ] {
         selected.raw = raw;
-        assert!(tool_allowed(&selected, "lookup")?);
-        assert!(!tool_allowed(&selected, "delete")?);
+        let filter = tool_filter(&selected)?;
+        assert!(filter.permits("lookup"));
+        assert!(!filter.permits("delete"));
         assert_eq!(
-            invocation::select_tool(
+            resolve_tool(
                 &selected,
                 &[json!({"name":"lookup"}), json!({"name":"delete"})],
-                None
+                None,
+                &filter
             )?,
             "lookup"
         );
@@ -166,7 +170,7 @@ fn tool_filter_aliases_apply_to_calls_discovery_and_single_tool_inference() -> R
         json!({"allowedTools":["lookup"],"blocked_tools":["delete"]}),
     ] {
         selected.raw = raw;
-        assert!(tool_allowed(&selected, "delete").is_err());
+        assert!(tool_filter(&selected).is_err());
     }
     Ok(())
 }

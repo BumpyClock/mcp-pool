@@ -38,28 +38,9 @@ pub(super) fn parser(native: bool) -> clap::Command {
     parser
 }
 
-const MCP_COMMANDS: &[&str] = &[
-    "list",
-    "describe",
-    "list-tools",
-    "call",
-    "resource",
-    "resources",
-    "auth",
-    "vault",
-    "config",
-    "import",
-    "daemon",
-    "serve",
-];
-
 const NATIVE_COMMANDS: &[&str] = &[
     "start", "stop", "restart", "status", "add", "remove", "proxy", "shutdown",
 ];
-
-pub(crate) fn is_mcp_command(command: &str) -> bool {
-    MCP_COMMANDS.contains(&command)
-}
 
 pub(crate) fn is_native_command(command: &str) -> bool {
     NATIVE_COMMANDS.contains(&command) || command == "pool"
@@ -104,7 +85,10 @@ pub(crate) fn infer(
     let command = arguments
         .get(command_position)
         .context("Missing command or MCP server")?;
-    if is_mcp_command(command) || is_native_command(command) || command.starts_with('-') {
+    if crate::mcp_cli::is_mcp_command(command)
+        || is_native_command(command)
+        || command.starts_with('-')
+    {
         bail!("Cannot infer routing for '{command}'");
     }
 

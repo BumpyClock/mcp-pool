@@ -31,7 +31,7 @@ pub(super) async fn start(
     request_permit: OwnedSemaphorePermit,
 ) -> Response<Body> {
     let listener_servers = if subscription.tools_list_changed {
-        match state.bridge.notification_servers(only_server) {
+        match state.bridge.selected_server_names(only_server) {
             Ok(servers) => servers,
             Err(_) => return json_failure(subscription.id),
         }

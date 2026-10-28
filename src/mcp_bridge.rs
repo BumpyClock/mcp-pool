@@ -270,7 +270,7 @@ impl BridgeState {
         self.clients.contains_key(name)
     }
 
-    pub(super) fn notification_servers(
+    pub(super) fn selected_server_names(
         &self,
         only_server: Option<&str>,
     ) -> std::result::Result<Vec<String>, BridgeFailure> {
@@ -296,13 +296,8 @@ impl BridgeState {
     pub(super) async fn list_tools(
         &self,
         only_server: Option<&str>,
-        bare_names: bool,
     ) -> std::result::Result<Vec<Value>, BridgeFailure> {
-        let names = match only_server {
-            Some(name) if self.has_server(name) => vec![name.to_owned()],
-            Some(_) => return Err(BridgeFailure::unknown_server()),
-            None => self.server_order.clone(),
-        };
+        let names = self.selected_server_names(only_server)?;
         let mut pending = JoinSet::new();
         for name in &names {
             let Some(server_client) = self.clients.get(name) else {
@@ -348,7 +343,7 @@ impl BridgeState {
                     continue;
                 };
                 if server_client.filter.permits(name)
-                    && let Some(tool) = expose_tool(&server, tool, bare_names)
+                    && let Some(tool) = expose_tool(&server, tool, only_server.is_some())
                 {
                     result.push(tool);
                 }

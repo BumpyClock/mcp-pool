@@ -250,7 +250,7 @@ async fn exposed_tools_normalize_invalid_schemas_and_preserve_extensions() -> Re
     )])?;
     assert_eq!(
         state
-            .list_tools(None, false)
+            .list_tools(None)
             .await
             .map_err(|_| anyhow::anyhow!("listing failed"))?,
         vec![
@@ -266,7 +266,7 @@ async fn exposed_tools_normalize_invalid_schemas_and_preserve_extensions() -> Re
         ]
     );
     let bare = state
-        .list_tools(Some("alpha"), true)
+        .list_tools(Some("alpha"))
         .await
         .map_err(|_| anyhow::anyhow!("listing failed"))?;
     assert_eq!(

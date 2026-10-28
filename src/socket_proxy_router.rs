@@ -15,10 +15,11 @@ pub(super) async fn route_response(
         Ok(value) if value.is_object() => {
             let id = non_null_id(&value);
             match (message_has_method(&value), id) {
-                (true, Some(_)) => {
+                (true, Some(id)) => {
                     route_server_request(
                         line,
                         &value,
+                        id,
                         clients,
                         last_active_client,
                         client_capabilities,

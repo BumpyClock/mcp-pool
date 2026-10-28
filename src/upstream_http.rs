@@ -182,17 +182,8 @@ async fn execute(
     allow_fallback: bool,
 ) {
     let mut answered = false;
-    let Some(budget) = &request.budget else {
-        send_error(
-            response_tx,
-            request.identifier.as_ref(),
-            "HTTP request budget missing",
-        )
-        .await;
-        release_initialization(&mut established);
-        return;
-    };
-    let result = budget
+    let result = request
+        .budget
         .wait(post(
             client,
             url,

@@ -31,44 +31,6 @@ pub(super) async fn acquire_request_sender(
 mod tests {
     use super::*;
 
-    #[test]
-    fn deferred_sender_wait_does_not_require_a_timer() -> io::Result<()> {
-        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-        runtime.block_on(async {
-            let generation = Arc::new(Generation::new());
-            let waiting = {
-                let generation = generation.clone();
-                tokio::spawn(async move {
-                    acquire_request_sender(
-                        &generation.request_tx,
-                        &generation.upstream_ready,
-                        &generation.shutdown,
-                        "timer-free",
-                    )
-                    .await
-                })
-            };
-            tokio::task::yield_now().await;
-            assert!(
-                !waiting.is_finished(),
-                "setup owns the wait, not a local deadline"
-            );
-            let (sender, mut receiver) = mpsc::channel(1);
-            *generation.request_tx.lock() = Some(sender);
-            generation.upstream_ready.notify_waiters();
-            let sender = waiting
-                .await
-                .map_err(io::Error::other)?
-                .ok_or_else(|| io::Error::other("deferred sender lost"))?;
-            sender
-                .send("initialize".into())
-                .await
-                .map_err(io::Error::other)?;
-            assert_eq!(receiver.recv().await.as_deref(), Some("initialize"));
-            Ok(())
-        })
-    }
-
     #[tokio::test]
     async fn deferred_sender_waits_until_publication_or_shutdown() -> io::Result<()> {
         let generation = Generation::new();

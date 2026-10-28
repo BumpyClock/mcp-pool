@@ -9,8 +9,6 @@ use crate::tool_arguments::value;
 #[path = "config_writer.rs"]
 pub(crate) mod write;
 use write::write_checked_mutation;
-#[cfg(test)]
-use write::write_mutation;
 #[path = "config_commands_copy.rs"]
 mod copy;
 #[path = "config_output.rs"]
@@ -472,7 +470,12 @@ mod tests {
                 &path,
                 "{\"mcpServers\":{\"one\":{\"command\":\"echo\"}},\"imports\":[],\"custom\":4}",
             )?;
-            write_mutation(&path, |document| remove_entry(document, "one")).await?;
+            write_checked_mutation(
+                &path,
+                |document| remove_entry(document, "one"),
+                |_| async { Ok(()) },
+            )
+            .await?;
             let document: Value = serde_json::from_str(&std::fs::read_to_string(&path)?)?;
             assert_eq!(document.get("custom"), Some(&json!(4)));
             assert_eq!(document.get("mcpServers"), Some(&json!({})));

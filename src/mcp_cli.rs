@@ -35,25 +35,28 @@ mod invocation;
 mod resources;
 pub(crate) use help::command_help;
 
-const COMMANDS: &[&str] = &[
-    "list",
-    "describe",
-    "list-tools",
-    "call",
-    "auth",
-    "vault",
-    "resource",
-    "resources",
-    "config",
-    "daemon",
-    "serve",
-    "import",
-];
+pub(crate) fn is_mcp_command(command: &str) -> bool {
+    matches!(
+        command,
+        "list"
+            | "describe"
+            | "list-tools"
+            | "call"
+            | "resource"
+            | "resources"
+            | "auth"
+            | "vault"
+            | "config"
+            | "import"
+            | "daemon"
+            | "serve"
+    )
+}
 
 pub fn handles(arguments: &[String]) -> bool {
     context::command_index(arguments)
         .and_then(|index| arguments.get(index))
-        .is_some_and(|command| COMMANDS.contains(&command.as_str()))
+        .is_some_and(|command| is_mcp_command(command))
 }
 
 pub async fn run(arguments: Vec<String>) -> Result<()> {
@@ -266,11 +269,10 @@ pub(crate) async fn discover_server(
 pub(crate) fn resolve_tool(
     server: &ConfiguredServer,
     tools: &[Value],
-    requested: &str,
+    requested: Option<&str>,
+    filter: &crate::tool_filter::ToolFilter,
 ) -> Result<String> {
-    invocation::resolve_tool(&server.name, tools, Some(requested), |name| {
-        tool_allowed(server, name)
-    })
+    invocation::resolve_tool(&server.name, tools, requested, |name| filter.permits(name))
 }
 
 pub(crate) fn print_outcome(
@@ -364,10 +366,9 @@ pub(crate) async fn stdin() -> Result<String> {
     Ok(contents)
 }
 
-pub(crate) fn tool_allowed(server: &ConfiguredServer, tool: &str) -> Result<bool> {
-    Ok(crate::tool_filter::ToolFilter::from_raw(&server.raw)
-        .with_context(|| format!("Server '{}' has invalid tool filters", server.name))?
-        .permits(tool))
+pub(crate) fn tool_filter(server: &ConfiguredServer) -> Result<crate::tool_filter::ToolFilter> {
+    crate::tool_filter::ToolFilter::from_raw(&server.raw)
+        .with_context(|| format!("Server '{}' has invalid tool filters", server.name))
 }
 
 #[cfg(test)]
@@ -380,11 +381,26 @@ mod tests {
 
     #[test]
     fn routing_preserves_native_commands() {
-        assert!(handles(&[
-            "--config".into(),
-            "fixture.json".into(),
-            "list".into()
-        ]));
+        for command in [
+            "list",
+            "describe",
+            "list-tools",
+            "call",
+            "resource",
+            "resources",
+            "auth",
+            "vault",
+            "config",
+            "import",
+            "daemon",
+            "serve",
+        ] {
+            assert!(handles(&[
+                "--config".into(),
+                "fixture.json".into(),
+                command.into()
+            ]));
+        }
         assert!(!handles(&["proxy".into(), "example".into()]));
         assert!(!handles(&["start".into()]));
         assert!(!handles(&["pool".into(), "list".into()]));
@@ -417,16 +433,37 @@ mod tests {
             r#"{"mcpServers":{"docs":{"command":"echo","allowedTools":["search"]}},"imports":[]}"#,
         )?;
         let mut server = configuration.servers.get("docs").context("docs")?.clone();
-        assert!(tool_allowed(&server, "search")?);
-        assert!(!tool_allowed(&server, "search-other")?);
+        let filter = tool_filter(&server)?;
+        assert!(filter.permits("search"));
+        assert!(!filter.permits("search-other"));
+        assert!(resolve_tool(&server, &[], None, &filter).is_err());
         if let Some(object) = server.raw.as_object_mut() {
             object.insert("blockedTools".to_owned(), json!([]));
         }
-        assert!(tool_allowed(&server, "search").is_err());
+        assert!(tool_filter(&server).is_err());
         assert_eq!(
             display_url("https://user:secret@example.test/mcp?token=secret#private"),
             "https://example.test/mcp"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn configured_resolution_keeps_excluded_real_pseudo_names() -> Result<()> {
+        let configuration = crate::server_config::parse_config(
+            &PathBuf::from("synthetic.json"),
+            r#"{"mcpServers":{"docs":{"command":"echo","blockedTools":["help","list_tools"]}},"imports":[]}"#,
+        )?;
+        let server = configuration.servers.get("docs").context("docs")?;
+        let filter = tool_filter(server)?;
+        let tools = [json!({"name":"help"}), json!({"name":"list_tools"})];
+        for requested in ["help", "list-tools"] {
+            assert!(invocation::has_real_tool(&tools, requested));
+            let error = resolve_tool(server, &tools, Some(requested), &filter)
+                .err()
+                .context("excluded real tool must not become a pseudo-tool")?;
+            assert!(error.to_string().contains("excluded"));
+        }
         Ok(())
     }
 

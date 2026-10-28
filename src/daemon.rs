@@ -160,8 +160,8 @@ async fn dispatch(request: &ControlRequest, pool: &Arc<Pool>) -> ControlResponse
             pool.start(name, spec, definition.configuration_entry.clone())
                 .await
         }
-        ControlRequest::Stop { name } => pool.stop_server(name).await.map(|_| ()),
-        ControlRequest::Restart { name } => pool.restart(name).await.map(|_| ()),
+        ControlRequest::Stop { name } => pool.stop_server(name).await,
+        ControlRequest::Restart { name } => pool.restart(name).await,
         ControlRequest::Status { name } => {
             let mut status = pool.get_status();
             if let Some(filter_name) = name {
