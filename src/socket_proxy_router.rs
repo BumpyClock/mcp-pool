@@ -3,12 +3,12 @@ use super::*;
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn route_response(
     line: &str,
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+    clients: &Mutex<HashMap<String, ClientSender>>,
     request_map: &RequestMap,
-    handshake_cache: &HandshakeCacheRef,
-    last_active_client: &Arc<Mutex<Option<String>>>,
-    client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
+    handshake_cache: &Mutex<HandshakeCache>,
+    last_active_client: &Mutex<Option<String>>,
+    client_capabilities: &Mutex<HashMap<String, ClientCapabilities>>,
+    request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
     recovery_tx: &mpsc::Sender<RecoveryReason>,
 ) {
     match serde_json::from_str::<Value>(line) {
@@ -29,11 +29,14 @@ pub(super) async fn route_response(
                 }
                 (false, Some(id)) => {
                     let key = jsonrpc::id_key(id);
-                    let pending = request_map.lock().remove(&key);
-                    if let Some(pending) = pending {
-                        for (client_id, payload) in
-                            restore_response(&value, pending, handshake_cache)
-                        {
+                    let responses = {
+                        let mut requests = request_map.lock();
+                        requests
+                            .remove(&key)
+                            .map(|pending| restore_response(&value, pending, handshake_cache))
+                    };
+                    if let Some(responses) = responses {
+                        for (client_id, payload) in responses {
                             send_to_client(&client_id, payload, clients).await;
                         }
                         request_recovery_if_session_not_found(&value, handshake_cache, recovery_tx);
@@ -68,14 +71,10 @@ pub(super) async fn route_response(
 fn restore_response(
     value: &Value,
     pending: PendingRequestInfo,
-    cache: &HandshakeCacheRef,
+    cache: &Mutex<HandshakeCache>,
 ) -> Vec<(String, String)> {
     match pending.cache_key {
-        Some(CacheableMethod::Initialize) => complete_initialize_response(value, pending, cache),
-        Some(CacheableMethod::ServerDiscover) => {
-            complete_server_discovery_response(value, pending, cache)
-        }
-        Some(CacheableMethod::ToolsList) => complete_tools_list_response(value, pending, cache),
+        Some(method) => complete_cached_response(value, pending, &mut cache.lock(), method),
         None => {
             diagnostics::log(format!(
                 "pool_response_routed client_id={} method={}{} elapsed_ms={} outcome={}",

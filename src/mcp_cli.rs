@@ -196,11 +196,11 @@ pub(crate) fn server(
     }
     let credential_scope = configuration.credential_scope.clone();
     let source = std::env::current_dir()?.join(".mcp-adhoc.json");
-    let mut configuration = crate::server_config::parse_config(
+    let mut configuration = crate::server_config::parse_document(
         &source,
-        &serde_json::to_string(&json!({
+        &json!({
             "mcpServers":{label:entry},"imports":[]
-        }))?,
+        }),
     )?;
     let mut selected = configuration
         .servers
@@ -239,31 +239,6 @@ pub(crate) async fn connect(
         60_000,
     );
     McpClient::connect(&name, &definition, Duration::from_millis(timeout)).await
-}
-
-pub(crate) async fn discover_server(
-    server: &ConfiguredServer,
-    timeout: Option<u64>,
-    no_oauth: bool,
-    output: Output,
-) -> Result<()> {
-    let configuration = ServerConfiguration {
-        source: server.source.clone(),
-        credential_scope: server.definition.credential_scope.clone(),
-        servers: std::collections::BTreeMap::from([(server.name.clone(), server.clone())]),
-        warnings: Vec::new(),
-    };
-    let mut arguments = vec![server.name.clone()];
-    if matches!(output, Output::Json | Output::Raw) {
-        arguments.push("--json".into());
-    }
-    if let Some(timeout) = timeout {
-        arguments.extend(["--timeout".into(), timeout.to_string()]);
-    }
-    if no_oauth {
-        arguments.push("--no-oauth".into());
-    }
-    tool_discovery::run(configuration, arguments).await
 }
 
 pub(crate) fn resolve_tool(
@@ -308,7 +283,7 @@ pub(crate) fn print_outcome(
 
 pub(crate) fn safe_error(server: &ConfiguredServer, error: &anyhow::Error) -> String {
     let mut message = format!("{error:#}");
-    let configured = server.raw.get("env").and_then(Value::as_object);
+    let configured = server.configured_environment();
     let environment = server
         .definition
         .env
@@ -325,8 +300,7 @@ pub(crate) fn safe_error(server: &ConfiguredServer, error: &anyhow::Error) -> St
             ]
             .iter()
             .any(|pattern| uppercase_name.contains(pattern));
-            sensitive_name
-                || (value.len() >= 4 && configured.is_some_and(|values| values.contains_key(*name)))
+            sensitive_name || (value.len() >= 4 && configured.contains_exact(name))
         })
         .map(|(_, value)| value);
     for secret in server.definition.headers.values().chain(environment) {
@@ -364,11 +338,6 @@ pub(crate) async fn stdin() -> Result<String> {
         bail!("JSON input exceeds 16 MiB");
     }
     Ok(contents)
-}
-
-pub(crate) fn tool_filter(server: &ConfiguredServer) -> Result<crate::tool_filter::ToolFilter> {
-    crate::tool_filter::ToolFilter::from_raw(&server.raw)
-        .with_context(|| format!("Server '{}' has invalid tool filters", server.name))
 }
 
 #[cfg(test)]
@@ -433,14 +402,14 @@ mod tests {
             r#"{"mcpServers":{"docs":{"command":"echo","allowedTools":["search"]}},"imports":[]}"#,
         )?;
         let mut server = configuration.servers.get("docs").context("docs")?.clone();
-        let filter = tool_filter(&server)?;
+        let filter = server.tool_filter()?;
         assert!(filter.permits("search"));
         assert!(!filter.permits("search-other"));
         assert!(resolve_tool(&server, &[], None, &filter).is_err());
         if let Some(object) = server.raw.as_object_mut() {
             object.insert("blockedTools".to_owned(), json!([]));
         }
-        assert!(tool_filter(&server).is_err());
+        assert!(server.tool_filter().is_err());
         assert_eq!(
             display_url("https://user:secret@example.test/mcp?token=secret#private"),
             "https://example.test/mcp"
@@ -455,7 +424,7 @@ mod tests {
             r#"{"mcpServers":{"docs":{"command":"echo","blockedTools":["help","list_tools"]}},"imports":[]}"#,
         )?;
         let server = configuration.servers.get("docs").context("docs")?;
-        let filter = tool_filter(server)?;
+        let filter = server.tool_filter()?;
         let tools = [json!({"name":"help"}), json!({"name":"list_tools"})];
         for requested in ["help", "list-tools"] {
             assert!(invocation::has_real_tool(&tools, requested));

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 use tokio::io::BufReader;
 
@@ -67,7 +67,10 @@ async fn notifications_and_callback_responses_have_no_timeout_metadata() -> Resu
     let (mut client, mut server) = fixture(Duration::from_secs(1)).await?;
     let server_work = async {
         let notification = read(&mut server).await?;
-        assert_eq!(notification.get(TIMEOUT_FIELD), None);
+        assert_eq!(
+            notification,
+            json!({"jsonrpc":"2.0","method":"notifications/message","params":{"data":"example"}})
+        );
         let request = read(&mut server).await?;
         assert_eq!(request.get(TIMEOUT_FIELD), Some(&json!(1000)));
         send(
@@ -117,25 +120,6 @@ async fn pagination_keeps_metadata_and_first_page_cursor_absent() -> Result<()> 
         result?,
         vec![json!({"name":"first"}), json!({"name":"second"})]
     );
-    Ok(())
-}
-
-#[tokio::test]
-async fn backend_hint_does_not_extend_local_deadline() -> Result<()> {
-    let (mut client, mut server) = fixture(Duration::from_secs(1)).await?;
-    client.deadline = Duration::from_millis(20);
-    let server_work = async {
-        let request = read(&mut server).await?;
-        assert_eq!(request.get(TIMEOUT_FIELD), Some(&json!(20)));
-        tokio::time::sleep(Duration::from_millis(60)).await;
-        assert!(reply(&mut server, &request, json!({})).await.is_err());
-        Ok::<(), anyhow::Error>(())
-    };
-    let (result, served) = tokio::join!(client.request("tools/call", json!({})), server_work);
-    served?;
-    let error = result.err().context("expected local timeout")?;
-    assert!(error.to_string().contains("deadline exceeded"));
-    assert!(client.reader.is_none());
     Ok(())
 }
 

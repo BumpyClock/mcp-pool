@@ -18,6 +18,82 @@ async fn spawn_count(fixture: &Fixture) -> io::Result<usize> {
 }
 
 #[tokio::test]
+async fn native_config_mutations_share_add_and_remove_behavior() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    let original = tokio::fs::read(&fixture.config).await?;
+    let preview = fixture
+        .success(&[
+            "add",
+            "remote",
+            "--url",
+            "https://example.test/mcp",
+            "--transport",
+            "SSE",
+            "--dry-run",
+        ])
+        .await?;
+    let preview = parse_json(&preview)?;
+    assert_eq!(preview.get("transport"), Some(&json!("sse")));
+    assert_eq!(tokio::fs::read(&fixture.config).await?, original);
+
+    fixture
+        .success(&[
+            "add",
+            "native",
+            "--transport",
+            "ignored",
+            "--",
+            "fixture-command",
+            "--some-flag",
+            "argument with spaces",
+        ])
+        .await?;
+    let native = parse_json(
+        &fixture
+            .success(&["config", "get", "native", "--json"])
+            .await?,
+    )?;
+    assert_eq!(native.get("command"), Some(&json!("fixture-command")));
+    assert_eq!(
+        native.get("args"),
+        Some(&json!(["--some-flag", "argument with spaces"]))
+    );
+    fixture
+        .success(&[
+            "config",
+            "add",
+            "config-entry",
+            "--command",
+            "fixture-command",
+            "--arg",
+            "--some-flag",
+            "--arg",
+            "argument with spaces",
+        ])
+        .await?;
+    let document: Value = serde_json::from_slice(&tokio::fs::read(&fixture.config).await?)
+        .map_err(io::Error::other)?;
+    assert_eq!(
+        document.pointer("/mcpServers/native"),
+        Some(&json!({
+            "transport":"stdio",
+            "command":"fixture-command",
+            "args":["--some-flag", "argument with spaces"]
+        }))
+    );
+    assert_eq!(
+        document.pointer("/mcpServers/native"),
+        document.pointer("/mcpServers/config-entry")
+    );
+    fixture.success(&["remove", "native", "--yes"]).await?;
+    let missing = fixture
+        .command(&["config", "get", "native", "--json"])
+        .await?;
+    assert!(!missing.status.success());
+    fixture.finish().await
+}
+
+#[tokio::test]
 async fn root_help_names_mcp_commands_and_native_pool_commands() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     let output = fixture.success(&["--help"]).await?;

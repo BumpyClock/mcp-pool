@@ -30,7 +30,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     let mut tool = parsed.tool.clone();
     let mut discovery_fallback = None;
     let outcome: Result<Value> = async {
-        let filter = super::tool_filter(&selected)?;
+        let filter = selected.tool_filter()?;
         let mut client = progress
             .wait(
                 "Connecting to MCP server",
@@ -82,7 +82,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     progress.finish();
     if let Some((timeout, no_oauth, output)) = discovery_fallback {
         outcome?;
-        crate::mcp_cli::discover_server(&selected, timeout, no_oauth, output).await?;
+        crate::tool_discovery::single_server(selected, timeout, no_oauth, output).await?;
         return Ok(());
     }
     let log_result = outcome.as_ref().ok().cloned();

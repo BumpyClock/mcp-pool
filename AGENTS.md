@@ -19,12 +19,19 @@ upstream process/connection instead of launching N copies.
   Callers resolve config and send definitions; the daemon does not load config
   or warm servers on launch. `pool list` reads the same config without connecting.
   `daemon status` and `daemon stop` do not auto-launch.
+  `daemon_client.rs` owns control exchange and launch mechanics.
+  `daemon_configuration_ownership.rs` owns typed status selection, with separate
+  native-control, config-replacement, and credential-retirement policies.
 - **MCP commands** (`mcp_cli.rs`, `tool_discovery.rs`, `tool_arguments.rs`,
   `tool_output.rs`): discovery, calls, and resources use pooled connections through
   `mcp_client.rs`. `server_config.rs` merges home/project `.mcp/config.json`.
   `config_import*.rs` copies external definitions only during explicit imports.
   These commands reuse the native daemon and multiplexer, not a parallel ephemeral broker.
   mcporter is the command/config inspiration, not a runtime dependency.
+  Parsed config documents enter the shared normalizer without a text round trip.
+  `server_config_settings.rs` interprets borrowed settings from the original entry;
+  it does not cache a second mutable copy. Native config commands and pseudo-tool
+  discovery call typed operations rather than reconstructing CLI arguments.
 - **Tool bridge** (`mcp_bridge.rs`, `mcp_bridge_*.rs`): top-level `serve` exposes
   keep-alive entries over stdio or HTTP. HTTP POST `/mcp` combines namespaced
   `server__tool` tools; `/mcp/<server>` exposes bare tool names. The bridge
@@ -108,8 +115,12 @@ upstream process/connection instead of launching N copies.
   cancel followers. Calls are not coalesced.
   Pending-route cleanup defaults to five minutes; longer caller/shared budgets
   can extend retention. Cleanup is distinct from local operation deadlines.
-- `session_cache.rs` owns shared discovery/tool-list TTL and in-flight state.
+- `HandshakeCache` in `mcp_session.rs` and `session_cache.rs` owns shared-request
+  admission, completion, invalidation, disconnect, and expiration transitions.
+  Cache fields are private. Transitions involving pending routes retain
+  request-map-before-cache lock ordering; delivery and upstream I/O stay outside.
   One-time initialization retains separate readiness and notification ownership.
+  Client tasks borrow state from their `Generation` rather than cloning each field.
 - Bridge operations include queue waits and reconnect setup in configured
   `timeoutMs` (60 seconds by default, no 120-second cap). Established HTTP
   subscriptions have no idle operation deadline. They forward tool-list

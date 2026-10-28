@@ -220,29 +220,4 @@ mod tests {
         assert!(!error.to_string().contains("secret"));
         assert!(error.to_string().contains("Unknown tool"));
     }
-
-    #[test]
-    fn exact_excluded_names_do_not_bypass_the_filter() {
-        let error = resolve_tool("fixture", &tools(&["help"]), Some("help"), |_| false)
-            .expect_err("excluded exact name should fail");
-        assert!(error.to_string().contains("excluded"));
-    }
-
-    #[test]
-    fn real_names_shadow_pseudo_tools_even_when_excluded() {
-        assert!(has_real_tool(&tools(&["help"]), "help"));
-        assert!(has_real_tool(&tools(&["list_tools"]), "list-tools"));
-    }
-
-    #[test]
-    fn normalized_excluded_names_do_not_shadow_with_a_fallback() {
-        let error = resolve_tool(
-            "fixture",
-            &tools(&["list_tools"]),
-            Some("list-tools"),
-            |_| false,
-        )
-        .expect_err("excluded normalized name should fail");
-        assert!(error.to_string().contains("excluded"));
-    }
 }

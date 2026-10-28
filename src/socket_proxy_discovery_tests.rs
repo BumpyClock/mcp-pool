@@ -32,10 +32,7 @@ async fn concurrent_server_discovery_has_one_upstream_request_and_correlated_wai
         while generation
             .handshake_cache
             .lock()
-            .server_discovery
-            .requests
-            .waiters
-            .len()
+            .waiter_count(CacheableMethod::ServerDiscover)
             != 1
         {
             tokio::task::yield_now().await;
@@ -103,10 +100,7 @@ async fn discovery_error_reaches_all_waiters_and_allows_legacy_fallback() -> io:
         while generation
             .handshake_cache
             .lock()
-            .server_discovery
-            .requests
-            .waiters
-            .len()
+            .waiter_count(CacheableMethod::ServerDiscover)
             != 1
         {
             tokio::task::yield_now().await;
@@ -305,6 +299,51 @@ async fn incompatible_initialize_and_modern_discovery_never_cross_on_upstream() 
 }
 
 #[tokio::test]
+async fn legacy_initialize_excludes_modern_discovery_in_flight_and_when_ready() -> io::Result<()> {
+    let mut fixture = Fixture::start().await?;
+    let mut initialize = BufReader::new(connect(&fixture.proxy).await?);
+    let mut discovery = BufReader::new(connect(&fixture.proxy).await?);
+    send(
+        initialize.get_mut(),
+        json!({"jsonrpc":"2.0","id":"initialize","method":"initialize","params":{}}),
+    )
+    .await?;
+    let leader = fixture.request().await?;
+    assert_eq!(leader.get("method"), Some(&json!("initialize")));
+    for (id, ready) in [("discover-in-flight", false), ("discover-ready", true)] {
+        if ready {
+            fixture
+                .responses
+                .send(
+                    json!({"jsonrpc":"2.0","id":leader.get("id"),"result":{
+                        "protocolVersion":"2025-11-25","capabilities":{}
+                    }})
+                    .to_string(),
+                )
+                .await
+                .map_err(io::Error::other)?;
+            assert_eq!(
+                read(&mut initialize).await?.get("id"),
+                Some(&json!("initialize"))
+            );
+        }
+        send(
+            discovery.get_mut(),
+            json!({"jsonrpc":"2.0","id":id,"method":"server/discover","params":{}}),
+        )
+        .await?;
+        let rejection = read(&mut discovery).await?;
+        assert_eq!(rejection.get("id"), Some(&json!(id)));
+        assert_eq!(rejection.pointer("/error/code"), Some(&json!(-32601)));
+        assert!(
+            fixture.requests.try_recv().is_err(),
+            "{id} reached upstream"
+        );
+    }
+    fixture.stop().await
+}
+
+#[tokio::test]
 async fn explicit_tools_list_ttl_controls_shared_cache_expiration() -> io::Result<()> {
     let mut fixture = Fixture::start().await?;
     let mut client = BufReader::new(connect(&fixture.proxy).await?);
@@ -415,15 +454,7 @@ async fn explicit_tools_list_ttl_controls_shared_cache_expiration() -> io::Resul
         Some(&json!("short-cached"))
     );
     assert!(fixture.requests.try_recv().is_err());
-    let generation = fixture
-        .proxy
-        .generation
-        .lock()
-        .clone()
-        .ok_or_else(|| io::Error::other("missing generation"))?;
-    generation.handshake_cache.lock().tools_list.cached_until =
-        Some(Instant::now() - Duration::from_secs(1));
-    generation.expiration_changed.notify_one();
+    sleep(Duration::from_millis(25)).await;
     send(
         client.get_mut(),
         json!({"jsonrpc":"2.0","id":"short-expired","method":"tools/list","params":{}}),

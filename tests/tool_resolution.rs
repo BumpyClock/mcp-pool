@@ -148,6 +148,25 @@ async fn missing_pseudo_tools_fall_back_to_discovery_without_calling_a_tool() ->
         assert_eq!(discovery.get("mode"), Some(&json!("server")));
         assert_eq!(discovery.pointer("/tools/0/name"), Some(&json!("echo")));
     }
+    let raw = parse_json(
+        &fixture
+            .success(&[
+                "call",
+                "fixture.help",
+                "--output",
+                "raw",
+                "--timeout",
+                "5000",
+                "--no-oauth",
+            ])
+            .await?,
+    )?;
+    assert_eq!(raw.get("mode"), Some(&json!("server")));
+    assert_eq!(raw.pointer("/tools/0/name"), Some(&json!("echo")));
+    let text = fixture
+        .success(&["call", "fixture.help", "--output", "text", "--no-oauth"])
+        .await?;
+    assert!(String::from_utf8_lossy(&text.stdout).contains("echo"));
     assert_eq!(fixture.event_count("tools/call").await?, before);
     fixture.finish().await
 }

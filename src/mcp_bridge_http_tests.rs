@@ -13,37 +13,13 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{Endpoint, HttpState, endpoint_for_path, handle_request};
-use crate::mcp_bridge::{BridgeClient, BridgeState, ClientFuture};
+use crate::mcp_bridge::{
+    BridgeState,
+    test_fixture::{self, Fixture},
+};
 
 #[path = "mcp_bridge_http_modern_tests.rs"]
 mod modern;
-
-struct HttpFixtureClient;
-
-impl BridgeClient for HttpFixtureClient {
-    fn is_closed(&self) -> bool {
-        false
-    }
-
-    fn list_tools(&mut self) -> ClientFuture<'_, Vec<Value>> {
-        Box::pin(async {
-            Ok(vec![json!({
-                "name":"ping",
-                "description":"fixture ping",
-                "inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}
-            })])
-        })
-    }
-
-    fn request<'a>(&'a mut self, _method: &'a str, params: Value) -> ClientFuture<'a, Value> {
-        Box::pin(async move {
-            Ok(json!({
-                "content":[{"type":"text","text":"fixture"}],
-                "echo":params
-            }))
-        })
-    }
-}
 
 #[test]
 fn paths_route_aggregate_and_decode_single_server_names() {
@@ -97,7 +73,7 @@ fn accept_headers_preserve_media_ranges_and_zero_quality_exclusion() -> Result<(
 
 #[tokio::test]
 async fn malformed_json_and_unknown_routes_return_client_errors() -> Result<()> {
-    let state = state()?;
+    let state = state().await?;
     let invalid = request("/mcp", "{not-json}")?;
     let invalid_response = handle_request(State(http_state(state.clone())), invalid).await;
     assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
@@ -118,7 +94,7 @@ async fn malformed_json_and_unknown_routes_return_client_errors() -> Result<()> 
 
 #[tokio::test]
 async fn per_server_http_endpoint_returns_bare_tool_names() -> Result<()> {
-    let state = state()?;
+    let state = state().await?;
     let request = request(
         "/mcp/alpha",
         r#"{"jsonrpc":"2.0","id":"list-1","method":"tools/list","params":{}}"#,
@@ -155,7 +131,7 @@ async fn streamable_http_round_trip_preserves_ids_and_protocol_version() -> Resu
     let address = listener.local_addr()?;
     let application = Router::new()
         .fallback(handle_request)
-        .with_state(http_state_at(state()?, address.port()));
+        .with_state(http_state_at(state().await?, address.port()));
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();
     let server = tokio::spawn(async move {
         axum::serve(listener, application)
@@ -261,7 +237,7 @@ async fn streamable_http_round_trip_preserves_ids_and_protocol_version() -> Resu
 
 #[tokio::test]
 async fn loopback_origin_is_allowed_and_external_origin_is_rejected() -> Result<()> {
-    let state = state()?;
+    let state = state().await?;
     let mut denied = request(
         "/mcp",
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
@@ -308,7 +284,7 @@ async fn loopback_origin_is_allowed_and_external_origin_is_rejected() -> Result<
 
 #[tokio::test]
 async fn stateless_http_rejects_session_ids_and_requires_streamable_headers() -> Result<()> {
-    let state = state()?;
+    let state = state().await?;
     let mut session = request("/mcp", "{}")?;
     session
         .headers_mut()
@@ -327,7 +303,7 @@ async fn stateless_http_rejects_session_ids_and_requires_streamable_headers() ->
 
 #[tokio::test]
 async fn http_rejects_oversized_requests_and_unsupported_methods() -> Result<()> {
-    let state = state()?;
+    let state = state().await?;
     let large_body = " ".repeat(super::MAX_REQUEST_BYTES + 1);
     let oversized = request("/mcp", &large_body)?;
     let oversized_response = handle_request(State(http_state(state.clone())), oversized).await;
@@ -342,7 +318,7 @@ async fn http_rejects_oversized_requests_and_unsupported_methods() -> Result<()>
 
 #[tokio::test]
 async fn http_bounds_request_body_read_time() -> Result<()> {
-    let state = state()?;
+    let state = state().await?;
     let (sender, receiver) = mpsc::channel::<Vec<u8>>(1);
     let body = Body::from_stream(ReceiverStream::new(receiver).map(Ok::<_, Infallible>));
     let request = Request::builder()
@@ -358,11 +334,18 @@ async fn http_bounds_request_body_read_time() -> Result<()> {
     Ok(())
 }
 
-fn state() -> Result<Arc<BridgeState>> {
-    Ok(Arc::new(BridgeState::with_clients(vec![(
-        "alpha".to_owned(),
-        Box::new(HttpFixtureClient),
-    )])?))
+async fn state() -> Result<Arc<BridgeState>> {
+    Ok(Arc::new(
+        test_fixture::default_state(vec![Fixture::new(
+            "alpha",
+            vec![json!({
+                "name":"ping",
+                "description":"fixture ping",
+                "inputSchema":{"type":"object","properties":{"value":{"type":"string"}}}
+            })],
+        )])
+        .await?,
+    ))
 }
 
 fn http_state(bridge: Arc<BridgeState>) -> HttpState {

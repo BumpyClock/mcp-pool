@@ -186,10 +186,10 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
         .lock()
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
-    previous
-        .handshake_cache
-        .lock()
-        .store_result("initialize", serde_json::json!({"version":"old"}));
+    previous.handshake_cache.lock().complete(
+        CacheableMethod::Initialize,
+        &serde_json::json!({"result":{"version":"old"}}),
+    );
     previous.client_capabilities.lock().insert(
         "old".to_string(),
         ClientCapabilities {

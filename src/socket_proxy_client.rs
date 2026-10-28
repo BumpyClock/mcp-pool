@@ -7,21 +7,10 @@ type PendingForward = (
 
 /// Rewrites client request IDs for multiplexing; client responses retain server IDs.
 /// Deferred sends preserve input order and synchronize with route expiration.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_client(
     stream: LocalStream,
     client_id: String,
-    request_tx: Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
-    upstream_ready: Arc<Notify>,
-    id_allocator: Arc<IdAllocator>,
-    request_map: RequestMap,
-    handshake_cache: HandshakeCacheRef,
-    client_capabilities: Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    last_active_client: Arc<Mutex<Option<String>>>,
-    clients: Arc<Mutex<HashMap<String, ClientSender>>>,
-    shutdown: Arc<AtomicBool>,
-    shutdown_notify: Arc<Notify>,
-    expiration_changed: Arc<Notify>,
+    generation: Arc<Generation>,
     remote: bool,
     shared_timeout: Duration,
     mut rx: mpsc::Receiver<String>,
@@ -38,7 +27,7 @@ pub(super) async fn handle_client(
     let mut pending_forward: Option<PendingForward> = None;
 
     loop {
-        if shutdown.load(Ordering::SeqCst) {
+        if generation.shutdown.load(Ordering::SeqCst) {
             break;
         }
         tokio::select! {
@@ -130,44 +119,26 @@ pub(super) async fn handle_client(
                                         line.len()
                                     ));
                                     if method.as_deref() == Some("initialize") {
-                                        client_capabilities.lock().insert(
+                                        generation.client_capabilities.lock().insert(
                                             client_id.clone(),
                                             parse_client_capabilities(&value),
                                         );
                                     }
-                                    let (discovery, coalesced_event) = match cache_key {
-                                        Some(CacheableMethod::Initialize) => (
-                                            prepare_initialize_request(
-                                                &handshake_cache,
-                                                &client_id,
-                                                original_id.clone(),
+                                    // Admission and route publication follow the same lock order
+                                    // as completion and expiration.
+                                    let mut requests = generation.request_map.lock();
+                                    let discovery = cache_key.map_or(DiscoveryAction::Leader, |method| {
+                                        generation.handshake_cache.lock().prepare(
+                                            method,
+                                            PendingWaiter {
+                                                client_id: client_id.clone(),
+                                                original_id: original_id.clone(),
+                                                inserted_at: Instant::now(),
                                                 expires_after,
-                                                transport_deadline,
-                                            ),
-                                            "pool_initialize_coalesced",
-                                        ),
-                                        Some(CacheableMethod::ServerDiscover) => (
-                                            prepare_server_discovery_request(
-                                                &handshake_cache,
-                                                &client_id,
-                                                original_id.clone(),
-                                                expires_after,
-                                                transport_deadline,
-                                            ),
-                                            "pool_server_discover_coalesced",
-                                        ),
-                                        Some(CacheableMethod::ToolsList) => (
-                                            prepare_tools_list_request(
-                                                &handshake_cache,
-                                                &client_id,
-                                                original_id.clone(),
-                                                expires_after,
-                                                transport_deadline,
-                                            ),
-                                            "pool_tools_list_coalesced",
-                                        ),
-                                        None => (DiscoveryAction::Leader, ""),
-                                    };
+                                            },
+                                            transport_deadline,
+                                        )
+                                    });
                                     match discovery {
                                         DiscoveryAction::Cached(response) => {
                                             diagnostics::log(format!(
@@ -177,6 +148,11 @@ pub(super) async fn handle_client(
                                             ClientAction::Cached(response)
                                         }
                                         DiscoveryAction::Coalesced => {
+                                            let coalesced_event = match cache_key {
+                                                Some(CacheableMethod::Initialize) => "pool_initialize_coalesced",
+                                                Some(CacheableMethod::ServerDiscover) => "pool_server_discover_coalesced",
+                                                _ => "pool_tools_list_coalesced",
+                                            };
                                             diagnostics::log(format!(
                                                 "{coalesced_event} client_id={client_id}"
                                             ));
@@ -189,8 +165,8 @@ pub(super) async fn handle_client(
                                                     method.as_deref().unwrap_or("?"), client_id
                                                 ));
                                             }
-                                            let pool_id = id_allocator.allocate();
-                                            request_map.lock().insert(
+                                            let pool_id = generation.id_allocator.allocate();
+                                            requests.insert(
                                                 jsonrpc::id_key(&Value::from(pool_id)),
                                                 PendingRequestInfo {
                                                     client_id: client_id.clone(),
@@ -202,7 +178,7 @@ pub(super) async fn handle_client(
                                                     expires_after,
                                                 },
                                             );
-                                            *last_active_client.lock() = Some(client_id.clone());
+                                            *generation.last_active_client.lock() = Some(client_id.clone());
                                             match value {
                                                 Value::Object(object) => ClientAction::Forward {
                                                     line: jsonrpc::with_id(object, Value::from(pool_id)),
@@ -221,7 +197,7 @@ pub(super) async fn handle_client(
                                     }
                                 }
                                 _ => {
-                                    if handshake_cache.lock().swallow_initialized(&value) {
+                                    if generation.handshake_cache.lock().swallow_initialized(&value) {
                                         diagnostics::log(format!(
                                             "pool_cached_initialized_swallowed client_id={}",
                                             client_id
@@ -271,7 +247,7 @@ pub(super) async fn handle_client(
                         }
                     };
 
-                    expiration_changed.notify_one();
+                    generation.expiration_changed.notify_one();
                     let (forward_line, forward_method, forward_tool, forward_pool_id) = match action {
                         ClientAction::Cached(response) => {
                             let mut bytes = response.into_bytes();
@@ -301,22 +277,21 @@ pub(super) async fn handle_client(
                         } => (line, method, tool, pool_id),
                     };
 
-                    let request_tx = request_tx.clone();
                     let forward_deadline = forward_pool_id.and_then(|pool_id| {
-                        request_map.lock().get(&jsonrpc::id_key(&Value::from(pool_id)))
+                        generation.request_map.lock().get(&jsonrpc::id_key(&Value::from(pool_id)))
                             .and_then(|pending| pending.cache_key)
-                    }).and_then(|method| handshake_cache.lock().deadline(method));
-                    let upstream_ready = upstream_ready.clone();
-                    let shutdown = shutdown.clone();
-                    let request_map = request_map.clone();
+                    }).and_then(|method| generation.handshake_cache.lock().deadline(method));
+                    let forwarding_generation = generation.clone();
                     let client_id = client_id.clone();
                     pending_forward = Some((forward_pool_id, Box::pin(async move {
+                        let generation = forwarding_generation;
                         let Some(sender) = acquire_request_sender(
-                            &request_tx, &upstream_ready, &shutdown, &client_id,
+                            &generation.request_tx, &generation.upstream_ready,
+                            &generation.shutdown, &client_id,
                         ).await else { return Ok(()) };
                         let permit = sender.reserve_owned().await.map_err(io::Error::other)?;
-                        let pending = request_map.lock();
-                        if shutdown.load(Ordering::SeqCst)
+                        let pending = generation.request_map.lock();
+                        if generation.shutdown.load(Ordering::SeqCst)
                             || forward_pool_id.is_some_and(|pool_id| {
                                 !pending.contains_key(&jsonrpc::id_key(&Value::from(pool_id)))
                             })
@@ -373,7 +348,7 @@ pub(super) async fn handle_client(
                     }
                     if pending_forward.as_ref().is_some_and(|(pool_id, _)| {
                         pool_id.is_some_and(|pool_id| {
-                            !request_map.lock().contains_key(&jsonrpc::id_key(&Value::from(pool_id)))
+                            !generation.request_map.lock().contains_key(&jsonrpc::id_key(&Value::from(pool_id)))
                         })
                     }) {
                         pending_forward = None;
@@ -381,11 +356,11 @@ pub(super) async fn handle_client(
                 }
                 None => break,
             },
-            _ = shutdown_notify.notified() => break,
+            _ = generation.shutdown_notify.notified() => break,
         }
     }
 
-    if shutdown.load(Ordering::SeqCst) {
+    if generation.shutdown.load(Ordering::SeqCst) {
         while let Ok(message) = rx.try_recv() {
             let mut bytes = message.into_bytes();
             bytes.push(b'\n');
@@ -403,25 +378,12 @@ pub(super) async fn handle_client(
         }
     }
 
-    request_map
-        .lock()
-        .retain(|_, pending| pending.client_id != client_id || pending.cache_key.is_some());
     {
-        let mut cache = handshake_cache.lock();
-        if let Initialization::InFlight { waiters, .. } = &mut cache.initialize {
-            waiters.retain(|waiter| waiter.client_id != client_id);
-        }
-        cache
-            .server_discovery
-            .requests
-            .waiters
-            .retain(|waiter| waiter.client_id != client_id);
-        cache
-            .tools_list
-            .waiters
-            .retain(|waiter| waiter.client_id != client_id);
+        let mut requests = generation.request_map.lock();
+        let mut cache = generation.handshake_cache.lock();
+        cache.disconnect(&mut requests, &client_id);
     }
-    clients.lock().remove(&client_id);
-    client_capabilities.lock().remove(&client_id);
-    expiration_changed.notify_one();
+    generation.clients.lock().remove(&client_id);
+    generation.client_capabilities.lock().remove(&client_id);
+    generation.expiration_changed.notify_one();
 }

@@ -15,12 +15,10 @@ use tokio::time::{Duration, sleep};
 
 use crate::diagnostics;
 use crate::jsonrpc::{self, IdAllocator};
-#[cfg(test)]
-use crate::mcp_session::cacheable_method;
 use crate::mcp_session::{
-    CacheableMethod, ClientCapabilities, HandshakeCache, Initialization, PendingRequestInfo,
-    PendingWaiter, RecoveryReason, build_error_response, build_success_response, cacheable_request,
-    is_session_not_found_error, parse_client_capabilities, tool_name,
+    CacheableMethod, ClientCapabilities, HandshakeCache, PendingRequestInfo, PendingWaiter,
+    RecoveryReason, SharedRequestAction as DiscoveryAction, build_error_response,
+    cacheable_request, is_session_not_found_error, parse_client_capabilities, tool_name,
 };
 use crate::transport::{LocalListener, LocalStream};
 use crate::types::{ServerReadiness, ServerStatus};
@@ -52,8 +50,7 @@ use wait::acquire_request_sender;
 
 const REQUEST_TTL_SECS: u64 = 300;
 type ClientSender = mpsc::Sender<String>;
-type RequestMap = Arc<Mutex<HashMap<String, PendingRequestInfo>>>;
-type HandshakeCacheRef = Arc<Mutex<HandshakeCache>>;
+type RequestMap = Mutex<HashMap<String, PendingRequestInfo>>;
 type Completion = Option<Result<(), String>>;
 
 enum ClientAction {
@@ -65,12 +62,6 @@ enum ClientAction {
     },
     Cached(String),
     Drop,
-}
-
-enum DiscoveryAction {
-    Cached(String),
-    Coalesced,
-    Leader,
 }
 
 /// Serializes lifecycle changes and replaces generations only after verified retirement.
@@ -171,10 +162,10 @@ impl SocketProxy {
                 && completion.is_none()
                 && self.status() == ServerStatus::Running
                 && !generation.shutdown.load(Ordering::SeqCst),
-            mcp_initialize_result_received: matches!(
-                &generation.handshake_cache.lock().initialize,
-                Initialization::Ready { .. },
-            ),
+            mcp_initialize_result_received: generation
+                .handshake_cache
+                .lock()
+                .initialization_ready(),
             startup_error: startup.and_then(Result::err),
             retirement_error: completion.and_then(Result::err),
         }
@@ -319,6 +310,3 @@ mod tests_1;
 #[cfg(test)]
 #[path = "socket_proxy_tests_2.rs"]
 mod tests_2;
-#[cfg(test)]
-#[path = "socket_proxy_tests_3.rs"]
-mod tests_3;

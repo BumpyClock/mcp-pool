@@ -5,10 +5,10 @@ pub(super) async fn route_server_request(
     line: &str,
     value: &Value,
     server_id: &Value,
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
-    last_active_client: &Arc<Mutex<Option<String>>>,
-    client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
+    clients: &Mutex<HashMap<String, ClientSender>>,
+    last_active_client: &Mutex<Option<String>>,
+    client_capabilities: &Mutex<HashMap<String, ClientCapabilities>>,
+    request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
 ) {
     let method = value.get("method").and_then(Value::as_str).unwrap_or("?");
     if let Some(required) = required_capability(method) {
@@ -72,9 +72,9 @@ fn required_capability(method: &str) -> Option<RequiredCapability> {
 }
 
 fn capable_client(
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
-    client_capabilities: &Arc<Mutex<HashMap<String, ClientCapabilities>>>,
-    last_active_client: &Arc<Mutex<Option<String>>>,
+    clients: &Mutex<HashMap<String, ClientSender>>,
+    client_capabilities: &Mutex<HashMap<String, ClientCapabilities>>,
+    last_active_client: &Mutex<Option<String>>,
     required: RequiredCapability,
 ) -> Option<String> {
     let last_active = last_active_client.lock().clone();
@@ -113,7 +113,7 @@ fn has_required_capability(
 
 async fn send_to_upstream(
     payload: String,
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
+    request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
     method: &str,
 ) {
     let sender = request_tx.lock().clone();
@@ -136,7 +136,7 @@ async fn send_to_upstream(
 pub(super) async fn send_to_client(
     client_id: &str,
     payload: String,
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
+    clients: &Mutex<HashMap<String, ClientSender>>,
 ) {
     let sender = clients.lock().get(client_id).cloned();
     let Some(sender) = sender else {
@@ -172,10 +172,7 @@ pub(super) async fn send_to_client(
         }
     }
 }
-pub(super) async fn broadcast_to_all(
-    line: &str,
-    clients: &Arc<Mutex<HashMap<String, ClientSender>>>,
-) {
+pub(super) async fn broadcast_to_all(line: &str, clients: &Mutex<HashMap<String, ClientSender>>) {
     let senders: Vec<ClientSender> = clients.lock().values().cloned().collect();
     for sender in &senders {
         if sender.send(line.to_string()).await.is_err() {

@@ -58,6 +58,33 @@ fn command_array_uses_its_own_arguments() -> Result<()> {
 }
 
 #[test]
+fn parsed_documents_share_text_normalization_and_preserve_raw_fields() -> Result<()> {
+    let source = source()?;
+    let document = json!({
+        "imports": ["unused"],
+        "mcpServers": {
+            "test": {
+                "command": ["node", "server.js"],
+                "env": {"FIXTURE_SETTING": "configured"},
+                "custom": {"nested": true}
+            }
+        }
+    });
+    let parsed = parse_document(&source, &document)?;
+    let text = parse_config(&source, &document.to_string())?;
+    assert_eq!(
+        serde_json::to_value(server(&parsed)?)?,
+        serde_json::to_value(server(&text)?)?
+    );
+    assert_eq!(parsed.warnings, text.warnings);
+    assert_eq!(
+        server(&parsed)?.raw.pointer("/custom/nested"),
+        Some(&json!(true))
+    );
+    Ok(())
+}
+
+#[test]
 fn protocol_preferences_are_typed_and_follow_the_selected_definition() -> Result<()> {
     use crate::mcp_protocol::ProtocolPreference;
     for (field, encoded, preference) in [
@@ -328,6 +355,51 @@ fn urls_aliases_and_remote_transport_are_normalized() -> Result<()> {
         entry.raw.get("clientName").and_then(Value::as_str),
         Some("synthetic-client")
     );
+    Ok(())
+}
+
+#[test]
+fn derived_settings_preserve_permissive_aliases_and_follow_raw_changes() -> Result<()> {
+    let configuration = parse(
+        r#"{"mcpServers":{"test":{
+            "command":"node",
+            "oauthClientSecret": 7,
+            "oauth_client_secret":"snake-secret",
+            "oauthRequestedScope":" ",
+            "oauth_requested_scope":"requested-snake",
+            "oauthScope":"fallback-camel",
+            "oauth_scope":"fallback-snake",
+            "oauthCommand":null,
+            "oauth_command":{"args":["ignored"]},
+            "lifecycle":{"mode":"keep-alive"},
+            "env":{"Configured":"value"},
+            "custom":{"nested":true}
+        }}}"#,
+    )?;
+    let mut entry = server(&configuration)?.clone();
+    let settings = entry.oauth_settings();
+    assert_eq!(settings.client_secret, Some("snake-secret"));
+    assert_eq!(settings.scope, Some("requested-snake"));
+    assert!(settings.helper_arguments.is_none());
+    assert_eq!(entry.configured_lifecycle(), Some(true));
+    let environment = entry.configured_environment();
+    assert!(environment.contains_exact("Configured"));
+    assert!(!environment.contains_exact("CONFIGURED"));
+    assert_eq!(environment.contains("CONFIGURED"), cfg!(windows));
+    assert_eq!(entry.raw.pointer("/custom/nested"), Some(&json!(true)));
+
+    let raw = entry.raw.as_object_mut().context("raw server entry")?;
+    raw.insert("oauth_requested_scope".to_owned(), Value::Null);
+    raw.insert("oauthCommand".to_owned(), json!({"args":["actual", 5]}));
+    raw.insert("lifecycle".to_owned(), json!({"mode":"ephemeral"}));
+    let settings = entry.oauth_settings();
+    assert_eq!(settings.scope, Some("fallback-camel"));
+    let expected_arguments = [json!("actual"), json!(5)];
+    assert_eq!(
+        settings.helper_arguments,
+        Some(expected_arguments.as_slice())
+    );
+    assert_eq!(entry.configured_lifecycle(), Some(false));
     Ok(())
 }
 

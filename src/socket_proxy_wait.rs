@@ -2,9 +2,9 @@ use super::*;
 
 /// Registers readiness before rechecking the sender to prevent a lost wakeup.
 pub(super) async fn acquire_request_sender(
-    request_tx: &Arc<Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>>,
-    upstream_ready: &Arc<Notify>,
-    shutdown: &Arc<AtomicBool>,
+    request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
+    upstream_ready: &Notify,
+    shutdown: &AtomicBool,
     client_id: &str,
 ) -> Option<mpsc::Sender<crate::upstream::UpstreamRequest>> {
     if let Some(sender) = request_tx.lock().clone() {

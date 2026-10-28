@@ -204,16 +204,20 @@ async fn wait_for_shared_follower(proxy: &SocketProxy, target: &str) -> io::Resu
         loop {
             let queued = {
                 let cache = generation.handshake_cache.lock();
-                if target == "initialize" {
-                    matches!(&cache.initialize, Initialization::InFlight { waiters, .. } if !waiters.is_empty())
+                cache.waiter_count(if target == "initialize" {
+                    CacheableMethod::Initialize
                 } else {
-                    !cache.tools_list.waiters.is_empty()
-                }
+                    CacheableMethod::ToolsList
+                }) > 0
             };
-            if queued { break; }
+            if queued {
+                break;
+            }
             tokio::task::yield_now().await;
         }
-    }).await.map_err(io::Error::other)
+    })
+    .await
+    .map_err(io::Error::other)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -376,9 +380,10 @@ async fn unanswered_shared_operations_expire_and_release_routes_without_replay()
         assert!(generation.request_map.lock().is_empty());
         {
             let cache = generation.handshake_cache.lock();
-            assert!(matches!(cache.initialize, Initialization::Empty));
-            assert!(cache.tools_list.in_flight.is_none());
-            assert!(cache.tools_list.waiters.is_empty());
+            assert!(!cache.initialization_ready());
+            assert!(cache.deadline(CacheableMethod::Initialize).is_none());
+            assert!(cache.deadline(CacheableMethod::ToolsList).is_none());
+            assert_eq!(cache.waiter_count(CacheableMethod::ToolsList), 0);
         }
         assert_eq!(fixture.count.load(Ordering::SeqCst), 1);
         assert!(fixture.requests.try_recv().is_err());

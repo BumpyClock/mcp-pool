@@ -14,7 +14,7 @@ mod output;
 mod routing;
 #[cfg(test)]
 use native::normalize_transport;
-use native::{add_server, build_server_def, remove_server};
+use native::{build_add_operation, remove_server};
 use output::print_response_data;
 
 #[derive(Parser)]
@@ -260,8 +260,9 @@ pub async fn run() -> anyhow::Result<()> {
             dry_run,
             trailing,
         } => {
-            let definition = build_server_def(url, transport, command, trailing)?;
-            add_server(&name, definition, dry_run, cli.config, cli.root.as_deref()).await
+            let operation =
+                build_add_operation(name, url, transport, command, trailing, cli.config, dry_run)?;
+            crate::config_commands::add(operation, cli.root.as_deref()).await
         }
         Cmd::Remove { name, yes } => {
             remove_server(&name, yes, cli.config, cli.root.as_deref()).await
@@ -470,14 +471,21 @@ mod tests {
                 .to_string(),
             "invalid --transport 'stdio': expected 'http' or 'sse'"
         );
-        let definition = build_server_def(
-            Some("https://example.test/mcp".to_owned()),
-            Some("SSE".to_owned()),
-            None,
-            Vec::new(),
-        )?;
-        assert_eq!(definition.transport, "sse");
-        assert_eq!(definition.url, "https://example.test/mcp");
+        assert_eq!(
+            build_add_operation(
+                "server".into(),
+                None,
+                None,
+                Some("command".into()),
+                vec!["arg".into()],
+                None,
+                false,
+            )
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("conflicting command accepted"))?
+            .to_string(),
+            "--command cannot be combined with trailing command args"
+        );
         Ok(())
     }
 }

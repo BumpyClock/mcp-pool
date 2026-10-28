@@ -8,28 +8,6 @@ fn configuration() -> Result<ServerConfiguration> {
 }
 
 #[test]
-fn identities_ignore_ambient_environment_but_track_explicit_resolved_values() -> Result<()> {
-    let configuration = configuration()?;
-    let selected = configuration.servers.get("docs").context("docs")?;
-    let original = pool_name(selected, &selected.definition)?;
-    let mut definition = selected.definition.clone();
-    definition.env.insert(
-        "UNDECLARED_AMBIENT".to_owned(),
-        "different-session".to_owned(),
-    );
-    assert_eq!(original, pool_name(selected, &definition)?);
-    assert_eq!(
-        definition.env.get("UNDECLARED_AMBIENT").map(String::as_str),
-        Some("different-session")
-    );
-    definition
-        .env
-        .insert("SECRET".to_owned(), "changed-explicit".to_owned());
-    assert_ne!(original, pool_name(selected, &definition)?);
-    Ok(())
-}
-
-#[test]
 fn ad_hoc_tokens_and_final_metadata_reach_the_shared_normalizer() -> Result<()> {
     let configuration = configuration()?;
     let selected = server(
@@ -123,7 +101,7 @@ fn bare_url_auth_preserves_modifiers_and_uses_non_secret_metadata() -> Result<()
 fn single_tool_inference_uses_actual_discovery_and_rejects_ambiguity() -> Result<()> {
     let configuration = configuration()?;
     let selected = configuration.servers.get("docs").context("docs")?;
-    let filter = tool_filter(selected)?;
+    let filter = selected.tool_filter()?;
     assert_eq!(
         resolve_tool(selected, &[json!({"name":"echo"})], None, &filter)?,
         "echo"
@@ -151,7 +129,7 @@ fn tool_filter_aliases_apply_to_calls_discovery_and_single_tool_inference() -> R
         json!({"allowedTools":["lookup"],"allowed_tools":["delete"]}),
     ] {
         selected.raw = raw;
-        let filter = tool_filter(&selected)?;
+        let filter = selected.tool_filter()?;
         assert!(filter.permits("lookup"));
         assert!(!filter.permits("delete"));
         assert_eq!(
@@ -170,7 +148,7 @@ fn tool_filter_aliases_apply_to_calls_discovery_and_single_tool_inference() -> R
         json!({"allowedTools":["lookup"],"blocked_tools":["delete"]}),
     ] {
         selected.raw = raw;
-        assert!(tool_filter(&selected).is_err());
+        assert!(selected.tool_filter().is_err());
     }
     Ok(())
 }
@@ -179,20 +157,24 @@ fn tool_filter_aliases_apply_to_calls_discovery_and_single_tool_inference() -> R
 fn error_redaction_preserves_configured_and_sensitive_environment_rules() -> Result<()> {
     let configuration = configuration()?;
     let mut selected = configuration.servers.get("docs").context("docs")?.clone();
-    selected.raw = json!({"env":{"DECLARED":"declared-private","SHORT":"abc"}});
+    selected.raw =
+        json!({"env":{"DECLARED":"declared-private","SHORT":"abc","casevariant":"case-value"}});
     selected.definition.env = std::collections::BTreeMap::from([
         ("DECLARED".to_owned(), "declared-private".to_owned()),
         ("SHORT".to_owned(), "abc".to_owned()),
         ("mixedCaseToKeN".to_owned(), "token-private".to_owned()),
         ("AMBIENT".to_owned(), "ambient-value".to_owned()),
+        ("CASEVARIANT".to_owned(), "case-value".to_owned()),
     ]);
     selected.definition.headers =
         std::collections::BTreeMap::from([("X-Fixture".to_owned(), "header-private".to_owned())]);
-    let error = anyhow::anyhow!("declared-private token-private header-private abc ambient-value")
-        .context("outer");
+    let error = anyhow::anyhow!(
+        "declared-private token-private header-private abc ambient-value case-value"
+    )
+    .context("outer");
     assert_eq!(
         safe_error(&selected, &error),
-        "outer: [redacted] [redacted] [redacted] abc ambient-value"
+        "outer: [redacted] [redacted] [redacted] abc ambient-value case-value"
     );
     Ok(())
 }

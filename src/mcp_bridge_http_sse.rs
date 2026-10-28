@@ -12,8 +12,8 @@ use tokio::time::{MissedTickBehavior, interval, sleep};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::super::BridgeClient;
 use super::{HttpState, rpc};
+use crate::mcp_client::McpClient;
 
 const MAX_QUEUED_EVENTS: usize = 4;
 const MAX_SSE_MESSAGE_BYTES: usize = 1024 * 1024;
@@ -103,7 +103,7 @@ pub(super) async fn start(
 async fn run_subscription(
     sender: mpsc::Sender<String>,
     bridge: std::sync::Arc<super::BridgeState>,
-    listener_clients: Vec<(String, Box<dyn BridgeClient>)>,
+    listener_clients: Vec<(String, McpClient)>,
     subscription_id: Value,
     listen_for_tools: bool,
     mut shutdown: watch::Receiver<bool>,
@@ -179,7 +179,7 @@ async fn run_subscription(
 async fn forward_notifications(
     bridge: std::sync::Arc<super::BridgeState>,
     server: String,
-    mut client: Box<dyn BridgeClient>,
+    mut client: McpClient,
     sender: mpsc::Sender<String>,
     subscription_id: Value,
 ) -> std::result::Result<(), ()> {

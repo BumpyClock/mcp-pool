@@ -135,7 +135,12 @@ async fn long_discovery_followers_keep_their_routing_budget() -> io::Result<()> 
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation.handshake_cache.lock().tools_list.waiters.len() != 1 {
+        while generation
+            .handshake_cache
+            .lock()
+            .waiter_count(CacheableMethod::ToolsList)
+            != 1
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -144,10 +149,17 @@ async fn long_discovery_followers_keep_their_routing_budget() -> io::Result<()> 
     for pending in generation.request_map.lock().values_mut() {
         pending.inserted_at = Instant::now() - Duration::from_secs(301);
     }
-    for waiter in &mut generation.handshake_cache.lock().tools_list.waiters {
-        assert_eq!(waiter.expires_after, Duration::from_secs(600));
-        waiter.inserted_at = Instant::now() - Duration::from_secs(301);
-    }
+    generation
+        .handshake_cache
+        .lock()
+        .elapse_waiters(CacheableMethod::ToolsList, Duration::from_secs(301));
+    assert!(
+        generation
+            .handshake_cache
+            .lock()
+            .next_deadline(std::iter::empty())
+            .is_some_and(|deadline| deadline > Instant::now() + Duration::from_secs(298))
+    );
     assert!(
         expire_pending_requests(&generation.request_map, &generation.handshake_cache).is_empty()
     );

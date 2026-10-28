@@ -100,7 +100,7 @@ fn parse(arguments: Vec<String>) -> Result<Flags> {
 /// Preserves configured server order in output while discovering servers concurrently.
 pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> Result<()> {
     let mut flags = parse(arguments)?;
-    let mut progress = crate::cli_progress::Progress::new(!flags.json && !flags.quiet);
+    let progress = crate::cli_progress::Progress::new(!flags.json && !flags.quiet);
     let mut selected_url_tool = None;
     if let Some(target) = &flags.target
         && let Some((url, tool)) = crate::mcp_cli::selector::split_http(target)?
@@ -146,6 +146,32 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
         crate::mcp_cli::persist_ad_hoc(server, &flags.ephemeral).await?;
     }
     let detailed = (flags.target.is_some() || flags.ephemeral.present()) && !flags.status;
+    execute(selected, flags, selected_tool, detailed, progress).await
+}
+
+pub(crate) async fn single_server(
+    server: ConfiguredServer,
+    timeout: Option<u64>,
+    no_oauth: bool,
+    output: Output,
+) -> Result<()> {
+    let flags = Flags {
+        json: matches!(output, Output::Json | Output::Raw),
+        timeout,
+        no_oauth,
+        ..Flags::default()
+    };
+    let progress = crate::cli_progress::Progress::new(!flags.json && !flags.quiet);
+    execute(vec![server], flags, None, true, progress).await
+}
+
+async fn execute(
+    selected: Vec<ConfiguredServer>,
+    flags: Flags,
+    selected_tool: Option<String>,
+    detailed: bool,
+    mut progress: crate::cli_progress::Progress,
+) -> Result<()> {
     let mut entries = Vec::new();
     let mut failure = false;
     let mut tool_selection_failed = false;
@@ -373,7 +399,7 @@ async fn discover(server: ConfiguredServer, timeout: Option<u64>, no_oauth: bool
     );
     let duration = Duration::from_millis(timeout);
     let outcome = tokio::time::timeout(duration, async {
-        let filter = crate::mcp_cli::tool_filter(&server)?;
+        let filter = server.tool_filter()?;
         let mut client = crate::mcp_cli::connect(&server, Some(timeout), no_oauth).await?;
         let tools = client.list_tools().await?;
         Ok::<_, anyhow::Error>(DiscoveryData {

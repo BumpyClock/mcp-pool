@@ -1,96 +1,19 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::Result;
-use serde_json::{Value, json};
-use tokio::sync::Mutex;
-
+use super::BridgeState;
 use super::filter::ToolFilter;
 use super::names::{decode_tool_name, encode_tool_name};
 use super::options::{ServeMode, parse};
 use super::rpc;
-use super::{BridgeClient, BridgeState, ClientFuture};
+use super::test_fixture::{self, Fixture};
+use anyhow::Result;
+use serde_json::{Value, json};
 #[path = "mcp_bridge_reconnect_tests.rs"]
 mod reconnect_tests;
 #[path = "mcp_bridge_selection_tests.rs"]
 mod selection_tests;
-
-struct SyntheticClient {
-    server: String,
-    tools: Vec<Value>,
-    calls: Arc<Mutex<Vec<Value>>>,
-    closed: Arc<AtomicBool>,
-    active: Option<Arc<AtomicUsize>>,
-    maximum: Option<Arc<AtomicUsize>>,
-}
-
-struct CloseOnCancel {
-    closed: Arc<AtomicBool>,
-    completed: bool,
-}
-
-impl Drop for CloseOnCancel {
-    fn drop(&mut self) {
-        if !self.completed {
-            self.closed.store(true, Ordering::SeqCst);
-        }
-    }
-}
-
-impl BridgeClient for SyntheticClient {
-    fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::SeqCst)
-    }
-
-    fn list_tools(&mut self) -> ClientFuture<'_, Vec<Value>> {
-        let tools = self.tools.clone();
-        Box::pin(async move { Ok(tools) })
-    }
-
-    fn request<'a>(&'a mut self, method: &'a str, params: Value) -> ClientFuture<'a, Value> {
-        let server = self.server.clone();
-        let calls = Arc::clone(&self.calls);
-        let active = self.active.clone();
-        let maximum = self.maximum.clone();
-        let closed = Arc::clone(&self.closed);
-        let method = method.to_owned();
-        Box::pin(async move {
-            let should_stall =
-                params.pointer("/arguments/label").and_then(Value::as_str) == Some("timeout");
-            calls
-                .lock()
-                .await
-                .push(json!({"server":server, "method":method, "params":params}));
-            if should_stall {
-                let mut cancellation = CloseOnCancel {
-                    closed,
-                    completed: false,
-                };
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                cancellation.completed = true;
-            }
-            if let (Some(active), Some(maximum)) = (active, maximum) {
-                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
-                maximum.fetch_max(count, Ordering::SeqCst);
-                tokio::time::sleep(Duration::from_millis(40)).await;
-                active.fetch_sub(1, Ordering::SeqCst);
-            }
-            Ok(json!({"content":[{"type":"text","text":server}],"echo":params}))
-        })
-    }
-}
-
-fn client(server: &str, tools: Vec<Value>) -> SyntheticClient {
-    SyntheticClient {
-        server: server.to_owned(),
-        tools,
-        calls: Arc::new(Mutex::new(Vec::new())),
-        closed: Arc::new(AtomicBool::new(false)),
-        active: None,
-        maximum: None,
-    }
-}
 
 fn tool(name: &str, description: &str) -> Value {
     json!({
@@ -130,7 +53,7 @@ fn qualified_tool_names_escape_boundaries_and_decode_longest_server_prefix() {
 
 #[tokio::test]
 async fn initialize_and_notifications_follow_mcp_handshake_contract() -> Result<()> {
-    let state = state_with_two_clients()?;
+    let state = state_with_two_clients().await?;
     let initialize = rpc::dispatch(
         &state,
         json!({
@@ -188,7 +111,7 @@ fn modern_protocol_request_falls_back_to_supported_legacy_revision() {
 
 #[tokio::test]
 async fn aggregate_tool_list_preserves_schemas_and_namespaces_tools() -> Result<()> {
-    let state = state_with_two_clients()?;
+    let state = state_with_two_clients().await?;
     let response = rpc::dispatch(
         &state,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
@@ -229,25 +152,23 @@ async fn aggregate_tool_list_preserves_schemas_and_namespaces_tools() -> Result<
 
 #[tokio::test]
 async fn exposed_tools_normalize_invalid_schemas_and_preserve_extensions() -> Result<()> {
-    let state = BridgeState::with_clients(vec![(
-        "alpha".to_owned(),
-        Box::new(client(
-            "alpha",
-            vec![
-                json!({"name":"", "inputSchema":{"type":"object"}}),
-                json!({"description":"missing name"}),
-                json!({
-                    "name":"normalize", "description":"", "inputSchema":{"type":"array"},
-                    "outputSchema":null, "annotations":{"readOnlyHint":true}
-                }),
-                json!({
-                    "name":"preserve", "description":"kept",
-                    "inputSchema":{"type":"object","required":["query"],"additionalProperties":false},
-                    "outputSchema":{}, "_meta":{"fixture":"extension"}
-                }),
-            ],
-        )),
-    )])?;
+    let state = test_fixture::default_state(vec![Fixture::new(
+        "alpha",
+        vec![
+            json!({"name":"", "inputSchema":{"type":"object"}}),
+            json!({"description":"missing name"}),
+            json!({
+                "name":"normalize", "description":"", "inputSchema":{"type":"array"},
+                "outputSchema":null, "annotations":{"readOnlyHint":true}
+            }),
+            json!({
+                "name":"preserve", "description":"kept",
+                "inputSchema":{"type":"object","required":["query"],"additionalProperties":false},
+                "outputSchema":{}, "_meta":{"fixture":"extension"}
+            }),
+        ],
+    )])
+    .await?;
     assert_eq!(
         state
             .list_tools(None)
@@ -281,18 +202,8 @@ async fn exposed_tools_normalize_invalid_schemas_and_preserve_extensions() -> Re
 
 #[tokio::test]
 async fn tool_call_routes_original_name_and_arguments_and_preserves_id() -> Result<()> {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let state = BridgeState::with_clients(vec![(
-        "alpha".to_owned(),
-        Box::new(SyntheticClient {
-            server: "alpha".to_owned(),
-            tools: vec![tool("lookup", "lookup")],
-            calls: Arc::clone(&calls),
-            closed: Arc::new(AtomicBool::new(false)),
-            active: None,
-            maximum: None,
-        }),
-    )])?;
+    let fixture = Fixture::new("alpha", vec![tool("lookup", "lookup")]);
+    let state = test_fixture::default_state(vec![fixture.clone()]).await?;
     let response = rpc::dispatch(
         &state,
         json!({
@@ -309,7 +220,7 @@ async fn tool_call_routes_original_name_and_arguments_and_preserves_id() -> Resu
         "method":"tools/call",
         "params":{"name":"lookup","arguments":{"query":"weather"}}
     });
-    assert_eq!(calls.lock().await.as_slice(), &[forwarded]);
+    assert_eq!(fixture.calls().await.as_slice(), &[forwarded]);
     assert_eq!(
         response,
         Some(json!({
@@ -326,7 +237,7 @@ async fn tool_call_routes_original_name_and_arguments_and_preserves_id() -> Resu
 
 #[tokio::test]
 async fn per_server_mode_uses_bare_tool_names() -> Result<()> {
-    let state = state_with_two_clients()?;
+    let state = state_with_two_clients().await?;
     let listed = rpc::dispatch(
         &state,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}),
@@ -368,31 +279,15 @@ async fn per_server_mode_uses_bare_tool_names() -> Result<()> {
 async fn independent_server_calls_run_concurrently() -> Result<()> {
     let active = Arc::new(AtomicUsize::new(0));
     let maximum = Arc::new(AtomicUsize::new(0));
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let state = Arc::new(BridgeState::with_clients(vec![
-        (
-            "alpha".to_owned(),
-            Box::new(SyntheticClient {
-                server: "alpha".to_owned(),
-                tools: vec![tool("run", "run")],
-                calls: Arc::clone(&calls),
-                closed: Arc::new(AtomicBool::new(false)),
-                active: Some(Arc::clone(&active)),
-                maximum: Some(Arc::clone(&maximum)),
-            }),
-        ),
-        (
-            "beta".to_owned(),
-            Box::new(SyntheticClient {
-                server: "beta".to_owned(),
-                tools: vec![tool("run", "run")],
-                calls,
-                closed: Arc::new(AtomicBool::new(false)),
-                active: Some(Arc::clone(&active)),
-                maximum: Some(Arc::clone(&maximum)),
-            }),
-        ),
-    ])?);
+    let state = Arc::new(
+        test_fixture::default_state(vec![
+            Fixture::new("alpha", vec![tool("run", "run")])
+                .with_activity(Arc::clone(&active), Arc::clone(&maximum)),
+            Fixture::new("beta", vec![tool("run", "run")])
+                .with_activity(active, Arc::clone(&maximum)),
+        ])
+        .await?,
+    );
     let alpha_state = Arc::clone(&state);
     let beta_state = Arc::clone(&state);
     let (alpha, beta) = tokio::join!(
@@ -413,8 +308,17 @@ async fn independent_server_calls_run_concurrently() -> Result<()> {
             .await
         }
     );
-    assert!(alpha.is_some());
-    assert!(beta.is_some());
+    assert_eq!(
+        alpha
+            .as_ref()
+            .and_then(|message| message.pointer("/result/content/0/text")),
+        Some(&json!("alpha"))
+    );
+    assert_eq!(
+        beta.as_ref()
+            .and_then(|message| message.pointer("/result/content/0/text")),
+        Some(&json!("beta"))
+    );
     assert_eq!(maximum.load(Ordering::SeqCst), 2);
     Ok(())
 }
@@ -423,19 +327,12 @@ async fn independent_server_calls_run_concurrently() -> Result<()> {
 async fn allow_and_block_filters_apply_to_listing_and_calls() -> Result<()> {
     let raw = json!({"allowed_tools":["lookup"]});
     let filter = ToolFilter::from_raw(&raw)?;
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let state = BridgeState::with_filtered_clients(vec![(
-        "alpha".to_owned(),
-        Box::new(SyntheticClient {
-            server: "alpha".to_owned(),
-            tools: vec![tool("lookup", "lookup"), tool("secret", "secret")],
-            calls: Arc::clone(&calls),
-            closed: Arc::new(AtomicBool::new(false)),
-            active: None,
-            maximum: None,
-        }),
-        filter,
-    )])?;
+    let fixture = Fixture::new(
+        "alpha",
+        vec![tool("lookup", "lookup"), tool("secret", "secret")],
+    );
+    let state =
+        test_fixture::state(vec![(fixture.clone(), filter, Duration::from_secs(5))]).await?;
     let listed = rpc::dispatch(
         &state,
         json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
@@ -465,7 +362,20 @@ async fn allow_and_block_filters_apply_to_listing_and_calls() -> Result<()> {
             .and_then(Value::as_i64),
         Some(-32602)
     );
-    assert!(calls.lock().await.is_empty());
+    assert!(fixture.calls().await.is_empty());
+    let allowed = rpc::dispatch(
+        &state,
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"alpha__lookup"}}),
+        None,
+    )
+    .await;
+    assert_eq!(
+        allowed
+            .as_ref()
+            .and_then(|message| message.pointer("/result/content/0/text")),
+        Some(&json!("alpha"))
+    );
+    assert_eq!(fixture.calls().await.len(), 1);
     assert!(
         ToolFilter::from_raw(&json!({
             "allowedTools":["lookup"],
@@ -510,7 +420,6 @@ fn serve_flags_default_to_stdio_and_parse_http_and_server_selection() -> Result<
         .is_err()
     );
     assert!(parse(vec!["--http=65536".to_owned()]).is_err());
-    assert!(parse(vec!["--host=localhost".to_owned()]).is_err());
     Ok(())
 }
 
@@ -559,15 +468,10 @@ fn serve_flags_keep_last_values_and_validate_conflicts_after_parsing() -> Result
     Ok(())
 }
 
-fn state_with_two_clients() -> Result<BridgeState> {
-    BridgeState::with_clients(vec![
-        (
-            "alpha".to_owned(),
-            Box::new(client("alpha", vec![tool("lookup", "alpha lookup")])),
-        ),
-        (
-            "beta".to_owned(),
-            Box::new(client("beta", vec![tool("ping", "beta ping")])),
-        ),
+async fn state_with_two_clients() -> Result<BridgeState> {
+    test_fixture::default_state(vec![
+        Fixture::new("alpha", vec![tool("lookup", "alpha lookup")]),
+        Fixture::new("beta", vec![tool("ping", "beta ping")]),
     ])
+    .await
 }

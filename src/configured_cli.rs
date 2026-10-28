@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::control::{ControlRequest, ControlResponse};
+use crate::daemon_client::ownership::{self, Selection};
 use crate::server_config::ConfiguredServer;
 
 pub(crate) enum Operation {
@@ -39,7 +40,7 @@ pub(crate) async fn control(
         } else {
             ControlRequest::Status { name: None }
         };
-        return readable(crate::daemon_client::control_request(&request).await?);
+        return ownership::readable(crate::daemon_client::control_request(&request).await?, None);
     }
     let configuration = crate::server_config::load_at(path, root)?;
     if matches!(request, Operation::StartAll) {
@@ -74,39 +75,30 @@ pub(crate) async fn control(
     if matches!(request, Operation::Start { .. }) {
         return start(server).await;
     }
-    let mut response =
+    let response =
         crate::daemon_client::control_request(&ControlRequest::Status { name: None }).await?;
     if !response.ok {
         return Ok(response);
     }
-    let servers = response
-        .data
-        .as_mut()
-        .and_then(|value| value.get_mut("servers"))
-        .and_then(Value::as_array_mut)
-        .context("Daemon status omitted servers")?;
-    if servers.iter().any(|value| {
-        value.pointer("/configuration_entry/source") == Some(&json!(server.source))
-            && value
-                .pointer("/configuration_entry/name")
-                .and_then(Value::as_str)
-                == Some(server.name.as_str())
-            && value.pointer("/configuration_entry/scope").is_none()
-    }) {
-        anyhow::bail!(
-            "Daemon lacks credential-scope ownership metadata; restart the daemon after upgrading"
-        );
-    }
-    servers.retain(|value| matches_entry(value, server));
+    let selection = Selection::Native {
+        source: &server.source,
+        name: &server.name,
+        scope: server.definition.credential_scope.as_deref(),
+    };
     if matches!(request, Operation::Status { .. }) {
-        return readable(response);
+        return ownership::readable(response, Some(selection));
     }
-    for value in servers {
-        let name = value
-            .get("name")
-            .and_then(Value::as_str)
-            .context("Daemon status omitted name")?
-            .to_owned();
+    let status = ownership::status(&response)?;
+    let servers = status
+        .servers
+        .iter()
+        .map(|server| selection.matches(server).map(|selected| (server, selected)))
+        .collect::<Result<Vec<_>>>()?;
+    for (server, selected) in servers {
+        if !selected {
+            continue;
+        }
+        let name = server.name.clone();
         let operation = if matches!(request, Operation::Restart { .. }) {
             ControlRequest::Restart { name }
         } else {
@@ -118,43 +110,4 @@ pub(crate) async fn control(
         }
     }
     Ok(ControlResponse::ok())
-}
-
-fn matches_entry(value: &Value, server: &ConfiguredServer) -> bool {
-    value.get("configuration_entry").is_some_and(|entry| {
-        entry.get("source") == Some(&json!(server.source))
-            && entry.get("name").and_then(Value::as_str) == Some(server.name.as_str())
-            && entry.get("scope")
-                == server
-                    .definition
-                    .credential_scope
-                    .as_ref()
-                    .map(|scope| json!(scope))
-                    .as_ref()
-    })
-}
-
-fn readable(mut response: ControlResponse) -> Result<ControlResponse> {
-    if let Some(servers) = response
-        .data
-        .as_mut()
-        .and_then(|data| data.get_mut("servers"))
-        .and_then(Value::as_array_mut)
-    {
-        for server in servers {
-            if let Some(name) = server
-                .pointer("/configuration_entry/name")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-            {
-                let object = server
-                    .as_object_mut()
-                    .context("Invalid daemon status server")?;
-                if let Some(pool_name) = object.insert("name".into(), json!(name)) {
-                    object.insert("pool_name".into(), pool_name);
-                }
-            }
-        }
-    }
-    Ok(response)
 }

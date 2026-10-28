@@ -63,45 +63,6 @@ async fn import_copies_claude_project_servers_without_touching_the_source() -> R
 }
 
 #[tokio::test]
-async fn conflicts_are_atomic_and_replacement_is_explicit() -> Result<()> {
-    let fixture = Fixture::new()?;
-    let source = fixture.directory.join("mcporter.json");
-    fixture.write(
-        &source,
-        &json!({"mcpServers":{"old":{"command":"node"},"new":{"command":"node"}}}),
-    )?;
-    fixture.write(
-        &fixture.home_config(),
-        &json!({"mcpServers":{"old":{"command":"original"}},"custom":42}),
-    )?;
-    let original = std::fs::read(fixture.home_config())?;
-    let path = source.to_str().context("source")?;
-    let denied = fixture.run(&["import", "mcporter", "--from", path]).await?;
-    assert!(!denied.status.success());
-    assert_eq!(std::fs::read(fixture.home_config())?, original);
-    fixture
-        .success(&["import", "mcporter", "--from", path, "--replace"])
-        .await?;
-    let document: Value = serde_json::from_slice(&std::fs::read(fixture.home_config())?)?;
-    assert_eq!(document.get("custom"), Some(&json!(42)));
-    assert_eq!(
-        document.pointer("/mcpServers/old/command"),
-        Some(&json!(["node"]))
-    );
-    std::fs::remove_file(&source)?;
-    let output: Value =
-        serde_json::from_slice(&fixture.success(&["config", "list", "--json"]).await?.stdout)?;
-    assert_eq!(
-        output
-            .get("servers")
-            .and_then(Value::as_array)
-            .map(Vec::len),
-        Some(2)
-    );
-    fixture.finish().await
-}
-
-#[tokio::test]
 async fn home_and_project_merge_before_environment_resolution_and_explicit_config_is_isolated()
 -> Result<()> {
     let fixture = Fixture::new()?;

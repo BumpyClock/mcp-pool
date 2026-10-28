@@ -42,32 +42,9 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn allocator_is_monotonic_and_unique() {
-        let allocator = IdAllocator::new();
-        let first = allocator.allocate();
-        let second = allocator.allocate();
-        let third = allocator.allocate();
-        assert_eq!(first, 1);
-        assert_eq!(second, 2);
-        assert_eq!(third, 3);
-    }
-
-    #[test]
     fn id_key_separates_number_and_string() {
         assert_eq!(id_key(&json!(1)), "1");
         assert_eq!(id_key(&json!("1")), "\"1\"");
         assert_ne!(id_key(&json!(1)), id_key(&json!("1")));
-    }
-
-    #[test]
-    fn with_id_replaces_and_round_trips() {
-        let object = json!({"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
-            .as_object()
-            .cloned()
-            .expect("object");
-        let line = with_id(object, Value::from(42u64));
-        let parsed: Value = serde_json::from_str(&line).expect("valid json");
-        assert_eq!(parsed.get("id"), Some(&json!(42)));
-        assert_eq!(parsed.get("method"), Some(&json!("tools/list")));
     }
 }

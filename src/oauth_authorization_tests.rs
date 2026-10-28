@@ -1,7 +1,6 @@
 use std::sync::atomic::Ordering;
 
 use anyhow::Result;
-use reqwest::Url;
 use serde_json::{Value, json};
 
 use super::test_support::{Fixture, Mock};
@@ -209,7 +208,6 @@ fn discovery_rejects_unadvertised_issuer_and_remote_plaintext() -> Result<()> {
     assert!(super::checked_url("http://remote.invalid/token").is_err());
     assert!(super::checked_url("https://user:secret@synthetic.invalid/token").is_err());
     assert!(files::timestamp().ends_with(".000Z"));
-    assert!(Url::parse("http://127.0.0.1/callback").is_ok());
     Ok(())
 }
 

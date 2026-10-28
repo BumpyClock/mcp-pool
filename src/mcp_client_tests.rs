@@ -74,21 +74,6 @@ pub(super) async fn fixture(deadline: Duration) -> Result<(McpClient, Server)> {
 }
 
 #[tokio::test]
-async fn initialize_consumes_notifications_and_sends_initialized() -> Result<()> {
-    let (mut client, mut server) = fixture(Duration::from_secs(1)).await?;
-    let (notified, received) = tokio::join!(
-        client.notify("notifications/message", json!({"data":"client"})),
-        read(&mut server)
-    );
-    notified?;
-    assert_eq!(
-        received?,
-        json!({"jsonrpc":"2.0","method":"notifications/message","params":{"data":"client"}})
-    );
-    Ok(())
-}
-
-#[tokio::test]
 async fn callbacks_with_colliding_id_are_not_request_results() -> Result<()> {
     let (mut client, mut server) = fixture(Duration::from_secs(1)).await?;
     let server_work = async {
@@ -189,6 +174,10 @@ async fn delayed_reply_retires_socket_without_unsafe_cancellation() -> Result<()
     client.deadline = Duration::from_millis(20);
     let server_work = async {
         let request = read(&mut server).await?;
+        assert_eq!(
+            request.get(crate::request_deadline::TIMEOUT_FIELD),
+            Some(&json!(20))
+        );
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(reply(&mut server, &request, json!({})).await.is_err());
         let mut extra = String::new();

@@ -1,51 +1,6 @@
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 
-use super::options::Options;
-
-pub(super) async fn start(options: &Options) -> Result<()> {
-    if options.foreground {
-        if let Some(path) = &options.log_file {
-            super::logging::configure(path.clone(), options.servers.clone())?;
-        }
-        return crate::daemon::serve().await;
-    }
-    let mut arguments: Vec<OsString> = ["daemon", "start", "--foreground"]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
-    if let Some(path) = &options.log_file {
-        arguments.push("--log-file".into());
-        arguments.push(path.as_os_str().to_owned());
-    }
-    if !options.servers.is_empty() {
-        arguments.push("--log-servers".into());
-        arguments.push(
-            options
-                .servers
-                .iter()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",")
-                .into(),
-        );
-    }
-    spawn_detached(&arguments)?;
-    let expires = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if super::direct(&crate::control::ControlRequest::Status { name: None })
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= expires {
-            anyhow::bail!("Daemon did not become ready within 10 seconds");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-}
-
 #[cfg(unix)]
 pub(crate) fn spawn_detached(arguments: &[OsString]) -> Result<()> {
     use std::os::unix::process::CommandExt;

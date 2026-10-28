@@ -24,42 +24,18 @@ mod rpc;
 #[path = "mcp_bridge_stdio.rs"]
 mod stdio;
 #[cfg(test)]
+#[path = "mcp_bridge_test_fixture.rs"]
+mod test_fixture;
+#[cfg(test)]
 #[path = "mcp_bridge_tests.rs"]
 mod tests;
 
 const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 
 type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
-type ReconnectFactory = Arc<dyn Fn() -> ClientFuture<'static, Box<dyn BridgeClient>> + Send + Sync>;
+type ReconnectFactory = Arc<dyn Fn() -> ClientFuture<'static, McpClient> + Send + Sync>;
 
-trait BridgeClient: Send {
-    fn is_closed(&self) -> bool;
-    fn list_tools(&mut self) -> ClientFuture<'_, Vec<Value>>;
-    fn request<'a>(&'a mut self, method: &'a str, params: Value) -> ClientFuture<'a, Value>;
-    fn wait_for_notification(&mut self) -> ClientFuture<'_, Option<Value>> {
-        Box::pin(async { Ok(None) })
-    }
-}
-
-impl BridgeClient for McpClient {
-    fn is_closed(&self) -> bool {
-        McpClient::is_closed(self)
-    }
-
-    fn list_tools(&mut self) -> ClientFuture<'_, Vec<Value>> {
-        Box::pin(McpClient::list_tools(self))
-    }
-
-    fn request<'a>(&'a mut self, method: &'a str, params: Value) -> ClientFuture<'a, Value> {
-        Box::pin(McpClient::request(self, method, params))
-    }
-
-    fn wait_for_notification(&mut self) -> ClientFuture<'_, Option<Value>> {
-        Box::pin(McpClient::wait_for_notification(self))
-    }
-}
-
-type SharedClient = Arc<Mutex<Box<dyn BridgeClient>>>;
+type SharedClient = Arc<Mutex<McpClient>>;
 
 struct ServerClient {
     client: SharedClient,
@@ -114,7 +90,7 @@ impl BridgeState {
         let servers = servers
             .into_iter()
             .map(|server| {
-                let filter = filter::ToolFilter::from_raw(&server.raw).map_err(|_| {
+                let filter = server.tool_filter().map_err(|_| {
                     anyhow::anyhow!("Server '{}' has invalid tool filters.", server.name)
                 })?;
                 Ok((server, filter))
@@ -142,7 +118,6 @@ impl BridgeState {
                     .map_err(|_| {
                         anyhow::anyhow!("Could not connect to pooled MCP server '{name}'.")
                     })?;
-                let client: Box<dyn BridgeClient> = Box::new(client);
                 Ok::<_, anyhow::Error>((name, client, reconnect, filter, timeout))
             });
         }
@@ -181,91 +156,6 @@ impl BridgeState {
         })
     }
 
-    #[cfg(test)]
-    fn with_clients(clients: Vec<(String, Box<dyn BridgeClient>)>) -> Result<Self> {
-        let mut server_order = Vec::with_capacity(clients.len());
-        let mut client_map = BTreeMap::new();
-        for (name, client) in clients {
-            if client_map
-                .insert(
-                    name.clone(),
-                    ServerClient {
-                        client: Arc::new(Mutex::new(client)),
-                        reconnect: unavailable_reconnect_factory(),
-                        filter: filter::ToolFilter::default(),
-                        timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
-                    },
-                )
-                .is_some()
-            {
-                bail!("Synthetic bridge client name must be unique.");
-            }
-            server_order.push(name);
-        }
-        Ok(Self {
-            server_order,
-            clients: client_map,
-        })
-    }
-
-    #[cfg(test)]
-    fn with_reconnectable_clients(
-        clients: Vec<(String, Box<dyn BridgeClient>, ReconnectFactory, Duration)>,
-    ) -> Result<Self> {
-        let mut server_order = Vec::with_capacity(clients.len());
-        let mut client_map = BTreeMap::new();
-        for (name, client, reconnect, timeout) in clients {
-            if client_map
-                .insert(
-                    name.clone(),
-                    ServerClient {
-                        client: Arc::new(Mutex::new(client)),
-                        reconnect,
-                        filter: filter::ToolFilter::default(),
-                        timeout,
-                    },
-                )
-                .is_some()
-            {
-                bail!("Synthetic bridge client name must be unique.");
-            }
-            server_order.push(name);
-        }
-        Ok(Self {
-            server_order,
-            clients: client_map,
-        })
-    }
-
-    #[cfg(test)]
-    fn with_filtered_clients(
-        clients: Vec<(String, Box<dyn BridgeClient>, filter::ToolFilter)>,
-    ) -> Result<Self> {
-        let mut server_order = Vec::with_capacity(clients.len());
-        let mut client_map = BTreeMap::new();
-        for (name, client, filter) in clients {
-            if client_map
-                .insert(
-                    name.clone(),
-                    ServerClient {
-                        client: Arc::new(Mutex::new(client)),
-                        reconnect: unavailable_reconnect_factory(),
-                        filter,
-                        timeout: Duration::from_millis(DEFAULT_TIMEOUT_MS),
-                    },
-                )
-                .is_some()
-            {
-                bail!("Synthetic bridge client name must be unique.");
-            }
-            server_order.push(name);
-        }
-        Ok(Self {
-            server_order,
-            clients: client_map,
-        })
-    }
-
     pub(super) fn has_server(&self, name: &str) -> bool {
         self.clients.contains_key(name)
     }
@@ -284,7 +174,7 @@ impl BridgeState {
     pub(super) async fn connect_notification_client(
         &self,
         server: &str,
-    ) -> std::result::Result<Box<dyn BridgeClient>, BridgeFailure> {
+    ) -> std::result::Result<McpClient, BridgeFailure> {
         let Some(server_client) = self.clients.get(server) else {
             return Err(BridgeFailure::unknown_server());
         };
@@ -387,10 +277,7 @@ impl BridgeState {
     }
 }
 
-async fn reconnect_if_closed(
-    client: &mut Box<dyn BridgeClient>,
-    reconnect: &ReconnectFactory,
-) -> Result<()> {
+async fn reconnect_if_closed(client: &mut McpClient, reconnect: &ReconnectFactory) -> Result<()> {
     if client.is_closed() {
         *client = reconnect().await?;
     }
@@ -405,18 +292,7 @@ fn pool_reconnect_factory(
     Arc::new(move || {
         let pool_name = pool_name.clone();
         let definition = definition.clone();
-        Box::pin(async move {
-            let client = McpClient::connect(&pool_name, &definition, timeout).await?;
-            Ok(Box::new(client) as Box<dyn BridgeClient>)
-        })
-    })
-}
-
-#[cfg(test)]
-fn unavailable_reconnect_factory() -> ReconnectFactory {
-    Arc::new(|| {
-        Box::pin(async { bail!("Synthetic bridge client has no reconnect factory.") })
-            as ClientFuture<'static, Box<dyn BridgeClient>>
+        Box::pin(async move { McpClient::connect(&pool_name, &definition, timeout).await })
     })
 }
 

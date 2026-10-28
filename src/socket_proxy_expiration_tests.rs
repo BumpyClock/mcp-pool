@@ -27,21 +27,10 @@ fn age_pending_requests(generation: &Generation, keep_tools: bool, remaining: Du
             continue;
         }
         request.inserted_at = expiry - request.expires_after;
-        match request.cache_key {
-            Some(CacheableMethod::Initialize) => {
-                if let Initialization::InFlight { deadline, .. } = &mut cache.initialize {
-                    *deadline = crate::request_deadline::SharedDeadline::new(expiry);
-                }
-            }
-            Some(CacheableMethod::ServerDiscover) => {
-                cache.server_discovery.requests.in_flight =
-                    Some(crate::request_deadline::SharedDeadline::new(expiry));
-            }
-            Some(CacheableMethod::ToolsList) => {
-                cache.tools_list.in_flight =
-                    Some(crate::request_deadline::SharedDeadline::new(expiry));
-            }
-            None => {}
+        if let Some(method) = request.cache_key
+            && let Some(deadline) = cache.deadline(method)
+        {
+            cache.elapse_shared_wait(method, deadline.current().saturating_duration_since(expiry));
         }
     }
 }
@@ -269,10 +258,14 @@ async fn disconnected_initialize_leader_still_expires_followers() -> io::Result<
         json!({"jsonrpc":"2.0","id":"second","error":{"code":-32001,"message":"initialize timed out"}})
     );
     assert!(generation.request_map.lock().is_empty());
-    assert!(matches!(
-        generation.handshake_cache.lock().initialize,
-        Initialization::Empty
-    ));
+    assert!(!generation.handshake_cache.lock().initialization_ready());
+    assert!(
+        generation
+            .handshake_cache
+            .lock()
+            .deadline(CacheableMethod::Initialize)
+            .is_none()
+    );
     assert!(
         fixture.requests.try_recv().is_err(),
         "expiration must not replay"
@@ -308,20 +301,23 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation.handshake_cache.lock().tools_list.waiters.len() != 1 {
+        while generation
+            .handshake_cache
+            .lock()
+            .waiter_count(CacheableMethod::ToolsList)
+            != 1
+        {
             tokio::task::yield_now().await;
         }
     })
     .await
     .map_err(io::Error::other)?;
-    let near_deadline =
-        Instant::now() - Duration::from_secs(REQUEST_TTL_SECS) + Duration::from_millis(100);
     {
         age_pending_requests(&generation, true, Duration::from_millis(100));
-        let mut cache = generation.handshake_cache.lock();
-        for waiter in &mut cache.tools_list.waiters {
-            waiter.inserted_at = near_deadline;
-        }
+        generation.handshake_cache.lock().elapse_waiters(
+            CacheableMethod::ToolsList,
+            Duration::from_secs(REQUEST_TTL_SECS) - Duration::from_millis(100),
+        );
     }
     generation.expiration_changed.notify_one();
     let first_one = read(&mut first).await?;
@@ -349,8 +345,7 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
         generation
             .handshake_cache
             .lock()
-            .tools_list
-            .in_flight
+            .deadline(CacheableMethod::ToolsList)
             .is_some()
     );
     assert!(fixture.requests.try_recv().is_err(), "no automatic replay");
@@ -360,7 +355,12 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
     )
     .await?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation.handshake_cache.lock().tools_list.waiters.len() != 1 {
+        while generation
+            .handshake_cache
+            .lock()
+            .waiter_count(CacheableMethod::ToolsList)
+            != 1
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -379,8 +379,7 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
         generation
             .handshake_cache
             .lock()
-            .tools_list
-            .in_flight
+            .deadline(CacheableMethod::ToolsList)
             .is_none()
     );
     send(
@@ -448,10 +447,7 @@ async fn server_discovery_waiter_expiration_does_not_cancel_live_leader() -> io:
         while generation
             .handshake_cache
             .lock()
-            .server_discovery
-            .requests
-            .waiters
-            .len()
+            .waiter_count(CacheableMethod::ServerDiscover)
             != 1
         {
             tokio::task::yield_now().await;
@@ -460,14 +456,10 @@ async fn server_discovery_waiter_expiration_does_not_cancel_live_leader() -> io:
     .await
     .map_err(io::Error::other)?;
     {
-        let mut cache = generation.handshake_cache.lock();
-        let waiter = cache
-            .server_discovery
-            .requests
-            .waiters
-            .first_mut()
-            .ok_or_else(|| io::Error::other("missing discovery waiter"))?;
-        waiter.inserted_at = Instant::now() - waiter.expires_after - Duration::from_millis(1);
+        generation.handshake_cache.lock().elapse_waiters(
+            CacheableMethod::ServerDiscover,
+            Duration::from_secs(REQUEST_TTL_SECS + 1),
+        );
     }
     generation.expiration_changed.notify_one();
 
@@ -482,9 +474,7 @@ async fn server_discovery_waiter_expiration_does_not_cancel_live_leader() -> io:
         generation
             .handshake_cache
             .lock()
-            .server_discovery
-            .requests
-            .in_flight
+            .deadline(CacheableMethod::ServerDiscover)
             .is_some()
     );
     assert!(fixture.requests.try_recv().is_err());

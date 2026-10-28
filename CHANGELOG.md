@@ -41,6 +41,9 @@
 
 ### Changed
 
+- Internal config and command operations no longer rebuild JSON text or CLI
+  arguments. Shared-request transitions and daemon ownership selection have
+  explicit owners. The bridge uses the pooled MCP client directly.
 - All commands now use `~/.mcp/config.json` merged with
   `PROJECT/.mcp/config.json`, with project entries taking precedence.
   `MCP_POOL_CONFIG` replaces `MCPORTER_CONFIG`; explicit `--config` selects one
