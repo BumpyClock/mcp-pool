@@ -214,8 +214,10 @@ upstream process/connection instead of launching N copies.
   Never `let _ =` on fallible ops silently.
 - Full-word variable names. Keep files ≤ ~500 LOC; split when they grow.
 - **Cross-platform**: preserve `#[cfg(unix)]` / `#[cfg(windows)]` splits in
-  `transport.rs`, `config.rs` paths, and `pool.rs::socket_alive`. The unified
-  stream type is `transport::LocalStream` (boxed `LocalIo` trait object).
+  `transport.rs` and `config.rs` paths. Socket discovery and its
+  `pool.rs::socket_alive` probe are Unix-only; Windows discovery returns zero
+  without probing named pipes. The unified stream type is
+  `transport::LocalStream` (boxed `LocalIo` trait object).
 - Comments explain *why*, not *what*. No organizational/summary comments.
 
 ## Build / test
