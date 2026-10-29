@@ -7,6 +7,32 @@ use serde_json::{Value, json};
 
 pub const MARKER: &str = "MCP_POOL_TEST_STDIO";
 pub const COUNTER: &str = "MCP_POOL_TEST_COUNTER";
+pub const LIST_GATE: &str = "MCP_POOL_TEST_LIST_GATE";
+pub const LIST_SIGNAL: &str = "MCP_POOL_TEST_LIST_SIGNAL";
+
+fn await_list_gate() -> io::Result<bool> {
+    let Some(gate) = std::env::var_os(LIST_GATE) else {
+        return Ok(true);
+    };
+    let gate = std::path::PathBuf::from(gate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if gate.try_exists()? {
+            return Ok(true);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(false)
+}
+
+fn signal_listed(request: &Value) -> io::Result<()> {
+    let final_page = request.get("method") == Some(&json!("tools/list"))
+        && request.pointer("/params/cursor") == Some(&json!("tools-page-two"));
+    match std::env::var_os(LIST_SIGNAL) {
+        Some(path) if final_page => std::fs::write(path, b"listed"),
+        _ => Ok(()),
+    }
+}
 
 fn record(event: &str) -> io::Result<()> {
     let path = std::env::var_os(COUNTER)
@@ -44,6 +70,9 @@ pub fn response(request: &Value) -> io::Result<Value> {
             record("tools/list")?;
             if parameters.get("cursor") == Some(&json!("tools-page-two")) {
                 json!({"tools":[tool("delayed"),tool("fail_rpc"),tool("fail_tool")]})
+            } else if !await_list_gate()? {
+                return Ok(json!({"jsonrpc":"2.0", "id":request.get("id"),
+                    "error":{"code":-32000,"message":"fixture list gate never opened"}}));
             } else {
                 let echo = if std::env::var_os("MCP_POOL_TEST_DOTTED_TOOL").is_some() {
                     "echo.v2"
@@ -124,7 +153,9 @@ fn upstream_fixture() -> io::Result<()> {
                 .lock()
                 .map_err(|_| io::Error::other("fixture stdout poisoned"))?;
             writeln!(output, "{response}")?;
-            output.flush()
+            output.flush()?;
+            drop(output);
+            signal_listed(&request)
         }));
     }
     for worker in workers {
