@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use super::{HttpAuth, files, string};
 
-const DIRECTORY_FIELDS: &[(&str, &str, bool)] = &[
+pub(super) const DIRECTORY_FIELDS: &[(&str, &str, bool)] = &[
     ("tokens", "tokens.json", true),
     ("clientInfo", "client.json", true),
     ("discoveryState", "discovery.json", true),
@@ -20,7 +20,7 @@ const DIRECTORY_FIELDS: &[(&str, &str, bool)] = &[
     ("codeVerifier", "code_verifier.txt", false),
 ];
 
-fn vault(authentication: &HttpAuth) -> Result<Value> {
+pub(super) fn vault(authentication: &HttpAuth) -> Result<Value> {
     let value = files::read_json(&authentication.vault_path)?
         .unwrap_or_else(|| json!({"version":2,"entries":{},"serverUrls":{}}));
     if !matches!(value.get("version").and_then(Value::as_u64), Some(1 | 2))
@@ -31,7 +31,10 @@ fn vault(authentication: &HttpAuth) -> Result<Value> {
     Ok(value)
 }
 
-fn matching<'a>(authentication: &HttpAuth, vault: &'a Value) -> Vec<(String, &'a Value)> {
+pub(super) fn matching<'a>(
+    authentication: &HttpAuth,
+    vault: &'a Value,
+) -> Vec<(String, &'a Value)> {
     let marker = vault
         .get("serverUrls")
         .and_then(|urls| string(urls, &authentication.server_name));
@@ -197,6 +200,22 @@ pub(super) fn validate_tokens(tokens: &Value) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn validate_payload(authentication: &HttpAuth, payload: &Value) -> Result<()> {
+    let tokens = payload
+        .get("tokens")
+        .ok_or_else(|| anyhow::anyhow!("vault payload requires tokens"))?;
+    validate_tokens(tokens)?;
+    if string(tokens, "refresh_token").is_some()
+        && payload
+            .get("clientInfo")
+            .and_then(|client| string(client, "client_id"))
+            .is_none()
+    {
+        bail!("refreshable credential payload must include its bound clientInfo registration");
+    }
+    validate_binding(authentication, payload)
+}
+
 pub(super) fn expired(tokens: &Value) -> bool {
     let expiration = tokens
         .get("expires_at")
@@ -301,22 +320,22 @@ pub(super) fn save(
     let mut vault = vault(authentication)?;
     let candidates = snapshots(authentication)?;
     let previous = super::reconcile::select(&candidates)?;
+    save_entry(authentication, &mut vault, patch, &previous, &candidates)
+}
+
+pub(super) fn save_entry(
+    authentication: &HttpAuth,
+    vault: &mut Value,
+    patch: &Value,
+    previous: &Value,
+    candidates: &[Value],
+) -> Result<()> {
     let mut entry = previous.as_object().cloned().unwrap_or_default();
     let patch = patch
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("credential payload must be an object"))?;
     for (key, value) in patch {
-        if ![
-            "tokens",
-            "clientInfo",
-            "discoveryState",
-            "authorizationServerUrl",
-            "resourceUrl",
-            "state",
-            "codeVerifier",
-        ]
-        .contains(&key.as_str())
-        {
+        if !DIRECTORY_FIELDS.iter().any(|(field, _, _)| *field == key) {
             bail!("unsupported credential payload field");
         }
         entry.insert(key.clone(), value.clone());
@@ -326,7 +345,7 @@ pub(super) fn save(
     entry.insert("updatedAt".to_owned(), json!(files::timestamp()));
     let mut entry = Value::Object(entry);
     if patch.contains_key("tokens") {
-        super::reconcile::stamp(&mut entry, &previous, &candidates)?;
+        super::reconcile::stamp(&mut entry, previous, candidates)?;
     }
     super::reconcile::validate_client(&entry)?;
     validate_binding(authentication, &entry)?;
@@ -351,7 +370,7 @@ pub(super) fn save(
             json!(authentication.server_url),
         );
     }
-    files::write_json(&authentication.vault_path, &vault)?;
+    files::write_json(&authentication.vault_path, vault)?;
     if authentication.directory_primary {
         for directory in &authentication.directory_stores {
             let _directory_lock = files::Lock::acquire(&directory.join("tokens.json"))?;

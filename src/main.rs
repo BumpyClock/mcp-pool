@@ -3,6 +3,7 @@ mod cli_progress;
 mod config;
 mod config_commands;
 mod config_import;
+mod config_import_auth;
 mod config_import_sources;
 mod config_paths;
 mod configured_cli;

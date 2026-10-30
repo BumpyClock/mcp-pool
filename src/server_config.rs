@@ -20,11 +20,14 @@ pub(crate) fn is_server_entry(entry: &serde_json::Map<String, Value>) -> bool {
 
 #[path = "server_config_values.rs"]
 mod values;
-pub(crate) use values::{command_tokens, existing_command_path};
+pub(crate) use values::{command_tokens, existing_command_path, resolve_path};
 
 #[path = "server_config_settings.rs"]
 mod settings;
-pub(crate) use settings::OAuthSettings;
+pub(crate) use settings::{ConfiguredEnvironment, OAuthSettings};
+#[path = "server_config_auth.rs"]
+mod authentication;
+pub(crate) use authentication::authentication_server;
 
 #[cfg(test)]
 #[path = "configuration_reader_tests.rs"]
@@ -365,14 +368,14 @@ fn normalize(
             .env
             .insert(name, expand(&value).context("field 'env'")?);
     }
+    let effective_environment = |name: &str| {
+        definition
+            .env
+            .iter()
+            .find(|(configured, _)| settings::environment_names_match(configured, name))
+            .map_or_else(|| environment(name), |(_, value)| Ok(Some(value.clone())))
+    };
     {
-        let effective_environment = |name: &str| {
-            definition
-                .env
-                .iter()
-                .find(|(configured, _)| settings::environment_names_match(configured, name))
-                .map_or_else(|| environment(name), |(_, value)| Ok(Some(value.clone())))
-        };
         let expand = |value: &str| values::expand_environment(value, &effective_environment);
         for (name, value) in entry.headers {
             definition
@@ -399,7 +402,8 @@ fn normalize(
         .or(entry.server_url)
         .or(entry.snake_server_url);
     if let Some(url) = url.filter(|url| !url.is_empty()) {
-        definition.url = expand(&url).context("field 'url'")?;
+        definition.url =
+            values::expand_environment(&url, &effective_environment).context("field 'url'")?;
         let parsed = reqwest::Url::parse(&definition.url)
             .map_err(|_| anyhow!("field 'url' must be an absolute HTTP/SSE URL"))?;
         if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {

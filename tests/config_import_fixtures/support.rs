@@ -44,6 +44,7 @@ impl Fixture {
             .env("HOME", &self.directory)
             .env("USERPROFILE", &self.directory)
             .env("APPDATA", &self.directory)
+            .env_remove("XDG_DATA_HOME")
             .env_remove("MCP_POOL_CONFIG")
             .env_remove("MCP_POOL_CREDENTIALS_READ_ONLY")
             .env("CLAUDE_CONFIG_DIR", &self.directory)
