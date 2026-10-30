@@ -2,7 +2,7 @@
 
 use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::time::Duration;
 
@@ -12,6 +12,18 @@ use tokio::process::Command;
 
 #[path = "common/fixture_home.rs"]
 mod fixture_home;
+
+struct FixtureHome(PathBuf);
+
+impl Drop for FixtureHome {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.0)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("could not remove default-path fixture home: {error}");
+        }
+    }
+}
 
 fn command(home: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_mcp-pool"));
@@ -41,7 +53,8 @@ async fn success(home: &Path, arguments: &[&str]) -> Result<Output> {
 }
 
 async fn default_home_lifecycle(start_arguments: &[&str]) -> Result<()> {
-    let home = std::fs::canonicalize(fixture_home::create("mp")?)?;
+    let fixture = FixtureHome(fixture_home::create("mp")?);
+    let home = std::fs::canonicalize(&fixture.0)?;
     let application = home.join(".mcp");
     std::fs::create_dir(&application)?;
     std::fs::set_permissions(&application, std::fs::Permissions::from_mode(0o755))?;
@@ -90,7 +103,22 @@ async fn default_home_lifecycle(start_arguments: &[&str]) -> Result<()> {
     for entry in application.join("run").read_dir()? {
         ensure!(!entry?.file_type()?.is_socket());
     }
+    ensure!(std::fs::read(application.join("config.json"))? == configuration.as_bytes());
+    ensure!(std::fs::read(application.join("credentials.json"))? == credentials);
     std::fs::remove_dir_all(home)?;
+    Ok(())
+}
+
+#[test]
+fn failed_fixture_setup_removes_its_home() -> Result<()> {
+    let home = fixture_home::create("mp")?;
+    let result = (|| -> Result<()> {
+        let fixture = FixtureHome(home.clone());
+        std::fs::write(fixture.0.join("credentials.json"), b"synthetic-credentials")?;
+        anyhow::bail!("simulated fixture setup failure");
+    })();
+    ensure!(result.is_err());
+    ensure!(!home.exists());
     Ok(())
 }
 
