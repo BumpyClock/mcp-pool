@@ -63,6 +63,46 @@ async fn creates_private_same_user_socket_and_directory() -> io::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn missing_endpoint_allows_bind_repair_but_existing_endpoint_requires_private_directory()
+-> io::Result<()> {
+    let directory = TestDirectory::create()?;
+    let application = directory.0.join(".mcp");
+    fs::create_dir(&application)?;
+    fs::set_permissions(&application, fs::Permissions::from_mode(0o755))?;
+    let endpoint = application.join("pool.sock");
+    assert_eq!(
+        validate_unix_socket_path(&endpoint)
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::NotFound)
+    );
+    assert_eq!(
+        fs::metadata(&application)?.permissions().mode() & 0o777,
+        0o755
+    );
+
+    let listener = bind_unix_listener(&endpoint)?;
+    assert_eq!(
+        fs::metadata(&application)?.permissions().mode() & 0o777,
+        0o700
+    );
+    fs::set_permissions(&application, fs::Permissions::from_mode(0o755))?;
+    assert_eq!(
+        validate_unix_socket_path(&endpoint)
+            .err()
+            .map(|error| error.kind()),
+        Some(io::ErrorKind::PermissionDenied)
+    );
+    assert!(fs::symlink_metadata(&endpoint)?.file_type().is_socket());
+    assert_eq!(
+        fs::metadata(&application)?.permissions().mode() & 0o777,
+        0o755
+    );
+    drop(listener);
+    Ok(())
+}
+
 #[test]
 fn private_directory_binding_does_not_change_concurrent_file_permissions() -> io::Result<()> {
     let output = std::process::Command::new(std::env::current_exe()?)
@@ -183,15 +223,21 @@ async fn refuses_symlink_and_non_socket_endpoints_without_removing_them() -> io:
     assert_eq!(fs::read(&regular)?, b"not a socket");
 
     let state = directory.0.join("state");
-    let real_application = state.join("real-mcp-pool");
-    let linked_application = state.join("mcp-pool");
-    fs::create_dir_all(&real_application)?;
-    std::os::unix::fs::symlink(&real_application, &linked_application)?;
-    let linked_endpoint = linked_application.join("linked.sock");
-    let error = prepare_unix_socket_path(&linked_endpoint)
-        .err()
-        .ok_or_else(|| io::Error::other("symlink socket parent unexpectedly prepared"))?;
-    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    for name in ["mcp-pool", ".mcp"] {
+        let real_application = state.join(format!("real-{name}"));
+        let linked_application = state.join(name);
+        fs::create_dir_all(&real_application)?;
+        std::os::unix::fs::symlink(&real_application, &linked_application)?;
+        for endpoint in [
+            linked_application.join("linked.sock"),
+            linked_application.join("run/linked.sock"),
+        ] {
+            let error = prepare_unix_socket_path(&endpoint)
+                .err()
+                .ok_or_else(|| io::Error::other("symlink socket parent unexpectedly prepared"))?;
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
 
     let real_parent = directory.socket("real-parent");
     let linked_parent = directory.socket("linked-parent");

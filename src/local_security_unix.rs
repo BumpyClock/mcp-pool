@@ -28,12 +28,6 @@ pub(crate) fn bind_unix_listener(path: &Path) -> io::Result<tokio::net::UnixList
     }
 }
 
-pub(crate) fn validate_unix_socket_path(path: &Path) -> io::Result<PathBuf> {
-    let endpoint = resolve_unix_socket_path(path)?;
-    validate_socket_file(&endpoint)?;
-    Ok(endpoint)
-}
-
 pub(crate) fn verify_unix_peer<T: std::os::fd::AsRawFd>(stream: &T) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
@@ -109,7 +103,7 @@ pub(crate) fn prepare_unix_socket_path(path: &Path) -> io::Result<PathBuf> {
     Ok(parent.join(file_name))
 }
 
-fn resolve_unix_socket_path(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn validate_unix_socket_path(path: &Path) -> io::Result<PathBuf> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -120,8 +114,11 @@ fn resolve_unix_socket_path(path: &Path) -> io::Result<PathBuf> {
     reject_app_directory_symlinks(parent)?;
     reject_unsafe_parent_symlink(parent)?;
     let parent = fs::canonicalize(parent)?;
+    let endpoint = parent.join(file_name);
+    // Absence must reach autolaunch before bind repairs owned application directories.
+    validate_socket_file(&endpoint)?;
     secure_socket_directory(&parent, false)?;
-    Ok(parent.join(file_name))
+    Ok(endpoint)
 }
 
 fn reject_app_directory_symlinks(path: &Path) -> io::Result<()> {
@@ -299,13 +296,14 @@ fn verify_generic_directory(path: &Path, user_id: u32) -> io::Result<()> {
 fn app_owned_directories(path: &Path) -> Vec<PathBuf> {
     let mut directories = Vec::new();
     match path.file_name().and_then(std::ffi::OsStr::to_str) {
-        Some("mcp-pool") => directories.push(path.to_path_buf()),
+        Some("mcp-pool" | ".mcp") => directories.push(path.to_path_buf()),
         Some("run")
-            if path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(std::ffi::OsStr::to_str)
-                == Some("mcp-pool") =>
+            if matches!(
+                path.parent()
+                    .and_then(Path::file_name)
+                    .and_then(std::ffi::OsStr::to_str),
+                Some("mcp-pool" | ".mcp")
+            ) =>
         {
             if let Some(application_directory) = path.parent() {
                 directories.push(application_directory.to_path_buf());
