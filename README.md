@@ -66,6 +66,8 @@ mcp-pool import claude
 mcp-pool import codex --scope project
 mcp-pool import project --scope project
 mcp-pool import mcporter --from PATH
+mcp-pool import mcporter --include-auth --dry-run
+mcp-pool import mcporter --include-auth
 mcp-pool import cursor --scope project
 mcp-pool import vscode --from PATH --dry-run
 mcp-pool config import claude docs --scope project
@@ -98,11 +100,41 @@ Relative working directories and executable paths are rebased while copying.
 Environment references, headers, OAuth settings, and tool filters remain in the
 copy; ambient environment values are not saved. Codex disabled servers are
 omitted with a warning. Unsupported authentication helpers and transports fail
-explicitly instead of dropping authentication. OAuth tokens are not imported;
-authorize each scope explicitly. Legacy `imports` arrays are not followed.
+explicitly instead of dropping authentication. OAuth tokens are not imported by
+default; authorize each scope explicitly or use the mcporter option below.
+Legacy `imports` arrays are not followed.
 Literal `bearerToken` credentials and masked credential placeholders are rejected
 atomically; use `bearerTokenEnv` or an unresolved environment reference instead.
 After upgrading, stop an old daemon before starting pools with the new config.
+
+`import mcporter --include-auth` also copies cached HTTP/SSE OAuth tokens and their
+bound client registration. It reads `~/.mcporter/credentials.json`, or
+`$XDG_DATA_HOME/mcporter/credentials.json` when XDG_DATA_HOME is absolute. Configured
+environment overrides take precedence. Source home follows effective `HOME`, then
+`USERPROFILE`, independently of the destination scope. Explicit `tokenCacheDir` stores and legacy
+`~/.mcporter/NAME` caches are supported. `--from` selects definitions, not a
+credential file. Other import sources and stdio helper credentials are unsupported.
+
+Credentials go into `credentials.json` beside the destination config, not the
+config itself. With `--include-auth`, copied remote definitions drop `tokenCacheDir`
+to prevent future writes to mcporter caches. Sources stay untouched. Import makes
+no network requests and starts no consent flow. Expiration times stay unchanged;
+expired tokens still need refresh or explicit authorization on first use.
+
+Text and JSON reports show per-server auth status (`import`, `unchanged`, `missing`,
+or `unsupported`), never credential values. Missing auth does not stop definition
+imports. Different destination credentials, client registrations, and unfinished
+authorization state require `--replace`; identical copies are idempotent.
+Destinations that alias source credential files, including symlinks, are rejected. `--dry-run` reads and validates without writing or retiring pools.
+Credential writes obey `MCP_POOL_CREDENTIALS_READ_ONLY=1` and retire affected pool
+views first. Preflight validation and conflict errors leave destination files unchanged.
+Config and credential files are committed separately. A later credential I/O failure
+can leave the config and earlier credentials imported; fix the store and rerun.
+
+**Cutover warning.** Copied refresh tokens may rotate. Stop using imported servers
+through mcporter after cutover, or one runtime can invalidate the other runtime's
+credentials. `--replace` can also overwrite newer destination tokens with an older
+source copy. If the source is stale, authorize through mcp-pool instead.
 
 Windows resolves extensionless commands such as `npx` using `PATH` and
 `PATHEXT`, preferring Windows launchers such as `npx.cmd` over sibling
@@ -245,8 +277,9 @@ The config reader accepts JSONC comments and trailing commas, an `mcpServers`
 object, stdio commands, HTTP/SSE URLs, environment values, headers, and working
 directories. Relative command paths and `cwd` resolve against the selected
 config file's directory; absent stdio `cwd` uses that directory.
-HTTP headers, `bearerToken`, and `bearerTokenEnv` resolve environment values
-from the server's configured `env` overrides before the caller's environment.
+HTTP endpoints, headers, `bearerToken`, and `bearerTokenEnv` resolve environment
+values from the server's configured `env` overrides before the caller's environment.
+OAuth client metadata and credential-cache paths use the same precedence.
 External configs are read only by explicit `import` commands. Legacy `imports`
 arrays in an owned config produce a warning and are not followed.
 

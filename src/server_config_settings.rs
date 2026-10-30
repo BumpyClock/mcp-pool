@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
 use super::ConfiguredServer;
@@ -20,7 +21,32 @@ pub(crate) struct ConfiguredEnvironment<'a> {
     entries: Option<&'a Map<String, Value>>,
 }
 
-impl ConfiguredEnvironment<'_> {
+impl<'a> ConfiguredEnvironment<'a> {
+    pub(crate) fn from_raw(raw: &'a Value) -> Self {
+        Self {
+            entries: raw.get("env").and_then(Value::as_object),
+        }
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Result<Option<String>> {
+        match self.entries.and_then(|entries| {
+            entries
+                .iter()
+                .find(|(key, _)| environment_names_match(key, name))
+        }) {
+            Some((_, value)) => super::values::expand_environment(
+                value.as_str().context("env values must be strings")?,
+                &super::values::environment_variable,
+            )
+            .map(Some),
+            None => super::values::environment_variable(name),
+        }
+    }
+
+    pub(crate) fn expand(&self, value: &str) -> Result<String> {
+        super::values::expand_environment(value, &|name| self.get(name))
+    }
+
     // Error redaction historically matches exact names; pool identity follows OS semantics.
     pub(crate) fn contains_exact(&self, name: &str) -> bool {
         self.entries
@@ -39,10 +65,9 @@ impl ConfiguredEnvironment<'_> {
     }
 }
 
-impl ConfiguredServer {
-    pub(crate) fn oauth_settings(&self) -> OAuthSettings<'_> {
-        let raw = &self.raw;
-        OAuthSettings {
+impl<'a> OAuthSettings<'a> {
+    pub(crate) fn from_raw(raw: &'a Value) -> Self {
+        Self {
             auth: nonempty_string(raw, "auth"),
             token_cache_directory: string_alias(raw, "tokenCacheDir", "token_cache_dir"),
             client_name: string_alias(raw, "clientName", "client_name"),
@@ -70,11 +95,15 @@ impl ConfiguredServer {
                 .map(Vec::as_slice),
         }
     }
+}
+
+impl ConfiguredServer {
+    pub(crate) fn oauth_settings(&self) -> OAuthSettings<'_> {
+        OAuthSettings::from_raw(&self.raw)
+    }
 
     pub(crate) fn configured_environment(&self) -> ConfiguredEnvironment<'_> {
-        ConfiguredEnvironment {
-            entries: self.raw.get("env").and_then(Value::as_object),
-        }
+        ConfiguredEnvironment::from_raw(&self.raw)
     }
 
     pub(crate) fn configured_lifecycle(&self) -> Option<bool> {

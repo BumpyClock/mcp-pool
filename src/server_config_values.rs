@@ -62,7 +62,7 @@ pub(super) fn expand_home(path: &Path) -> Result<PathBuf> {
     }
 }
 
-pub(super) fn resolve_path(path: &Path, directory: &Path) -> Result<PathBuf> {
+pub(crate) fn resolve_path(path: &Path, directory: &Path) -> Result<PathBuf> {
     let path = expand_home(path)?;
     if path.is_absolute() || windows_absolute(&path.to_string_lossy()) {
         Ok(path)

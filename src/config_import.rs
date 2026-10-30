@@ -14,13 +14,14 @@ pub(crate) async fn run(
     let mut arguments = VecDeque::from(arguments);
     let source = value(
         &mut arguments,
-        "source (claude, claude-desktop, codex, cursor, windsurf, opencode, vscode, project, or mcp-pool)",
+        "source (claude, claude-desktop, codex, mcporter, cursor, windsurf, opencode, vscode, project, or mcp-pool)",
     )?;
     let mut from = None;
     let mut destination = path;
     let mut dry_run = false;
     let mut replace = false;
     let mut json_output = false;
+    let mut include_auth = false;
     let mut names = Vec::new();
     while let Some(argument) = arguments.pop_front() {
         match argument.as_str() {
@@ -40,13 +41,17 @@ pub(crate) async fn run(
             "--dry-run" => dry_run = true,
             "--replace" => replace = true,
             "--json" => json_output = true,
+            "--include-auth" => include_auth = true,
             _ if argument.starts_with('-') => bail!("Unknown import flag '{argument}'"),
             _ => names.push(argument),
         }
     }
+    if include_auth && source != "mcporter" {
+        bail!("--include-auth is supported only for mcporter imports");
+    }
     let project = crate::config_paths::project_directory(root)?;
     let home = dirs::home_dir().context("Home directory unavailable")?;
-    let batch =
+    let mut batch =
         crate::config_import_sources::collect(&source, from.as_deref(), &project, &home, &names)?;
     for name in &names {
         if !batch.servers.contains_key(name) {
@@ -61,6 +66,11 @@ pub(crate) async fn run(
         Some(path) => path,
         None => crate::config_paths::explicit(None)?.unwrap_or(crate::config_paths::home_config()?),
     })?;
+    let authentication = if include_auth {
+        crate::config_import_auth::Plan::prepare(&mut batch, &destination, &home, replace)?
+    } else {
+        crate::config_import_auth::Plan::default()
+    };
     let entries: serde_json::Map<String, Value> = batch
         .servers
         .iter()
@@ -69,7 +79,12 @@ pub(crate) async fn run(
     crate::server_config::validate_document(&json!({"mcpServers":entries}))?;
     let report = json!({
         "destination":destination,"dryRun":dry_run,
-        "servers":batch.servers.iter().map(|(name, server)| json!({"name":name,"source":server.source})).collect::<Vec<_>>()
+        "servers":batch.servers.iter().map(|(name, server)| {
+            match authentication.statuses.get(name) {
+                Some(status) => json!({"name":name,"source":server.source,"auth":status}),
+                None => json!({"name":name,"source":server.source}),
+            }
+        }).collect::<Vec<_>>()
     });
     let mutate = |document: &mut Value| -> Result<()> {
         let servers = document
@@ -95,6 +110,8 @@ pub(crate) async fn run(
         mutate(&mut document)?;
         crate::server_config::validate_document(&document)?;
     } else {
+        authentication.ensure_writable()?;
+        let planned_authentication = &authentication;
         let previous_source = destination.clone();
         let changed = entries.clone();
         crate::config_commands::write::write_checked_mutation(
@@ -111,10 +128,18 @@ pub(crate) async fn run(
                             .await?;
                     }
                 }
-                Ok(())
+                planned_authentication.retire().await
             },
         )
         .await?;
+    }
+    if include_auth {
+        crate::mcp_cli::context::warning(
+            "Refresh tokens may rotate. Stop using imported servers through mcporter after cutover; concurrent use can invalidate credentials.",
+        );
+    }
+    if !dry_run {
+        authentication.commit()?;
     }
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -127,7 +152,11 @@ pub(crate) async fn run(
             destination.display()
         );
         for name in entries.keys() {
-            println!("  {name}");
+            if let Some(status) = authentication.statuses.get(name) {
+                println!("  {name} (auth: {status})");
+            } else {
+                println!("  {name}");
+            }
         }
     }
     Ok(())

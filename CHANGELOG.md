@@ -4,6 +4,11 @@
 
 ### Added
 
+- Opt-in `import mcporter --include-auth` copies cached HTTP/SSE OAuth tokens,
+  client registrations, and discovery metadata into the destination credential
+  scope. Supports vault and directory caches, redacted previews, conflict checks,
+  private writes, and pool retirement without login, refresh, or source changes.
+  Copied remote definitions no longer share mcporter token-cache directories.
 - Discoverable root help and configured-server CLI shorthand for discovery,
   dotted calls, server-first calls, and call expressions. Explicit native
   commands keep precedence; extra tool tokens are never silently ignored.
@@ -41,6 +46,8 @@
 
 ### Changed
 
+- HTTP endpoint and OAuth credential-setting references now share configured-env
+  precedence, keeping imported credential identities consistent with later runtime use.
 - Default daemon state and logs now use `~/.mcp/` on every platform, alongside
   the existing home config and credentials. Unix server sockets use `.mcp/run/`,
   avoiding the default macOS Application Support socket-length failure without

@@ -18,6 +18,8 @@ mod browser;
 pub(crate) mod files;
 #[path = "oauth_flow.rs"]
 mod flow;
+#[path = "oauth_import.rs"]
+pub(crate) mod import;
 #[path = "oauth_protocol.rs"]
 mod protocol;
 #[path = "oauth_reconcile.rs"]
@@ -171,19 +173,7 @@ pub fn vault_set(server: &ConfiguredServer, payload: &Value) -> Result<()> {
     } else {
         payload.clone()
     };
-    let tokens = payload
-        .get("tokens")
-        .ok_or_else(|| anyhow::anyhow!("vault payload requires tokens"))?;
-    store::validate_tokens(tokens)?;
-    if string(tokens, "refresh_token").is_some()
-        && payload
-            .get("clientInfo")
-            .and_then(|client| string(client, "client_id"))
-            .is_none()
-    {
-        bail!("refreshable credential payload must include its bound clientInfo registration");
-    }
-    store::validate_binding(&authentication, &payload)?;
+    store::validate_payload(&authentication, &payload)?;
     if let Some(tokens) = payload.get_mut("tokens").and_then(Value::as_object_mut) {
         if !tokens.contains_key("expires_at")
             && !tokens.contains_key("expiresAt")
@@ -269,30 +259,18 @@ fn context_with_settings(
     };
     let serialized = serde_json::to_string(&identity)?;
     let identity_key = format!("{}|{}", server.name, files::digest(&serialized));
-    let token_cache_directory = settings.token_cache_directory;
+    let environment = server.configured_environment();
+    let resolve = |value: Option<&str>| value.map(|value| environment.expand(value)).transpose();
+    let token_cache_directory = resolve(settings.token_cache_directory)?;
     let mut directory_stores = Vec::new();
-    if let Some(directory) = token_cache_directory {
-        let path = if directory == "~" {
-            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Home directory unavailable"))?
-        } else if let Some(suffix) = directory
-            .strip_prefix("~/")
-            .or_else(|| directory.strip_prefix("~\\"))
-        {
-            dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("Home directory unavailable"))?
-                .join(suffix)
-        } else {
-            PathBuf::from(directory)
-        };
-        directory_stores.push(if path.is_absolute() {
-            path
-        } else {
+    if let Some(directory) = token_cache_directory.as_deref() {
+        directory_stores.push(crate::server_config::resolve_path(
+            std::path::Path::new(directory),
             server
                 .source
                 .parent()
-                .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?
-                .join(path)
-        });
+                .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?,
+        )?);
     }
     Ok(HttpAuth {
         server_name: server.name.clone(),
@@ -301,13 +279,13 @@ fn context_with_settings(
         directory_stores,
         identity_key,
         directory_primary: token_cache_directory.is_some(),
-        client_name: settings.client_name.unwrap_or("mcp-pool").to_owned(),
-        client_id: settings.client_id.map(str::to_owned),
-        client_secret_env: settings.client_secret_env.map(str::to_owned),
-        token_auth_method: settings.token_auth_method.map(str::to_owned),
-        redirect_url: settings.redirect_url.map(str::to_owned),
-        client_metadata_url: settings.client_metadata_url.map(str::to_owned),
-        scope: settings.scope.map(str::to_owned),
+        client_name: resolve(settings.client_name)?.unwrap_or_else(|| "mcp-pool".to_owned()),
+        client_id: resolve(settings.client_id)?,
+        client_secret_env: resolve(settings.client_secret_env)?,
+        token_auth_method: resolve(settings.token_auth_method)?,
+        redirect_url: resolve(settings.redirect_url)?,
+        client_metadata_url: resolve(settings.client_metadata_url)?,
+        scope: resolve(settings.scope)?,
         timeout_ms: definition
             .timeout_ms
             .unwrap_or(300_000)
