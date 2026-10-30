@@ -189,8 +189,11 @@ upstream process/connection instead of launching N copies.
   active project store; `--config` writes beside the selected file.
   Clearing a project override restores home fallback. Explicit `tokenCacheDir`
   remains supported; legacy credential directories are not auto-discovered.
-- State / sockets: `<state_dir>/mcp-pool/run/` (`%LOCALAPPDATA%` on Windows).
-- Control socket: `<state_dir>/mcp-pool/mcp-pool-control.sock` /
+- Default state: `~/.mcp/` on every platform (`%USERPROFILE%\.mcp\` on Windows).
+  Logs use `~/.mcp/logs/`; Unix server sockets use `~/.mcp/run/`.
+  `MCP_POOL_HOME` overrides retain their `state/` layout. Stop the old daemon
+  with the old executable before upgrading; former runtime state is not migrated.
+- Control socket: `~/.mcp/mcp-pool-control.sock` /
   `\\.\pipe\mcp-pool-<home-hash>-control`.
 - Per-server socket: `mcp-pool-<name>.sock` /
   `\\.\pipe\mcp-pool-<home-hash>-<name>`.

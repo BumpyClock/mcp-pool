@@ -316,8 +316,21 @@ If retirement fails, the config remains unchanged.
 
 ### Config, credentials, and isolation
 
+Defaults use `~/.mcp/` on every platform (`%USERPROFILE%\.mcp\` on Windows).
+Home config and credentials remain `config.json` and `credentials.json` in that
+directory. Logs use `~/.mcp/logs/`. Unix server sockets use `~/.mcp/run/`, and
+the control socket is `~/.mcp/mcp-pool-control.sock`. Windows endpoints remain
+home-scoped named pipes, not filesystem sockets. Unix socket directories are
+private (`0700`); symlinked application socket directories are rejected.
+
+Before upgrading from the platform-specific state location, stop the old daemon
+with the old executable (`mcp-pool daemon stop`). Old state is not migrated or
+automatically reattached from its former location. Config and credentials do not
+move. Long Unix home paths can still require a shorter `MCP_POOL_HOME`.
+
 `MCP_POOL_HOME` redirects the home config and home credential layer to
-`MCP_POOL_HOME/config/`, and isolates daemon state, sockets, and logs. It does
+`MCP_POOL_HOME/config/`, and keeps daemon state, sockets, and logs under
+`MCP_POOL_HOME/state/`. This override is unchanged. It does
 not relocate project config or project credentials. Use `MCP_POOL_CONFIG` or
 `--config PATH` for a fully explicit configuration and adjacent credential scope.
 

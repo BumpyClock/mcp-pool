@@ -41,6 +41,12 @@
 
 ### Changed
 
+- Default daemon state and logs now use `~/.mcp/` on every platform, alongside
+  the existing home config and credentials. Unix server sockets use `.mcp/run/`,
+  avoiding the default macOS Application Support socket-length failure without
+  reducing identity hashes. Windows keeps its home-scoped named pipes.
+  `MCP_POOL_HOME` overrides are unchanged. Stop the old daemon with the old
+  executable before upgrading; former runtime state is not migrated.
 - Internal config and command operations no longer rebuild JSON text or CLI
   arguments. Shared-request transitions and daemon ownership selection have
   explicit owners. The bridge uses the pooled MCP client directly.
