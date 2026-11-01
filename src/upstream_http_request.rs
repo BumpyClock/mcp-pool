@@ -18,70 +18,73 @@ pub(super) struct Request {
 
 impl Request {
     pub(super) fn parse(
-        envelope: crate::upstream::UpstreamRequest,
+        mut envelope: crate::upstream::UpstreamRequest,
         options: &Options,
-    ) -> Result<Self, String> {
-        let line = envelope.line;
-        if line.len() > sse_parser::FRAME_LIMIT {
-            return Err("HTTP request exceeds size limit".into());
-        }
-        let mut value: Value =
-            serde_json::from_str(&line).map_err(|_| "HTTP request is not valid JSON")?;
-        if !value.is_object() {
-            return Err("HTTP transport requires a JSON-RPC object".into());
-        }
-        let timeout_ms = timeout_ms(&value)?;
-        value
-            .as_object_mut()
-            .ok_or("HTTP transport requires a JSON-RPC object")?
-            .remove(TIMEOUT_FIELD);
-        let shared = crate::mcp_session::cacheable_request(&value).is_some();
-        let method = value.get("method").and_then(Value::as_str);
-        let identifier = method.and_then(|_| {
-            value
-                .get("id")
-                .filter(|identifier| !identifier.is_null())
-                .cloned()
-        });
-        let initialize = method == Some("initialize");
-        let discover = method == Some("server/discover");
-        let modern = value
-            .get("params")
-            .is_some_and(crate::mcp_protocol::is_modern);
-        let initialization_barrier =
-            initialize || discover || method == Some("notifications/initialized");
-        let method = method.map(str::to_owned);
-        let name = value
-            .pointer("/params/name")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let line = if timeout_ms.is_some() {
-            value.to_string()
-        } else {
-            line
-        };
-        let budget = match envelope.deadline {
-            Some(budget) => budget,
-            None => {
-                let deadline = std::time::Instant::now()
-                    .checked_add(Self::deadline(timeout_ms, shared, options))
-                    .ok_or("HTTP request deadline exceeds the clock range")?;
-                SharedDeadline::new(deadline)
+    ) -> Result<Self, (crate::upstream::UpstreamRequest, String)> {
+        let parsed = (|| {
+            let line = &envelope.line;
+            if line.len() > sse_parser::FRAME_LIMIT {
+                return Err("HTTP request exceeds size limit".into());
             }
-        };
-        Ok(Self {
-            line,
-            identifier,
-            initialize,
-            discover,
-            modern,
-            method,
-            name,
-            initialization_barrier,
-            timeout_ms,
-            shared,
-            budget,
-        })
+            let mut value: Value =
+                serde_json::from_str(line).map_err(|_| "HTTP request is not valid JSON")?;
+            if !value.is_object() {
+                return Err("HTTP transport requires a JSON-RPC object".into());
+            }
+            let timeout_ms = timeout_ms(&value)?;
+            value
+                .as_object_mut()
+                .ok_or("HTTP transport requires a JSON-RPC object")?
+                .remove(TIMEOUT_FIELD);
+            let shared = crate::mcp_session::cacheable_request(&value).is_some();
+            let method = value.get("method").and_then(Value::as_str);
+            let identifier = method.and_then(|_| {
+                value
+                    .get("id")
+                    .filter(|identifier| !identifier.is_null())
+                    .cloned()
+            });
+            let initialize = method == Some("initialize");
+            let discover = method == Some("server/discover");
+            let modern = value
+                .get("params")
+                .is_some_and(crate::mcp_protocol::is_modern);
+            let initialization_barrier =
+                initialize || discover || method == Some("notifications/initialized");
+            let method = method.map(str::to_owned);
+            let name = value
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let budget = match envelope.deadline.take() {
+                Some(budget) => budget,
+                None => {
+                    let deadline = std::time::Instant::now()
+                        .checked_add(Self::deadline(timeout_ms, shared, options))
+                        .ok_or("HTTP request deadline exceeds the clock range")?;
+                    SharedDeadline::new(deadline)
+                }
+            };
+            let line = if timeout_ms.is_some() {
+                value.to_string()
+            } else {
+                std::mem::take(&mut envelope.line)
+            };
+            Ok(Self {
+                line,
+                identifier,
+                initialize,
+                discover,
+                modern,
+                method,
+                name,
+                initialization_barrier,
+                timeout_ms,
+                shared,
+                budget,
+            })
+        })();
+        parsed.map_err(|error| (envelope, error))
     }
 
     fn deadline(timeout_ms: Option<u64>, shared: bool, options: &Options) -> Duration {

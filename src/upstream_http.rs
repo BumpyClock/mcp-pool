@@ -32,6 +32,9 @@ mod deadline_tests;
 #[path = "upstream_http_options_tests.rs"]
 mod options_tests;
 #[cfg(test)]
+#[path = "upstream_http_ownership_tests.rs"]
+mod ownership_tests;
+#[cfg(test)]
 #[path = "upstream_http_protocol_tests.rs"]
 mod protocol_tests;
 #[path = "upstream_http_retire.rs"]
@@ -174,7 +177,7 @@ pub async fn spawn_configured(
 async fn execute(
     client: &reqwest::Client,
     url: &reqwest::Url,
-    request: Request,
+    mut request: Request,
     response_tx: &mpsc::Sender<String>,
     session: &Arc<Mutex<Session>>,
     mut established: Option<oneshot::Sender<Option<Request>>>,
@@ -182,12 +185,12 @@ async fn execute(
     allow_fallback: bool,
 ) {
     let mut answered = false;
-    let result = request
-        .budget
+    let budget = request.budget.clone();
+    let result = budget
         .wait(post(
             client,
             url,
-            &request,
+            &mut request,
             response_tx,
             session,
             &mut answered,
@@ -231,7 +234,7 @@ async fn execute(
 async fn post(
     client: &reqwest::Client,
     url: &reqwest::Url,
-    request: &Request,
+    request: &mut Request,
     response_tx: &mpsc::Sender<String>,
     session: &Arc<Mutex<Session>>,
     answered: &mut bool,
@@ -284,8 +287,13 @@ async fn post(
             builder = builder.header("MCP-Name", name);
         }
     }
+    let body = if allow_fallback && fresh {
+        request.line.clone()
+    } else {
+        std::mem::take(&mut request.line)
+    };
     let mut response = builder
-        .body(request.line.clone())
+        .body(body)
         .send()
         .await
         .map_err(|_| "HTTP request failed; request was not replayed")?;

@@ -196,7 +196,7 @@ async fn handle_request(State(state): State<HttpState>, request: Request) -> Res
                 "Accept must include text/event-stream",
             );
         }
-        match rpc::listen_subscription(&message) {
+        match rpc::listen_subscription(message) {
             Ok(subscription) => {
                 let mut response =
                     sse::start(state, subscription, only_server.as_deref(), request_permit).await;
