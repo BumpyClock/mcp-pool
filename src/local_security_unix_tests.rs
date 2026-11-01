@@ -8,16 +8,10 @@ struct TestDirectory(PathBuf);
 impl TestDirectory {
     fn create() -> io::Result<Self> {
         let number = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::current_dir()?.join("target").join(format!(
+        let path = PathBuf::from("/tmp").join(format!(
             "mcp-pool-local-security-{}-{number}",
             std::process::id()
         ));
-        fs::create_dir_all(path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "isolated test path has no parent",
-            )
-        })?)?;
         fs::DirBuilder::new().mode(0o700).create(&path)?;
         Ok(Self(path))
     }
@@ -197,6 +191,29 @@ async fn hardens_only_the_application_socket_directories() -> io::Result<()> {
     assert_eq!(fs::metadata(&state)?.permissions().mode() & 0o777, 0o755);
     drop(listener);
     fs::remove_file(path)?;
+    Ok(())
+}
+
+#[test]
+fn socket_binding_works_from_a_long_working_directory() -> io::Result<()> {
+    let directory = TestDirectory::create()?;
+    let checkout = directory.0.join("checkout".repeat(20));
+    fs::create_dir(&checkout)?;
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "local_security::unix::tests::hardens_only_the_application_socket_directories",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .current_dir(&checkout)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
