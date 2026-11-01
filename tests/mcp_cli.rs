@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 mod admin;
 #[path = "mcp_cli_fixtures/bridge_notifications.rs"]
 mod bridge_notifications;
+#[path = "mcp_cli_fixtures/discovery_report.rs"]
+mod discovery_report;
 #[path = "mcp_cli_fixtures/http.rs"]
 mod http;
 #[path = "mcp_cli_fixtures/identity.rs"]
