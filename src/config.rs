@@ -10,10 +10,9 @@ pub fn state_dir() -> io::Result<PathBuf> {
     if let Ok(custom) = std::env::var(ENV_HOME) {
         return Ok(PathBuf::from(custom).join("state"));
     }
-    let base = dirs::state_dir()
-        .or_else(dirs::data_local_dir)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "state directory not found"))?;
-    Ok(base.join("mcp-pool"))
+    let home = dirs::home_dir()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
+    Ok(home.join(".mcp"))
 }
 
 #[cfg(unix)]
@@ -174,6 +173,57 @@ impl ServerDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_directory_defaults_to_mcp_home_and_preserves_overrides() -> io::Result<()> {
+        let home = dirs::home_dir()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
+        for (custom, expected) in [
+            (None, home.join(".mcp")),
+            (
+                Some("custom-pool-home"),
+                PathBuf::from("custom-pool-home/state"),
+            ),
+        ] {
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .args([
+                    "--exact",
+                    "config::tests::state_directory_fixture",
+                    "--nocapture",
+                ])
+                .env("MCP_POOL_EXPECTED_STATE", expected)
+                .env_remove(ENV_HOME);
+            if let Some(custom) = custom {
+                command.env(ENV_HOME, custom);
+            }
+            let output = command.output()?;
+            assert!(output.status.success(), "{output:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn state_directory_fixture() -> io::Result<()> {
+        let Some(expected) = std::env::var_os("MCP_POOL_EXPECTED_STATE") else {
+            return Ok(());
+        };
+        let expected = PathBuf::from(expected);
+        assert_eq!(state_dir()?, expected);
+        #[cfg(unix)]
+        {
+            assert_eq!(run_dir()?, expected.join("run"));
+            assert_eq!(
+                control_socket_path(),
+                expected.join("mcp-pool-control.sock")
+            );
+            assert_eq!(
+                server_socket_path("fixture"),
+                expected.join("run/mcp-pool-fixture.sock")
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn server_def_transport_kind() {

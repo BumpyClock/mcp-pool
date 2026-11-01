@@ -81,8 +81,9 @@ upstream process/connection instead of launching N copies.
 - **SSE** — legacy GET stream with same-origin POST endpoint discovery.
 - Configured headers and associated OAuth credentials are supported for servers
   resolved from JSON config. Only explicit `auth`/`config login` starts consent.
-  HTTP headers, `bearerToken`, and `bearerTokenEnv` resolve environment values
-  from configured `env` overrides before the caller's environment.
+  HTTP endpoints, headers, `bearerToken`, and `bearerTokenEnv` resolve environment
+  values from configured `env` overrides before the caller's environment.
+  OAuth client metadata and credential-cache paths use the same precedence.
   Discovery, calls, resources, and proxy can reuse credentials or refresh tokens;
   they do not launch consent. `--no-oauth` permits valid cached tokens only.
   Authorization requires advertised PKCE S256; signed token methods are unsupported.
@@ -167,7 +168,12 @@ upstream process/connection instead of launching N copies.
   Source files remain untouched. `config add --copy-from SOURCE:NAME` uses the
   same converter before applying overrides; it is not a second import mechanism.
   Identical imports are idempotent; conflicting replacements require `--replace`.
-  Imported references stay unresolved until use. Credentials are not imported.
+  Imported references stay unresolved until use, except endpoint and credential-store
+  identities needed by `import mcporter --include-auth`. This opt-in copies cached
+  HTTP/SSE OAuth credentials into the destination scope without login or refresh.
+  It removes copied remote `tokenCacheDir` references and never writes source caches.
+  Default imports do not read credentials. Auth conflicts require `--replace`;
+  dry runs never write or retire pools. Config and credential commits are separate.
   `daemon migrate` inventories legacy owners.
   Retirement requires `--stop-legacy --confirmed-drained`, a same-user local
   handshake, and verified process identities/tree ownership.
@@ -189,8 +195,11 @@ upstream process/connection instead of launching N copies.
   active project store; `--config` writes beside the selected file.
   Clearing a project override restores home fallback. Explicit `tokenCacheDir`
   remains supported; legacy credential directories are not auto-discovered.
-- State / sockets: `<state_dir>/mcp-pool/run/` (`%LOCALAPPDATA%` on Windows).
-- Control socket: `<state_dir>/mcp-pool/mcp-pool-control.sock` /
+- Default state: `~/.mcp/` on every platform (`%USERPROFILE%\.mcp\` on Windows).
+  Logs use `~/.mcp/logs/`; Unix server sockets use `~/.mcp/run/`.
+  `MCP_POOL_HOME` overrides retain their `state/` layout. Stop the old daemon
+  with the old executable before upgrading; former runtime state is not migrated.
+- Control socket: `~/.mcp/mcp-pool-control.sock` /
   `\\.\pipe\mcp-pool-<home-hash>-control`.
 - Per-server socket: `mcp-pool-<name>.sock` /
   `\\.\pipe\mcp-pool-<home-hash>-<name>`.

@@ -14,10 +14,10 @@ pub(crate) fn command_help(command: &str) {
         }
         "vault" => "vault set SERVER (--tokens-file PATH|--stdin)\n  vault clear SERVER",
         "config" => {
-            "config list|get|add|remove|import|login|logout|doctor|help\n  config add NAME [URL] [--command COMMAND --arg ARG] [--copy-from SOURCE:NAME]\n    [--from PATH] [--replace] [--protocol-version auto|legacy|2026-07-28]\n    [--scope home|project] [--dry-run] [--persist PATH]\n  config import claude|codex|mcporter|project|mcp-pool|cursor|windsurf|opencode|vscode|vs-code [NAME...]\n    [--from PATH] [--scope home|project] [--dry-run] [--replace] [--json]"
+            "config list|get|add|remove|import|login|logout|doctor|help\n  config add NAME [URL] [--command COMMAND --arg ARG] [--copy-from SOURCE:NAME]\n    [--from PATH] [--replace] [--protocol-version auto|legacy|2026-07-28]\n    [--scope home|project] [--dry-run] [--persist PATH]\n  config import claude|codex|mcporter|project|mcp-pool|cursor|windsurf|opencode|vscode|vs-code [NAME...]\n    [--from PATH] [--scope home|project] [--dry-run] [--replace] [--json]\n    [--include-auth (mcporter only)]"
         }
         "import" => {
-            "import claude|codex|mcporter|project|mcp-pool|cursor|windsurf|opencode|vscode|vs-code [NAME...]\n  --from PATH --scope home|project --dry-run --replace --json\n  Copies definitions only. Sources are never executed or modified; OAuth login remains explicit."
+            "import claude|codex|mcporter|project|mcp-pool|cursor|windsurf|opencode|vscode|vs-code [NAME...]\n  --from PATH --scope home|project --dry-run --replace --json\n  --include-auth (mcporter only) copies cached HTTP/SSE OAuth credentials into the destination scope.\n  Sources are never executed or modified. Import does not log in or refresh tokens."
         }
         "daemon" => {
             "daemon start|status|stop|restart|migrate|help [--json]\n  start/restart: --foreground --log --log-file PATH --log-servers CSV\n  migrate: inspect legacy owners; --stop-legacy requires --confirmed-drained.\n  Uses the existing single mcp-pool broker. Start preserves a live broker; restart applies new logging options."
