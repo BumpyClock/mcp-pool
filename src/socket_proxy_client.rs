@@ -89,14 +89,11 @@ pub(super) async fn handle_client(
                                     -32602, "Pool request timeout exceeds the clock range",
                                 ));
                             };
-                            let line = if !remote && timeout_ms.is_some() {
-                                if let Some(object) = value.as_object_mut() {
-                                    object.remove(crate::request_deadline::TIMEOUT_FIELD);
-                                }
-                                value.to_string()
-                            } else {
-                                line
-                            };
+                            let timeout_removed = !remote && timeout_ms.is_some();
+                            if timeout_removed
+                                && let Some(object) = value.as_object_mut() {
+                                object.remove(crate::request_deadline::TIMEOUT_FIELD);
+                            }
                             let original_id = non_null_id(&value).cloned();
                             match (message_has_method(&value), original_id) {
                                 (true, Some(original_id)) => {
@@ -204,6 +201,11 @@ pub(super) async fn handle_client(
                                         ));
                                         ClientAction::Drop
                                     } else {
+                                        let line = if timeout_removed {
+                                            value.to_string()
+                                        } else {
+                                            line
+                                        };
                                         let method = value
                                             .get("method")
                                             .and_then(Value::as_str)

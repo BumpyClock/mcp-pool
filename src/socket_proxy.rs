@@ -290,6 +290,9 @@ impl Drop for SocketProxy {
 #[path = "socket_proxy_cursor_tests.rs"]
 mod cursor_tests;
 #[cfg(test)]
+#[path = "socket_proxy_encoding_tests.rs"]
+mod encoding_tests;
+#[cfg(test)]
 #[path = "socket_proxy_initialize_http_tests.rs"]
 mod initialize_http_tests;
 #[cfg(test)]
