@@ -5,6 +5,8 @@ use serde_json::{Value, json};
 mod auth;
 #[path = "mcp_cli_fixtures/http.rs"]
 mod http;
+#[path = "config_import_fixtures/preservation.rs"]
+mod preservation;
 #[path = "config_import_fixtures/support.rs"]
 mod support;
 use auth::{credentials, destination, only_entry, vault};
@@ -29,26 +31,43 @@ async fn auth_copy_is_opt_in_private_redacted_and_idempotent() -> Result<()> {
         ),
     )?;
     let original = std::fs::read(&cache)?;
-    fixture.success(&["import", "mcporter"]).await?;
+    let arguments = [
+        "import",
+        "mcporter",
+        "--from",
+        source.to_str().context("source")?,
+    ];
+    let mut with_auth = arguments.to_vec();
+    with_auth.push("--include-auth");
+    let mut reported = with_auth.clone();
+    reported.push("--json");
+    fixture.success(&arguments).await?;
     assert!(!destination(&fixture)?.exists());
-    let preview = fixture
-        .success(&[
-            "import",
-            "mcporter",
-            "--include-auth",
-            "--dry-run",
-            "--json",
-        ])
+    let config = preservation::Snapshot::decorate(&fixture.home_config())?;
+    let denied = fixture
+        .command(&fixture.project)
+        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .args(&with_auth)
+        .output()
         .await?;
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("read-only"));
+    config.assert_unchanged(&fixture.home_config())?;
+    assert!(!destination(&fixture)?.exists());
+    let mut preview = reported.clone();
+    preview.push("--dry-run");
+    let preview = fixture.success(&preview).await?;
     let report: Value = serde_json::from_slice(&preview.stdout)?;
     assert_eq!(report.pointer("/servers/0/auth"), Some(&json!("import")));
     assert!(!destination(&fixture)?.exists());
     assert!(!String::from_utf8_lossy(&preview.stdout).contains("synthetic-access"));
-    let output = fixture
-        .success(&["config", "import", "mcporter", "--include-auth", "--json"])
-        .await?;
+    config.assert_unchanged(&fixture.home_config())?;
+    let mut config_import = vec!["config"];
+    config_import.extend(&reported);
+    let output = fixture.success(&config_import).await?;
     assert!(!String::from_utf8_lossy(&output.stdout).contains("synthetic-access"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("synthetic-refresh"));
+    config.assert_unchanged(&fixture.home_config())?;
     let saved = std::fs::read(destination(&fixture)?)?;
     let document: Value = serde_json::from_slice(&saved)?;
     let entry = only_entry(&document)?;
@@ -62,15 +81,21 @@ async fn auth_copy_is_opt_in_private_redacted_and_idempotent() -> Result<()> {
     );
     assert!(entry.get("state").is_none_or(Value::is_null));
     assert!(entry.get("codeVerifier").is_none_or(Value::is_null));
-    let repeated = fixture
-        .success(&["import", "mcporter", "--include-auth", "--json"])
-        .await?;
+    let repeated = fixture.success(&reported).await?;
     let repeated: Value = serde_json::from_slice(&repeated.stdout)?;
     assert_eq!(
         repeated.pointer("/servers/0/auth"),
         Some(&json!("unchanged"))
     );
     assert_eq!(std::fs::read(destination(&fixture)?)?, saved);
+    let readonly = fixture
+        .command(&fixture.project)
+        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .args(&with_auth)
+        .output()
+        .await?;
+    assert!(readonly.status.success(), "{readonly:?}");
+    config.assert_unchanged(&fixture.home_config())?;
     assert_eq!(std::fs::read(&cache)?, original);
     #[cfg(unix)]
     {
@@ -115,6 +140,7 @@ async fn explicit_directory_auth_is_copied_not_shared_and_used_by_pooled_calls()
         .await?;
     let config: Value = serde_json::from_slice(&std::fs::read(fixture.home_config())?)?;
     assert!(config.pointer("/mcpServers/remote/tokenCacheDir").is_none());
+    let snapshot = preservation::Snapshot::decorate(&fixture.home_config())?;
     let output = fixture
         .success(&["call", "remote.headers", "--output", "json", "--no-oauth"])
         .await?;
@@ -130,16 +156,40 @@ async fn explicit_directory_auth_is_copied_not_shared_and_used_by_pooled_calls()
         &cache.join("tokens.json"),
         replacement.get("tokens").context("tokens")?,
     )?;
-    fixture
-        .success(&[
-            "import",
-            "mcporter",
-            "--from",
-            source.to_str().context("source")?,
-            "--include-auth",
-            "--replace",
-        ])
+    let saved = std::fs::read(destination(&fixture)?)?;
+    let arguments = [
+        "import",
+        "mcporter",
+        "--from",
+        source.to_str().context("source")?,
+        "--include-auth",
+        "--replace",
+    ];
+    let mut preview = arguments.to_vec();
+    preview.push("--dry-run");
+    fixture.success(&preview).await?;
+    let denied = fixture
+        .command(&fixture.project)
+        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .args(arguments)
+        .output()
         .await?;
+    assert!(!denied.status.success());
+    assert_eq!(std::fs::read(destination(&fixture)?)?, saved);
+    snapshot.assert_unchanged(&fixture.home_config())?;
+    let status = fixture.success(&["status", "--json"]).await?;
+    let status: Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(status.pointer("/servers/0/status"), Some(&json!("running")));
+    fixture.success(&arguments).await?;
+    snapshot.assert_unchanged(&fixture.home_config())?;
+    let status = fixture.success(&["status", "--json"]).await?;
+    let status: Value = serde_json::from_slice(&status.stdout)?;
+    assert_eq!(status.get("servers"), Some(&json!([])));
+    let saved: Value = serde_json::from_slice(&std::fs::read(destination(&fixture)?)?)?;
+    assert_eq!(
+        only_entry(&saved)?.pointer("/tokens/access_token"),
+        Some(&json!("synthetic-replacement-access"))
+    );
     let output = fixture
         .success(&["call", "remote.headers", "--output", "json", "--no-oauth"])
         .await?;

@@ -46,6 +46,9 @@
 
 ### Changed
 
+- Stdio output encodes each JSON message once. CLI, client, and HTTP bridge
+  handoffs move owned JSON values instead of cloning consumed payloads.
+- Tool-name deduplication borrows names and preserves upstream order.
 - HTTP endpoint and OAuth credential-setting references now share configured-env
   precedence, keeping imported credential identities consistent with later runtime use.
 - Default daemon state and logs now use `~/.mcp/` on every platform, alongside
@@ -72,6 +75,10 @@
 
 ### Fixed
 
+- Identical explicit imports and `config add --copy-from` preserve existing
+  config bytes and modification times, including JSONC comments, BOMs, and
+  whitespace. Validation and required credential retirement/import still run;
+  config and credential commits remain separate.
 - Tool arguments preserve exact schema property names when another property's
   kebab-case alias has the same spelling.
 - Single-server discovery now matches mcporter's default exit status. Failures

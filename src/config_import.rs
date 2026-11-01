@@ -116,6 +116,7 @@ pub(crate) async fn run(
         let changed = entries.clone();
         crate::config_commands::write::write_checked_mutation(
             &destination,
+            crate::config_commands::write::WritePolicy::PreserveUnchanged,
             mutate,
             move |document| async move {
                 for (name, entry) in &changed {
