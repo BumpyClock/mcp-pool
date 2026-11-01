@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde_json::{Map, Value};
 
 use super::{artifacts, connect, persist_ad_hoc, print_outcome, server, stdin};
 use crate::server_config::ServerConfiguration;
@@ -73,7 +73,13 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
                 "Calling MCP tool",
                 client.request(
                     "tools/call",
-                    json!({"name":resolved,"arguments":parsed.arguments}),
+                    Value::Object(Map::from_iter([
+                        ("name".to_owned(), Value::String(resolved)),
+                        (
+                            "arguments".to_owned(),
+                            Value::Object(std::mem::take(&mut parsed.arguments)),
+                        ),
+                    ])),
                 ),
             )
             .await
@@ -85,9 +91,8 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         crate::tool_discovery::single_server(selected, timeout, no_oauth, output).await?;
         return Ok(());
     }
-    let log_result = outcome.as_ref().ok().cloned();
-    let rendered = print_outcome(&selected, tool.as_deref(), outcome, parsed.output);
-    if let Some(result) = &log_result
+    let rendered = print_outcome(&selected, tool.as_deref(), &outcome, parsed.output);
+    if let Ok(result) = &outcome
         && let Err(error) = artifacts::save_images(result, parsed.save_images.as_deref()).await
     {
         eprintln!("[mcp-pool] Tool result completed; image export failed: {error:#}");
@@ -95,9 +100,9 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         return Err(error).context("Image export failed after the completed tool result was rendered; do not retry the tool call");
     }
     if parsed.tail_log
-        && let Some(result) = log_result
+        && let Ok(result) = &outcome
     {
-        artifacts::tail_log(&result).await?;
+        artifacts::tail_log(result).await?;
     }
     rendered
 }

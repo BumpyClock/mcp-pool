@@ -90,6 +90,10 @@ pub fn response(request: &Value) -> io::Result<Value> {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 std::thread::sleep(Duration::from_millis(milliseconds));
+                if let Ok(result) = std::env::var("MCP_POOL_TEST_RESULT") {
+                    let result: Value = serde_json::from_str(&result).map_err(io::Error::other)?;
+                    return Ok(json!({"jsonrpc":"2.0","id":request.get("id"),"result":result}));
+                }
                 let payload = json!({"arguments":arguments,
                     "cwd":std::env::current_dir()?.canonicalize()?.to_string_lossy(),
                     "environment":std::env::var("MCP_POOL_TEST_VALUE").unwrap_or_default()});
@@ -106,7 +110,8 @@ pub fn response(request: &Value) -> io::Result<Value> {
             }
         }
         "resources/read" => json!({"contents":[{
-            "uri":parameters.get("uri"), "mimeType":"text/plain", "text":"fixture resource body"
+            "uri":parameters.get("uri"), "mimeType":"text/plain",
+            "text":std::env::var("MCP_POOL_TEST_RESOURCE_TEXT").unwrap_or_else(|_| "fixture resource body".to_owned())
         }]}),
         "ping" => json!({}),
         _ => {

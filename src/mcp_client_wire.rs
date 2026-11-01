@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use crate::transport::LocalStream;
@@ -10,7 +10,7 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 enum IncomingMessage {
     Notification(Value),
-    Response(Value),
+    Response(Map<String, Value>),
 }
 
 pub(super) async fn write_message(
@@ -33,7 +33,7 @@ pub(super) async fn receive_result(
     request_id: u64,
 ) -> Result<Result<Value>> {
     loop {
-        let message = match receive_message(reader).await? {
+        let mut message = match receive_message(reader).await? {
             Some(IncomingMessage::Response(message)) => message,
             Some(IncomingMessage::Notification(_)) => continue,
             None => bail!("MCP connection reached EOF before a response"),
@@ -41,22 +41,23 @@ pub(super) async fn receive_result(
         if message.get("id") != Some(&Value::from(request_id)) {
             bail!("MCP response ID does not match the outstanding request");
         }
-        match (message.get("result"), message.get("error")) {
-            (Some(result), None) => return Ok(Ok(result.clone())),
+        match (message.remove("result"), message.remove("error")) {
+            (Some(result), None) => return Ok(Ok(result)),
             (None, Some(error)) => {
+                let Value::Object(mut error) = error else {
+                    bail!("MCP JSON-RPC error omitted integer code");
+                };
                 let code = error
                     .get("code")
                     .and_then(Value::as_i64)
                     .context("MCP JSON-RPC error omitted integer code")?;
-                let message = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .context("MCP JSON-RPC error omitted message")?
-                    .to_string();
+                let Some(Value::String(message)) = error.remove("message") else {
+                    bail!("MCP JSON-RPC error omitted message");
+                };
                 return Ok(Err(McpRpcError {
                     code,
                     message,
-                    data: error.get("data").cloned(),
+                    data: error.remove("data"),
                 }
                 .into()));
             }
@@ -82,7 +83,10 @@ async fn receive_message(reader: &mut BufReader<LocalStream>) -> Result<Option<I
         let Some(message) = read_message(reader).await? else {
             return Ok(None);
         };
-        if !message.is_object() || message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        let Value::Object(message) = message else {
+            bail!("invalid MCP JSON-RPC envelope");
+        };
+        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
             bail!("invalid MCP JSON-RPC envelope");
         }
         if let Some(method) = message.get("method") {
@@ -111,7 +115,7 @@ async fn receive_message(reader: &mut BufReader<LocalStream>) -> Result<Option<I
                 write_message(reader, &response).await?;
                 continue;
             }
-            return Ok(Some(IncomingMessage::Notification(message)));
+            return Ok(Some(IncomingMessage::Notification(Value::Object(message))));
         }
         return Ok(Some(IncomingMessage::Response(message)));
     }
