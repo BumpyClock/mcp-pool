@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+command -v python3 >/dev/null 2>&1 || {
+    echo 'pre-push: prepare Python 3.11+ and the pinned Rust toolchain as documented in README.md' >&2
+    exit 1
+}
+root=$(git rev-parse --show-toplevel)
+exec python3 "$root/scripts/pre_push.py" "$@"

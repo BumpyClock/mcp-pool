@@ -12,5 +12,20 @@ jobs:
     runs-on: boat
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: rustfmt
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12.3'
+      - name: Test opt-in hook fixtures
+        run: PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_pre_push.py -v
       - name: Test local security and transport
-        run: cargo test --locked --bin mcp-pool -- local_security transport::tests --test-threads=1
+        shell: bash
+        run: |
+          MCP_POOL_HOME="$(mktemp -d /tmp/mp-ci.XXXXXX)"
+          export MCP_POOL_HOME
+          export MCP_POOL_CREDENTIALS_READ_ONLY=1
+          trap 'rm -rf "$MCP_POOL_HOME"' EXIT
+          cargo test --locked --bin mcp-pool -- local_security transport::tests --test-threads=1

@@ -49,6 +49,27 @@ bacon --job clippy
 On Windows, `.\dev.ps1` starts the `bacon --job run` watcher. On macOS/Linux,
 use `./dev.sh`.
 
+### Reproducible opt-in push checks
+
+The checked-in toolchain pins Rust 1.95.0 with rustfmt. Prepare it, locked dependencies, and Python 3.11+ explicitly before opting in:
+
+```sh
+rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+cargo fetch --locked
+python3 scripts/test_pre_push.py -v
+./scripts/install-hooks.sh
+```
+
+The tracked executable hook is never installed automatically. The installer is idempotent, supports linked worktrees and refuses unrelated active hooks or `core.hooksPath`. It changes repository-local configuration only. Default hooks behind symlinked directories are preserved. Narrow `.gitattributes` rules keep the shell entrypoint and installer on LF under `core.autocrlf`; Git-status errors fail closed.
+
+Push validation requires a clean checkout, including untracked files. Every nondeleted pushed ref must resolve to checked-out `HEAD`; other refs fail rather than validating unrelated code. Multiple refs, new branches, missing base objects, empty input/diffs, renames and deletions broaden checks conservatively. A deletion-only update runs no project commands. No fetching, stashing or source rewriting occurs.
+
+The hook uses the already-installed pinned Rust toolchain, full project `cargo fmt --all -- --check`, and `cargo check --offline --locked --bin mcp-pool`. Missing tools, components or dependencies fail with setup instructions; the hook never installs or downloads them. Source, dependency, shared configuration and uncertain changes run the existing Unix security/transport filter serially on Unix. Socket fixtures use a fresh private, short `/tmp` MCP home, cleaned even on failure, never the user's MCP state. Markdown-only changes retain format/check but omit the IPC runtime gate. All failures propagate.
+
+Unix tests are not Windows acceptance. A non-Unix hook host reports that Unix IPC remains required in CI; Windows named-pipe/process behavior and the full suite still need native qualification. The hook does not invoke MCP commands, refresh tokens, launch providers, import credentials or restart daemons. Its fixture tests use stub commands in disposable Git repositories and make no outbound push. Run full project tests separately; no nine-second latency promise is made.
+
+The existing `unix-ipc` workflow already uses Boat. This change keeps that runner, PR/manual triggers and check identity, prepares the pinned compiler/Python, and tests hook fixtures alongside the existing serial IPC gate. Owner-only public execution follows the separately configured actor policy; outsiders and bots are not implicitly authorized. No runner migration, public-policy setting change or cache speedup is attributed to this toolchain/hook work. Cache retention still requires matched restore/setup/test/save measurements.
+
 ## Configuration and imports
 
 All commands use the same JSONC format at `~/.mcp/config.json` and
