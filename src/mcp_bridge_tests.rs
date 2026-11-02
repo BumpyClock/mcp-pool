@@ -10,6 +10,8 @@ use super::rpc;
 use super::test_fixture::{self, Fixture};
 use anyhow::Result;
 use serde_json::{Value, json};
+#[path = "mcp_bridge_concurrency_tests.rs"]
+mod concurrency_tests;
 #[path = "mcp_bridge_ownership_tests.rs"]
 mod ownership_tests;
 #[path = "mcp_bridge_reconnect_tests.rs"]
@@ -395,6 +397,7 @@ fn serve_flags_default_to_stdio_and_parse_http_and_server_selection() -> Result<
         super::options::ServeOptions {
             mode: ServeMode::Stdio,
             servers: None,
+            concurrency: 1,
         }
     );
     assert_eq!(
@@ -411,6 +414,7 @@ fn serve_flags_default_to_stdio_and_parse_http_and_server_selection() -> Result<
                 port: 3210,
             },
             servers: Some(vec!["alpha".to_owned(), "beta".to_owned()]),
+            concurrency: 1,
         }
     );
     assert!(
@@ -445,6 +449,7 @@ fn serve_flags_keep_last_values_and_validate_conflicts_after_parsing() -> Result
                 port: 3210,
             },
             servers: None,
+            concurrency: 1,
         }
     );
     for (arguments, error) in [

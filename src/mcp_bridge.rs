@@ -6,13 +6,14 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::mcp_client::McpClient;
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 
 use crate::tool_filter as filter;
+#[path = "mcp_bridge_clients.rs"]
+mod clients;
 #[path = "mcp_bridge_http.rs"]
 mod http;
 #[path = "mcp_bridge_names.rs"]
@@ -35,10 +36,8 @@ const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 type ClientFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 type ReconnectFactory = Arc<dyn Fn() -> ClientFuture<'static, McpClient> + Send + Sync>;
 
-type SharedClient = Arc<Mutex<McpClient>>;
-
 struct ServerClient {
-    client: SharedClient,
+    client: Arc<clients::Clients>,
     reconnect: ReconnectFactory,
     filter: filter::ToolFilter,
     timeout: Duration,
@@ -86,7 +85,7 @@ impl BridgeFailure {
 }
 
 impl BridgeState {
-    async fn connect(servers: Vec<ConfiguredServer>) -> Result<Self> {
+    async fn connect(servers: Vec<ConfiguredServer>, concurrency: usize) -> Result<Self> {
         let servers = servers
             .into_iter()
             .map(|server| {
@@ -129,7 +128,7 @@ impl BridgeState {
                     clients.insert(
                         name,
                         ServerClient {
-                            client: Arc::new(Mutex::new(client)),
+                            client: Arc::new(clients::Clients::new(client, concurrency)),
                             reconnect,
                             filter,
                             timeout,
@@ -199,9 +198,9 @@ impl BridgeState {
             let server_name = name.clone();
             pending.spawn(async move {
                 let result = tokio::time::timeout(timeout, async {
-                    let mut client = client.lock().await;
-                    reconnect_if_closed(&mut client, &reconnect).await?;
-                    client.list_tools().await
+                    client
+                        .with_client(&reconnect, |client| Box::pin(client.list_tools()))
+                        .await
                 })
                 .await;
                 (server_name, result)
@@ -265,29 +264,27 @@ impl BridgeState {
             return Err(BridgeFailure::unknown_tool());
         }
         tokio::time::timeout(server_client.timeout, async {
-            let mut client = server_client.client.lock().await;
-            reconnect_if_closed(&mut client, &server_client.reconnect).await?;
-            client
-                .request(
-                    "tools/call",
-                    Value::Object(serde_json::Map::from_iter([
-                        ("name".to_owned(), Value::String(tool)),
-                        ("arguments".to_owned(), arguments),
-                    ])),
-                )
+            server_client
+                .client
+                .with_client(&server_client.reconnect, |client| {
+                    Box::pin(async move {
+                        client
+                            .request(
+                                "tools/call",
+                                Value::Object(serde_json::Map::from_iter([
+                                    ("name".to_owned(), Value::String(tool)),
+                                    ("arguments".to_owned(), arguments),
+                                ])),
+                            )
+                            .await
+                    })
+                })
                 .await
         })
         .await
         .map_err(|_| BridgeFailure::internal())?
         .map_err(|_| BridgeFailure::internal())
     }
-}
-
-async fn reconnect_if_closed(client: &mut McpClient, reconnect: &ReconnectFactory) -> Result<()> {
-    if client.is_closed() {
-        *client = reconnect().await?;
-    }
-    Ok(())
 }
 
 fn pool_reconnect_factory(
@@ -350,7 +347,7 @@ fn expose_tool(server: &str, mut tool: Value, bare_names: bool) -> Option<Value>
 pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> anyhow::Result<()> {
     let options = options::parse(arguments)?;
     let selected = options::select_servers(&configuration, options.servers.as_deref())?;
-    let state = Arc::new(BridgeState::connect(selected).await?);
+    let state = Arc::new(BridgeState::connect(selected, options.concurrency).await?);
     match options.mode {
         options::ServeMode::Stdio => stdio::serve(state).await,
         options::ServeMode::Http { host, port } => http::serve(state, host, port).await,

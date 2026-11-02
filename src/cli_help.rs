@@ -22,6 +22,9 @@ pub(crate) fn command_help(command: &str) {
         "daemon" => {
             "daemon start|status|stop|restart|migrate|help [--json]\n  start/restart: --foreground --log --log-file PATH --log-servers CSV\n  migrate: inspect legacy owners; --stop-legacy requires --confirmed-drained.\n  Uses the existing single mcp-pool broker. Start preserves a live broker; restart applies new logging options."
         }
+        "serve" => {
+            "serve [--stdio | --http PORT [--host HOST]] [--servers NAME,...]\n  --concurrency 1..64 bounds operations per server (default 1).\n  All connections share one upstream and its state; concurrent calls may finish out of order."
+        }
         _ => "list | call | auth | vault | resource | config | import | daemon | serve",
     };
     println!("Usage: mcp-pool {usage}");

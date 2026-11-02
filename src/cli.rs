@@ -146,14 +146,7 @@ pub enum Cmd {
     Shutdown,
 }
 
-pub async fn run() -> anyhow::Result<()> {
-    let mut arguments: Vec<String> = std::env::args_os()
-        .map(|argument| {
-            argument
-                .into_string()
-                .map_err(|_| anyhow::anyhow!("command-line arguments must be valid Unicode"))
-        })
-        .collect::<anyhow::Result<_>>()?;
+pub async fn run(mut arguments: Vec<String>) -> anyhow::Result<()> {
     let initial_command_position =
         crate::mcp_cli::command_position(arguments.get(1..).unwrap_or_default())
             .map(|position| position + 1);
