@@ -227,12 +227,22 @@ impl Fixture {
 pub(super) async fn state(
     fixtures: Vec<(Fixture, filter::ToolFilter, Duration)>,
 ) -> Result<BridgeState> {
+    concurrent_state(fixtures, 1).await
+}
+
+pub(super) async fn concurrent_state(
+    fixtures: Vec<(Fixture, filter::ToolFilter, Duration)>,
+    concurrency: usize,
+) -> Result<BridgeState> {
     let mut server_order = Vec::with_capacity(fixtures.len());
     let mut clients = std::collections::BTreeMap::new();
     for (fixture, filter, timeout) in fixtures {
         let name = fixture.name.clone();
         let server = ServerClient {
-            client: Arc::new(Mutex::new(fixture.connect().await?)),
+            client: Arc::new(super::clients::Clients::new(
+                fixture.connect().await?,
+                concurrency,
+            )),
             reconnect: fixture.reconnect(),
             filter,
             timeout,

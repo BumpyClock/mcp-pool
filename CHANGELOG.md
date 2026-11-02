@@ -4,6 +4,11 @@
 
 ### Added
 
+- Opt-in bridge `serve --concurrency N` allows up to 64 concurrent operations
+  per server over local connections to the same pooled upstream. The default
+  remains serialized. Operation deadlines include waiting for a connection.
+- Reproducible, isolated performance fixtures for CLI and retained bridge
+  workloads, including protocol, concurrency, and resident-memory comparisons.
 - Opt-in `import mcporter --include-auth` copies cached HTTP/SSE OAuth tokens,
   client registrations, and discovery metadata into the destination credential
   scope. Supports vault and directory caches, redacted previews, conflict checks,
@@ -46,6 +51,9 @@
 
 ### Changed
 
+- Short-lived CLI commands default to one Tokio worker rather than one per
+  host CPU. Long-running commands and explicit `TOKIO_WORKER_THREADS` settings
+  retain their previous behavior.
 - HTTP endpoint and OAuth credential-setting references now share configured-env
   precedence, keeping imported credential identities consistent with later runtime use.
 - Default daemon state and logs now use `~/.mcp/` on every platform, alongside
@@ -72,6 +80,10 @@
 
 ### Fixed
 
+- Daemon startup attempts to connect immediately before applying bounded retry
+  delays, removing the unconditional initial 100 ms wait.
+- Unix IPC test fixtures use short private temporary paths, avoiding macOS
+  socket-length failures caused by long checkout paths.
 - Tool arguments preserve exact schema property names when another property's
   kebab-case alias has the same spelling.
 - Single-server discovery now matches mcporter's default exit status. Failures

@@ -37,12 +37,65 @@ mod upstream_http;
 mod upstream_process;
 mod upstream_stdio;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<std::process::ExitCode> {
-    match cli::run().await {
+fn main() -> anyhow::Result<std::process::ExitCode> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    runtime.enable_all();
+    if let Some(workers) = cli_worker_threads(
+        &arguments,
+        std::env::var_os("TOKIO_WORKER_THREADS").is_some(),
+    ) {
+        runtime.worker_threads(workers);
+    }
+    match runtime.build()?.block_on(cli::run()) {
         Err(error) if error.is::<tool_discovery::QuietFailure>() => {
             Ok(std::process::ExitCode::FAILURE)
         }
         outcome => outcome.map(|()| std::process::ExitCode::SUCCESS),
+    }
+}
+
+fn cli_worker_threads(arguments: &[String], explicitly_configured: bool) -> Option<usize> {
+    if explicitly_configured {
+        return None;
+    }
+    let command = mcp_cli::command_position(arguments)
+        .and_then(|position| arguments.get(position))
+        .map(String::as_str);
+    match command {
+        Some("serve" | "proxy" | "pool" | "daemon") => None,
+        _ => Some(1),
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use super::*;
+
+    #[test]
+    fn short_lived_commands_do_not_start_a_worker_per_host_cpu() {
+        for arguments in [
+            vec!["call", "docs.search"],
+            vec!["--config", "serve", "list"],
+            vec!["--root=pool", "docs.search"],
+            vec!["--version"],
+        ] {
+            let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(cli_worker_threads(&arguments, false), Some(1));
+        }
+    }
+
+    #[test]
+    fn long_lived_commands_and_explicit_worker_settings_keep_tokio_defaults() {
+        for arguments in [
+            vec!["pool", "serve"],
+            vec!["serve", "--stdio"],
+            vec!["--config", "config.json", "proxy", "docs"],
+            vec!["daemon", "start", "--foreground"],
+        ] {
+            let arguments = arguments.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(cli_worker_threads(&arguments, false), None);
+        }
+        assert_eq!(cli_worker_threads(&["call".into()], true), None);
     }
 }

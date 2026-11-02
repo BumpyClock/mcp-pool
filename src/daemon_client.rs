@@ -11,6 +11,10 @@ pub(crate) mod launch;
 #[path = "daemon_configuration_ownership.rs"]
 pub(crate) mod ownership;
 
+#[cfg(test)]
+#[path = "daemon_client_retry_tests.rs"]
+mod retry_tests;
+
 pub(crate) async fn ensure_definition_started(
     name: &str,
     definition: &ServerDef,
@@ -159,18 +163,34 @@ async fn ensure_daemon() -> anyhow::Result<transport::LocalStream> {
 }
 
 async fn retry_connect(socket_path: &std::path::Path) -> anyhow::Result<transport::LocalStream> {
+    retry_connect_with(|| transport::connect(socket_path)).await
+}
+
+async fn retry_connect_with<Connect, Connection>(
+    mut connect: Connect,
+) -> anyhow::Result<transport::LocalStream>
+where
+    Connect: FnMut() -> Connection,
+    Connection: std::future::Future<Output = std::io::Result<transport::LocalStream>>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    let mut backoff = Duration::from_millis(5);
     let mut last_error = None;
-    for _ in 0..30 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        match transport::connect(socket_path).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout_at(deadline, connect()).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 return Err(error.into());
             }
-            Err(error) => last_error = Some(error),
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => break,
         }
+        tokio::time::sleep_until((tokio::time::Instant::now() + backoff).min(deadline)).await;
+        backoff = (backoff * 2).min(Duration::from_millis(100));
     }
-    let error = last_error.unwrap_or_else(|| std::io::Error::other("control socket unreachable"));
+    let error = last_error.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "control socket unreachable")
+    });
     Err(anyhow::anyhow!(
         "could not reach daemon after launch ({error}). Try `mcp-pool pool serve` manually."
     ))

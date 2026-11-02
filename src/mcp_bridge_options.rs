@@ -14,6 +14,7 @@ pub(crate) enum ServeMode {
 pub(crate) struct ServeOptions {
     pub mode: ServeMode,
     pub servers: Option<Vec<String>>,
+    pub concurrency: usize,
 }
 
 pub(crate) fn parse(arguments: Vec<String>) -> Result<ServeOptions> {
@@ -21,6 +22,7 @@ pub(crate) fn parse(arguments: Vec<String>) -> Result<ServeOptions> {
     let mut port = None;
     let mut servers = None;
     let mut explicit_stdio = false;
+    let mut concurrency = 1;
     let mut arguments = arguments.into_iter();
 
     while let Some(argument) = arguments.next() {
@@ -45,6 +47,12 @@ pub(crate) fn parse(arguments: Vec<String>) -> Result<ServeOptions> {
                     anyhow::anyhow!("Flag '--servers' requires a comma-separated list.")
                 })?;
                 servers = Some(parse_servers(&value)?);
+            }
+            "--concurrency" => {
+                concurrency = parse_concurrency(arguments.next().as_deref().unwrap_or(""))?;
+            }
+            _ if argument.starts_with("--concurrency=") => {
+                concurrency = parse_concurrency(argument.trim_start_matches("--concurrency="))?;
             }
             _ if argument.starts_with("--http=") => {
                 port = Some(parse_port(argument.trim_start_matches("--http="))?);
@@ -76,7 +84,20 @@ pub(crate) fn parse(arguments: Vec<String>) -> Result<ServeOptions> {
         None => ServeMode::Stdio,
     };
 
-    Ok(ServeOptions { mode, servers })
+    Ok(ServeOptions {
+        mode,
+        servers,
+        concurrency,
+    })
+}
+
+fn parse_concurrency(value: &str) -> Result<usize> {
+    let concurrency = value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| (1..=64).contains(value));
+    concurrency
+        .ok_or_else(|| anyhow::anyhow!("Flag '--concurrency' requires an integer from 1 to 64."))
 }
 
 pub(crate) fn select_servers(

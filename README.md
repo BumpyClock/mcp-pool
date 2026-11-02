@@ -512,6 +512,7 @@ It is different from `pool serve`, which runs the pool daemon's control socket.
 ```sh
 mcp-pool serve --stdio --servers docs
 mcp-pool serve --http 3333 --servers docs
+mcp-pool serve --http 3333 --servers docs --concurrency 8
 ```
 
 Stdio is the default. HTTP accepts `--http PORT` and an optional `--host HOST`;
@@ -520,6 +521,15 @@ controlled separately. The HTTP bridge has no downstream authentication.
 Binding a non-loopback `--host` exposes its tools without authentication.
 `--stdio` and `--http` are mutually exclusive, and
 `--host` requires HTTP mode.
+
+`--concurrency N` permits 1 to 64 concurrent operations per selected server.
+The default is 1, preserving serialized operations. Higher values let the bridge
+dispatch independent calls while another call waits. The upstream may still
+serialize them. Connections remain local
+clients of the same pool; increasing concurrency does not start more upstreams.
+Discovery shares this limit. Notification listeners have their own limits.
+Concurrent calls can finish out of order and still share upstream state.
+Keep the default for servers that require ordered operations.
 
 `--servers` is a comma-separated selection, not a switch that enables keep-alive.
 Selected entries must qualify for keep-alive, for example through a
@@ -573,6 +583,26 @@ uses configured `timeoutMs`, and defaults to 60 seconds. It has no 120-second ca
 An established subscription has no idle operation deadline. Bridge clients
 still share the pooled upstream's state; an HTTP endpoint does not provide
 per-client state isolation.
+
+### Reproduce performance measurements
+
+The Unix Python scripts in `benchmarks/` compare isolated MCP fixtures rather than
+live configured servers. They measure CLI and retained-bridge workloads, verify
+tool results, and record process memory separately from latency. Use their help
+output to select binaries, protocols, transports, and concurrency.
+Do not treat synthetic throughput as a hosted service's capacity or summed
+process RSS as unique physical memory.
+
+```sh
+python3 benchmarks/run.py --products mcp-pool --mcp-pool target/release/mcp-pool --self-test
+python3 benchmarks/run.py --products mcp-pool --mcp-pool target/release/mcp-pool \
+  --cases bridge,hol --bridge-modes 1,8
+```
+
+Short-lived CLI commands use one Tokio worker by default to avoid starting a
+worker for every host CPU on each invocation. Daemon, bridge, proxy, and native
+`pool` commands retain Tokio's default worker count. An explicit
+`TOKIO_WORKER_THREADS` setting overrides this choice.
 
 ### Command scope
 

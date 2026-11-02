@@ -10,6 +10,23 @@ mod support;
 
 use support::{Fixture, parse_json};
 
+#[test]
+fn serve_help_describes_concurrency_without_loading_config() -> io::Result<()> {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mcp-pool"))
+        .args([
+            "--config",
+            "missing-serve-help-config.json",
+            "serve",
+            "--help",
+        ])
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--concurrency 1..64"));
+    assert!(help.contains("default 1"));
+    Ok(())
+}
+
 async fn spawn_count(fixture: &Fixture) -> io::Result<usize> {
     if !tokio::fs::try_exists(&fixture.counter).await? {
         return Ok(0);

@@ -7,19 +7,17 @@ struct TestDirectory(PathBuf);
 
 impl TestDirectory {
     fn create() -> io::Result<Self> {
-        let number = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::current_dir()?.join("target").join(format!(
-            "mcp-pool-local-security-{}-{number}",
-            std::process::id()
-        ));
-        fs::create_dir_all(path.parent().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "isolated test path has no parent",
-            )
-        })?)?;
-        fs::DirBuilder::new().mode(0o700).create(&path)?;
-        Ok(Self(path))
+        let parent = PathBuf::from("/tmp");
+        loop {
+            let number = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            // macOS TMPDIR and checkout paths can exceed the Unix socket path limit.
+            let path = parent.join(format!("ipc-{}-{number:x}", std::process::id()));
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     fn socket(&self, name: &str) -> PathBuf {
@@ -35,6 +33,56 @@ impl Drop for TestDirectory {
             }
         }
     }
+}
+
+#[test]
+fn concurrent_fixtures_use_distinct_private_directories_and_clean_up() -> io::Result<()> {
+    let first = std::thread::spawn(TestDirectory::create);
+    let second = std::thread::spawn(TestDirectory::create);
+    let first = first
+        .join()
+        .map_err(|_| io::Error::other("first fixture creator panicked"))??;
+    let second = second
+        .join()
+        .map_err(|_| io::Error::other("second fixture creator panicked"))??;
+    assert_ne!(first.0, second.0);
+    for directory in [&first, &second] {
+        assert_eq!(
+            fs::metadata(&directory.0)?.permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    let first_path = first.0.clone();
+    let second_path = second.0.clone();
+    drop(first);
+    drop(second);
+    assert!(!first_path.try_exists()?);
+    assert!(!second_path.try_exists()?);
+    Ok(())
+}
+
+#[test]
+fn long_checkout_paths_do_not_extend_socket_fixtures() -> io::Result<()> {
+    let directory = TestDirectory::create()?;
+    let checkout = directory.0.join("checkout".repeat(20));
+    fs::create_dir(&checkout)?;
+    assert!(checkout.as_os_str().as_encoded_bytes().len() > 104);
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "local_security::unix::tests::hardens_only_the_application_socket_directories",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .current_dir(&checkout)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -188,6 +236,7 @@ async fn hardens_only_the_application_socket_directories() -> io::Result<()> {
     fs::set_permissions(&run, fs::Permissions::from_mode(0o755))?;
 
     let path = run.join("pool.sock");
+    assert!(path.as_os_str().as_encoded_bytes().len() < 104);
     let listener = bind_unix_listener(&path)?;
     assert_eq!(
         fs::metadata(&application)?.permissions().mode() & 0o777,

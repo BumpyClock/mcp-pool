@@ -103,7 +103,6 @@ async fn run_command(arguments: Vec<String>, show_warnings: bool) -> Result<()> 
     if arguments
         .iter()
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
-        && command != "serve"
     {
         command_help(&command);
         return Ok(());

@@ -128,6 +128,10 @@ upstream process/connection instead of launching N copies.
   invalidations only, with bounded queues that can coalesce invalidations.
   HTTP permits 64 in-flight requests including streams, plus at most 64
   dedicated notification connections across subscriptions.
+  `serve --concurrency N` bounds per-server operation connections to 1..64,
+  defaulting to 1. Discovery shares those connections; notification listeners
+  remain separate. Higher concurrency never creates another upstream and does
+  not isolate upstream state or preserve call completion order.
 - `allowedTools`/`blockedTools` filter discovery, calls, and bridge exposure by
   exact upstream names. They are mutually exclusive string arrays, not patterns.
   `allowed_tools`/`blocked_tools` are aliases. All paths use `tool_filter.rs`;
