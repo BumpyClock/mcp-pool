@@ -11,6 +11,28 @@ mod support;
 use support::{Fixture, parse_json};
 
 #[test]
+fn non_unicode_arguments_return_an_error_without_panicking() -> io::Result<()> {
+    #[cfg(unix)]
+    let argument = {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(vec![0xff])
+    };
+    #[cfg(windows)]
+    let argument = {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&[0xd800])
+    };
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mcp-pool"))
+        .arg(argument)
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("command-line arguments must be valid Unicode"));
+    assert!(!error.contains("panicked"));
+    Ok(())
+}
+
+#[test]
 fn serve_help_describes_concurrency_without_loading_config() -> io::Result<()> {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_mcp-pool"))
         .args([

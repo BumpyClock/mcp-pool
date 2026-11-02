@@ -39,16 +39,22 @@ mod upstream_process;
 mod upstream_stdio;
 
 fn main() -> anyhow::Result<std::process::ExitCode> {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let arguments = std::env::args_os()
+        .map(|argument| {
+            argument
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("command-line arguments must be valid Unicode"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
     if let Some(workers) = cli_worker_threads(
-        &arguments,
+        arguments.get(1..).unwrap_or_default(),
         std::env::var_os("TOKIO_WORKER_THREADS").is_some(),
     ) {
         runtime.worker_threads(workers);
     }
-    match runtime.build()?.block_on(cli::run()) {
+    match runtime.build()?.block_on(cli::run(arguments)) {
         Err(error) if error.is::<tool_discovery::QuietFailure>() => {
             Ok(std::process::ExitCode::FAILURE)
         }
