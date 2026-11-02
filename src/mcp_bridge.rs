@@ -268,7 +268,13 @@ impl BridgeState {
             let mut client = server_client.client.lock().await;
             reconnect_if_closed(&mut client, &server_client.reconnect).await?;
             client
-                .request("tools/call", json!({"name":tool, "arguments":arguments}))
+                .request(
+                    "tools/call",
+                    Value::Object(serde_json::Map::from_iter([
+                        ("name".to_owned(), Value::String(tool)),
+                        ("arguments".to_owned(), arguments),
+                    ])),
+                )
                 .await
         })
         .await

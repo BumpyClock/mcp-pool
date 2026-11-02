@@ -12,6 +12,8 @@ mod discovery_report;
 mod http;
 #[path = "mcp_cli_fixtures/identity.rs"]
 mod identity;
+#[path = "mcp_cli_fixtures/ownership.rs"]
+mod ownership;
 #[path = "mcp_cli_fixtures/presentation.rs"]
 mod presentation;
 #[path = "mcp_cli_fixtures/stdio.rs"]

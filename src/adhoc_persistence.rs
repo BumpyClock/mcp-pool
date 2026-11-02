@@ -24,6 +24,7 @@ pub(crate) async fn persist(server: &ConfiguredServer, options: &AdHoc) -> Resul
     let entry = persisted_entry(server);
     crate::config_commands::write::write_checked_mutation(
         &path,
+        crate::config_commands::write::WritePolicy::Replace,
         move |document| {
             let object = document
                 .as_object_mut()

@@ -13,6 +13,12 @@ struct Guard {
     file: Option<std::fs::File>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum WritePolicy {
+    Replace,
+    PreserveUnchanged,
+}
+
 pub(crate) fn read_document(path: &Path) -> Result<Value> {
     match std::fs::read_to_string(path) {
         Ok(contents) => parse_document(&contents),
@@ -43,6 +49,7 @@ impl Drop for Guard {
 
 pub(crate) async fn write_checked_mutation<F, Before>(
     path: &Path,
+    policy: WritePolicy,
     mutate: impl FnOnce(&mut Value) -> Result<()>,
     before: F,
 ) -> Result<()>
@@ -95,22 +102,30 @@ where
     };
     let previous = document.clone();
     mutate(&mut document)?;
-    let contents = serde_json::to_string_pretty(&document)?;
     crate::server_config::validate_document(&document)?;
-    let staging = path.with_extension(format!("json.write-{}", std::process::id()));
-    let mut file = crate::oauth::files::private_file(&staging)
-        .context("Creating atomic config replacement")?;
-    let staging_guard = Guard {
-        path: staging.clone(),
-        file: None,
+    let staging_guard = if matches!(policy, WritePolicy::PreserveUnchanged)
+        && original.is_some()
+        && document == previous
+    {
+        None
+    } else {
+        let contents = serde_json::to_string_pretty(&document)?;
+        let staging = path.with_extension(format!("json.write-{}", std::process::id()));
+        let mut file = crate::oauth::files::private_file(&staging)
+            .context("Creating atomic config replacement")?;
+        let guard = Guard {
+            path: staging,
+            file: None,
+        };
+        file.write_all(contents.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_all()?;
+        if let Some(permissions) = &permissions {
+            permissions.apply(&file)?;
+        }
+        drop(file);
+        Some(guard)
     };
-    file.write_all(contents.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    if let Some(permissions) = &permissions {
-        permissions.apply(&file)?;
-    }
-    drop(file);
     drop(permissions);
     before(previous).await?;
     let outcome = (|| {
@@ -122,13 +137,19 @@ where
         if current != original {
             bail!("Config changed during mutation; no changes made, retry");
         }
-        std::fs::rename(&staging, path).context("Replacing config atomically")?;
+        if let Some(staging) = &staging_guard {
+            std::fs::rename(&staging.path, path).context("Replacing config atomically")?;
+        }
         Ok(())
     })();
     drop(staging_guard);
     drop(lock_guard);
     outcome
 }
+
+#[cfg(test)]
+#[path = "config_writer_preservation_tests.rs"]
+mod preservation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -149,6 +170,7 @@ mod tests {
             std::fs::write(&path, original)?;
             let denied = write_checked_mutation(
                 &path,
+                WritePolicy::Replace,
                 |document| {
                     document
                         .as_object_mut()
@@ -190,6 +212,7 @@ mod tests {
                 std::fs::write(&path, &original)?;
                 let denied = write_checked_mutation(
                     &path,
+                    WritePolicy::Replace,
                     |document| {
                         document
                             .as_object_mut()

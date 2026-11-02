@@ -60,11 +60,10 @@ async fn dispatch_with_capabilities(
         "initialize" => initialize_result(&request.params, only_server),
         "server/discover" if modern_request => discover_result(only_server, supports_listen),
         "ping" => Ok(json!({})),
-        "tools/list" => state
-            .list_tools(only_server)
-            .await
-            .map(|tools| json!({"tools":tools})),
-        "tools/call" => call_tool(state, &request.params, only_server).await,
+        "tools/list" => state.list_tools(only_server).await.map(|tools| {
+            Value::Object(Map::from_iter([("tools".to_owned(), Value::Array(tools))]))
+        }),
+        "tools/call" => call_tool(state, request.params, only_server).await,
         _ => {
             return Some(error_response(
                 id,
@@ -108,9 +107,9 @@ pub(super) fn modern_protocol_version(message: &Value) -> Option<&str> {
 }
 
 pub(super) fn listen_subscription(
-    message: &Value,
+    message: Value,
 ) -> std::result::Result<ListenSubscription, Value> {
-    let request = match parse_request(message.clone()) {
+    let request = match parse_request(message) {
         Ok(request) => request,
         Err((id, code, message)) => return Err(error_response(id, code, message)),
     };
@@ -209,13 +208,12 @@ pub(super) fn malformed_frame_response(too_large: bool) -> Value {
 }
 
 fn parse_request(message: Value) -> Result<Request, (Value, i64, &'static str)> {
-    let Some(object) = message.as_object() else {
+    let Value::Object(mut object) = message else {
         return Err((Value::Null, -32600, "Invalid JSON-RPC request."));
     };
-    let id = match object.get("id") {
+    let id = match object.remove("id") {
         None | Some(Value::Null) => None,
-        Some(Value::String(value)) => Some(Value::String(value.clone())),
-        Some(Value::Number(value)) => Some(Value::Number(value.clone())),
+        Some(value @ (Value::String(_) | Value::Number(_))) => Some(value),
         Some(_) => return Err((Value::Null, -32600, "Invalid JSON-RPC request id.")),
     };
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
@@ -225,7 +223,7 @@ fn parse_request(message: Value) -> Result<Request, (Value, i64, &'static str)> 
             "Invalid JSON-RPC version.",
         ));
     }
-    let Some(method) = object.get("method").and_then(Value::as_str) else {
+    let Some(Value::String(method)) = object.remove("method") else {
         return Err((
             id.unwrap_or(Value::Null),
             -32600,
@@ -239,7 +237,7 @@ fn parse_request(message: Value) -> Result<Request, (Value, i64, &'static str)> 
             "Invalid JSON-RPC method.",
         ));
     }
-    let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
+    let params = object.remove("params").unwrap_or_else(|| json!({}));
     if !params.is_object() && !params.is_array() {
         return Err((
             id.unwrap_or(Value::Null),
@@ -247,11 +245,7 @@ fn parse_request(message: Value) -> Result<Request, (Value, i64, &'static str)> 
             "Invalid JSON-RPC parameters.",
         ));
     }
-    Ok(Request {
-        id,
-        method: method.to_owned(),
-        params,
-    })
+    Ok(Request { id, method, params })
 }
 
 fn initialize_result(
@@ -320,23 +314,22 @@ fn discover_result(
 
 async fn call_tool(
     state: &BridgeState,
-    params: &Value,
+    params: Value,
     only_server: Option<&str>,
 ) -> std::result::Result<Value, BridgeFailure> {
-    let Some(params) = params.as_object() else {
+    let Value::Object(mut params) = params else {
         return Err(BridgeFailure::invalid_params());
     };
-    let Some(name) = params.get("name").and_then(Value::as_str) else {
+    let Some(Value::String(name)) = params.remove("name") else {
         return Err(BridgeFailure::invalid_params());
     };
     let arguments = params
-        .get("arguments")
-        .cloned()
+        .remove("arguments")
         .unwrap_or_else(|| Value::Object(Map::new()));
     if !arguments.is_object() {
         return Err(BridgeFailure::invalid_params());
     }
-    state.call_tool(name, arguments, only_server).await
+    state.call_tool(&name, arguments, only_server).await
 }
 
 fn negotiate_protocol_version(requested: &str) -> String {
@@ -348,13 +341,17 @@ fn negotiate_protocol_version(requested: &str) -> String {
 }
 
 fn success_response(id: Value, result: Value) -> Value {
-    json!({"jsonrpc":"2.0", "id":id, "result":result})
+    Value::Object(Map::from_iter([
+        ("jsonrpc".to_owned(), Value::from("2.0")),
+        ("id".to_owned(), id),
+        ("result".to_owned(), result),
+    ]))
 }
 
 fn error_response(id: Value, code: i64, message: &str) -> Value {
-    json!({
-        "jsonrpc":"2.0",
-        "id":id,
-        "error":{"code":code, "message":message}
-    })
+    Value::Object(Map::from_iter([
+        ("jsonrpc".to_owned(), Value::from("2.0")),
+        ("id".to_owned(), id),
+        ("error".to_owned(), json!({"code":code, "message":message})),
+    ]))
 }

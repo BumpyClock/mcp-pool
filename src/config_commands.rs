@@ -8,7 +8,7 @@ use crate::tool_arguments::value;
 
 #[path = "config_writer.rs"]
 pub(crate) mod write;
-use write::write_checked_mutation;
+use write::{WritePolicy, write_checked_mutation};
 #[path = "config_commands_copy.rs"]
 mod copy;
 #[path = "config_commands_input.rs"]
@@ -177,6 +177,7 @@ pub(crate) async fn remove(
     let prior_name = name.to_owned();
     write_checked_mutation(
         &path,
+        WritePolicy::Replace,
         |document| remove_entry(document, name),
         move |document| async move { retire_previous(&source, &document, &prior_name).await },
     )
@@ -260,6 +261,11 @@ pub(crate) async fn add(operation: AddOperation, root: Option<&std::path::Path>)
     let changed = entry.clone();
     write_checked_mutation(
         &destination,
+        if copying {
+            WritePolicy::PreserveUnchanged
+        } else {
+            WritePolicy::Replace
+        },
         |document| insert_entry(document, &name, &entry, copying, replace, &destination),
         move |document| async move {
             if !copying

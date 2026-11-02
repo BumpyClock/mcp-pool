@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::BufReader;
 use tokio::time::{Instant, timeout, timeout_at};
 
@@ -155,11 +155,17 @@ impl McpClient {
             .context("MCP request IDs exhausted")?;
         let mut reader = self.reader.take().context("MCP connection is closed")?;
         let outcome = timeout(self.deadline, async {
-            let message = json!({
-                "jsonrpc":"2.0", "id":request_id, "method":method, "params":params,
-                crate::request_deadline::TIMEOUT_FIELD:timeout_ms
-            });
-            wire::write_message(&mut reader, &message).await?;
+            let mut message = Map::from_iter([
+                ("jsonrpc".to_owned(), Value::from("2.0")),
+                ("id".to_owned(), Value::from(request_id)),
+                ("method".to_owned(), Value::from(method)),
+                ("params".to_owned(), params),
+            ]);
+            message.insert(
+                crate::request_deadline::TIMEOUT_FIELD.to_owned(),
+                Value::from(timeout_ms),
+            );
+            wire::write_message(&mut reader, &Value::Object(message)).await?;
             wire::receive_result(&mut reader, request_id).await
         })
         .await
@@ -182,7 +188,11 @@ impl McpClient {
             self.deadline,
             wire::write_message(
                 &mut reader,
-                &json!({"jsonrpc":"2.0", "method":method, "params":params}),
+                &Value::Object(Map::from_iter([
+                    ("jsonrpc".to_owned(), Value::from("2.0")),
+                    ("method".to_owned(), Value::from(method)),
+                    ("params".to_owned(), params),
+                ])),
             ),
         )
         .await
@@ -233,22 +243,25 @@ impl McpClient {
         let mut params = json!({});
         let mut cursors = HashSet::new();
         loop {
-            let result = self.request(method, params).await?;
+            let mut result = self.request(method, params).await?;
             let page = result
-                .get(field)
-                .and_then(Value::as_array)
+                .get_mut(field)
+                .and_then(Value::as_array_mut)
                 .with_context(|| format!("MCP {method} result omitted {field} array"))?;
             if page.iter().any(|entry| !entry.is_object()) {
                 bail!("MCP {method} returned a non-object {field} entry");
             }
-            entries.extend(page.iter().cloned());
-            match result.get("nextCursor") {
+            entries.append(page);
+            match result.get_mut("nextCursor").map(Value::take) {
                 None => return Ok(entries),
                 Some(Value::String(cursor)) => {
                     if !cursors.insert(cursor.clone()) {
                         bail!("MCP {method} repeated pagination cursor");
                     }
-                    params = json!({"cursor":cursor});
+                    params = Value::Object(Map::from_iter([(
+                        "cursor".to_owned(),
+                        Value::String(cursor),
+                    )]));
                 }
                 Some(_) => bail!("MCP {method} nextCursor must be a string"),
             }
@@ -302,3 +315,7 @@ mod notification_tests;
 #[cfg(test)]
 #[path = "mcp_client_protocol_tests.rs"]
 mod protocol_tests;
+
+#[cfg(test)]
+#[path = "mcp_client_ownership_tests.rs"]
+mod ownership_tests;
