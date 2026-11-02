@@ -109,44 +109,6 @@ async fn full_pool_bounds_connections_and_queue_wait_without_dispatch() -> Resul
         }));
     }
 
-    #[tokio::test]
-    async fn many_calls_reuse_only_the_configured_number_of_connections() -> Result<()> {
-        let active = Arc::new(AtomicUsize::new(0));
-        let maximum = Arc::new(AtomicUsize::new(0));
-        let fixture = Fixture::new("alpha", vec![tool("echo", "echo")])
-            .with_activity(Arc::clone(&active), Arc::clone(&maximum));
-        let state = Arc::new(
-            test_fixture::concurrent_state(
-                vec![(
-                    fixture.clone(),
-                    ToolFilter::default(),
-                    Duration::from_secs(5),
-                )],
-                2,
-            )
-            .await?,
-        );
-        let mut calls = tokio::task::JoinSet::new();
-        for label in 0..8 {
-            let state = Arc::clone(&state);
-            calls.spawn(async move {
-                let result = state
-                    .call_tool("alpha__echo", json!({"label":label}), None)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("concurrent call failed"))?;
-                assert_eq!(result.pointer("/echo/arguments/label"), Some(&json!(label)));
-                Ok::<_, anyhow::Error>(())
-            });
-        }
-        while let Some(call) = calls.join_next().await {
-            call??;
-        }
-        assert_eq!(fixture.connections(), 2);
-        assert_eq!(fixture.calls().await.len(), 8);
-        assert_eq!(maximum.load(Ordering::SeqCst), 2);
-        assert_eq!(active.load(Ordering::SeqCst), 0);
-        Ok(())
-    }
     fixture.wait_for(2, 0, 2).await?;
     let queued = state
         .call_tool("alpha__echo", json!({"label":"not-sent"}), None)
@@ -165,5 +127,44 @@ async fn full_pool_bounds_connections_and_queue_wait_without_dispatch() -> Resul
         .map_err(|_| anyhow::anyhow!("cancelled slot not reusable"))?;
     assert_eq!(fast.pointer("/echo/arguments/label"), Some(&json!("after")));
     assert_eq!(fixture.calls().await.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn many_calls_reuse_only_the_configured_number_of_connections() -> Result<()> {
+    let active = Arc::new(AtomicUsize::new(0));
+    let maximum = Arc::new(AtomicUsize::new(0));
+    let fixture = Fixture::new("alpha", vec![tool("echo", "echo")])
+        .with_activity(Arc::clone(&active), Arc::clone(&maximum));
+    let state = Arc::new(
+        test_fixture::concurrent_state(
+            vec![(
+                fixture.clone(),
+                ToolFilter::default(),
+                Duration::from_secs(5),
+            )],
+            2,
+        )
+        .await?,
+    );
+    let mut calls = tokio::task::JoinSet::new();
+    for label in 0..8 {
+        let state = Arc::clone(&state);
+        calls.spawn(async move {
+            let result = state
+                .call_tool("alpha__echo", json!({"label":label}), None)
+                .await
+                .map_err(|_| anyhow::anyhow!("concurrent call failed"))?;
+            assert_eq!(result.pointer("/echo/arguments/label"), Some(&json!(label)));
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+    while let Some(call) = calls.join_next().await {
+        call??;
+    }
+    assert_eq!(fixture.connections(), 2);
+    assert_eq!(fixture.calls().await.len(), 8);
+    assert_eq!(maximum.load(Ordering::SeqCst), 2);
+    assert_eq!(active.load(Ordering::SeqCst), 0);
     Ok(())
 }

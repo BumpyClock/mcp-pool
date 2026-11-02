@@ -101,4 +101,47 @@ def self_test(options):
         pass
     assert not root.exists() and not {fixture_pid, daemon_pid}.intersection(process_table())
     checks.append({"check": "command-error-cleanup", "status": "passed"})
+
+    with Runtime(product, binary, "http", "legacy", options.output, "self-test-cleanup-ownership") as runtime:
+        root = runtime.root
+        fixture_process = runtime.http
+        # Cleanup must use owned handles, not sampling or historical event PIDs.
+        with mock.patch("runtime.process_table", side_effect=OSError("sampler unavailable")), \
+                mock.patch.object(runtime, "records", side_effect=OSError("ledger unavailable")), \
+                mock.patch.object(runtime, "command") as shutdown:
+            runtime.close()
+            shutdown.assert_called_once_with(["daemon", "stop"], timeout=15)
+        assert fixture_process.poll() is not None
+        assert fixture_process.stdout.closed
+        assert all(log.closed for log in runtime.logs)
+        assert not root.exists()
+    checks.append({"check": "cleanup-independent-of-sampler-and-ledger", "status": "passed"})
+
+    runtime = Runtime(product, binary, "stdio", "legacy", options.output, "self-test-stale-pid")
+    runtime.root.mkdir(mode=0o700)
+    runtime.created = True
+    runtime.events.write_text('{"event":"spawn","pid":999999}\n')
+    with mock.patch("os.kill") as signal_process:
+        runtime.close()
+        signal_process.assert_not_called()
+    checks.append({"check": "historical-pids-never-signaled", "status": "passed"})
+
+    runtime = Runtime(product, binary, "http", "legacy", options.output, "self-test-cleanup-retry")
+    runtime.__enter__()
+    try:
+        with mock.patch.object(runtime, "command", side_effect=OSError("shutdown unavailable")):
+            try:
+                runtime.close()
+            except RuntimeError as error:
+                assert "namespace retained" in str(error)
+            else:
+                raise AssertionError("Shutdown failure was hidden")
+        assert runtime.http.poll() is not None
+        assert all(log.closed for log in runtime.logs)
+        assert runtime.root.exists()
+        assert not runtime.closed
+    finally:
+        runtime.close()
+    assert not runtime.root.exists()
+    checks.append({"check": "failed-shutdown-tears-down-owned-handles-and-allows-retry", "status": "passed"})
     return checks

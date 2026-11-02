@@ -7,7 +7,6 @@ import platform
 import queue
 import resource
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -16,7 +15,6 @@ import uuid
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPOSITORY = HERE.parent
 
 
 def process_table():
@@ -247,74 +245,57 @@ class Runtime:
 
     @staticmethod
     def terminate(process):
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
-        for stream in (process.stdin, process.stdout):
-            if stream is not None and not stream.closed:
-                stream.close()
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
+        finally:
+            for stream in (process.stdin, process.stdout):
+                if stream is not None and not stream.closed:
+                    stream.close()
 
     def close(self):
         if self.closed:
             return
-        self.closed = True
         if not self.created:
+            self.closed = True
             return
         errors = []
-        # This command addresses only the private namespace, including auto-started cold daemons.
-        if self.config.exists():
-            try:
+        try:
+            # The namespace also addresses cold daemons that the CLI launched for us.
+            if self.config.exists():
                 self.command(["daemon", "stop"], timeout=15)
+        except Exception as error:
+            errors.append(str(error))
+        finally:
+            for process in reversed(self.processes):
+                try:
+                    self.terminate(process)
+                except Exception as error:
+                    errors.append(str(error))
+            for log in self.logs:
+                try:
+                    log.close()
+                except Exception as error:
+                    errors.append(str(error))
+        if not errors:
+            try:
+                shutil.rmtree(self.root)
             except Exception as error:
                 errors.append(str(error))
-        table = process_table()
-        roots = [process.pid for process in self.processes if process.poll() is None]
-        owned = descendants(table, roots)
-        if self.events.exists():
-            owned.update(row["pid"] for row in self.records() if row["event"] == "spawn")
-        for process in reversed(self.processes):
-            try:
-                self.terminate(process)
-            except Exception as error:
-                errors.append(str(error))
-        # Detached fixture processes are identified by their private event ledger, never by name.
-        for identifier in owned:
-            if identifier not in process_table():
-                continue
-            try:
-                os.kill(identifier, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-        deadline = time.monotonic() + 3
-        remaining = owned & process_table().keys()
-        while remaining and time.monotonic() < deadline:
-            time.sleep(0.03)
-            remaining = owned & process_table().keys()
-        for identifier in remaining:
-            try:
-                os.kill(identifier, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-        deadline = time.monotonic() + 3
-        remaining_after_kill = remaining & process_table().keys()
-        while remaining_after_kill and time.monotonic() < deadline:
-            time.sleep(0.03)
-            remaining_after_kill = remaining & process_table().keys()
-        if remaining_after_kill:
-            errors.append(f"Owned processes survived cleanup: {sorted(remaining_after_kill)}")
-        for log in self.logs:
-            log.close()
+        # A recorded PID is historical evidence, not authority to signal a process.
         (self.output / f"{self.label}.cleanup.json").write_text(json.dumps({
-            "namespace": str(self.root), "owned_pids": sorted(owned),
-            "forced_kill_pids": sorted(remaining), "errors": errors,
+            "namespace": str(self.root),
+            "owned_pids": [process.pid for process in self.processes],
+            "errors": errors,
         }, indent=2))
-        shutil.rmtree(self.root)
         if errors:
-            raise RuntimeError("Cleanup command failed: " + "; ".join(errors))
+            raise RuntimeError(f"Cleanup failed; namespace retained at {self.root}: " + "; ".join(errors))
+        self.closed = True
 
 
 SAMPLE_METADATA = {
