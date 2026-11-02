@@ -216,7 +216,12 @@ async fn pseudo_discovery_rejects_tool_arguments_without_calling_a_tool() -> io:
 #[tokio::test]
 async fn real_filtered_pseudo_tools_block_fallbacks_and_calls() -> io::Result<()> {
     let fixture = Fixture::new().await?;
-    configure_synthetic(&fixture, &["list_tools", "help", "echo"], Some(&["echo"])).await?;
+    configure_synthetic(
+        &fixture,
+        &["list_tools", "help", "list_tools", "echo", "help"],
+        Some(&["echo"]),
+    )
+    .await?;
     warm_synthetic(&fixture).await?;
     let before = fixture.event_count("tools/call").await?;
 
@@ -236,6 +241,43 @@ async fn real_filtered_pseudo_tools_block_fallbacks_and_calls() -> io::Result<()
         );
     }
     assert_eq!(fixture.event_count("tools/call").await?, before);
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn duplicate_aliases_keep_diagnostic_order_and_exact_calls() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    configure_synthetic(
+        &fixture,
+        &["echo_v2", "echo-v2", "echo_v2", "echo.v2", "echo-v2"],
+        None,
+    )
+    .await?;
+    warm_synthetic(&fixture).await?;
+    let before = fixture.event_count("tools/call").await?;
+
+    let rejected = fixture
+        .command(&["call", "fixture.echov2", "--output", "json"])
+        .await?;
+    assert!(!rejected.status.success(), "{rejected:?}");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&rejected.stdout),
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    assert!(
+        diagnostic.contains("matches: echo_v2, echo-v2, echo.v2"),
+        "{diagnostic}"
+    );
+    assert_eq!(fixture.event_count("tools/call").await?, before);
+
+    let called = parse_json(
+        &fixture
+            .success(&["call", "fixture.echo_v2", "--output", "json"])
+            .await?,
+    )?;
+    assert_eq!(called.get("called"), Some(&json!("echo_v2")));
+    assert_eq!(fixture.event_count("tools/call").await?, before + 1);
     fixture.finish().await
 }
 

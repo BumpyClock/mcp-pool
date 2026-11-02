@@ -98,10 +98,11 @@ mcp-pool import mcp-pool --from OLD_CONFIG_TOML
 `import` and `config import` are equivalent. Imports default to the home config;
 use `--scope project` for `PROJECT/.mcp/config.json`, or `--config PATH` for an
 explicit destination. `--from PATH` selects a source file, and optional server
-names select a subset. Existing identical definitions are safe to reimport;
-different definitions require `--replace`. Conflicts leave the whole destination
-unchanged. `--dry-run` makes no files or connections. Import output reports names
-and paths, not credential values.
+names select a subset. If the imported definitions leave an existing destination
+unchanged, its bytes and modification time are preserved, including JSONC
+comments, a BOM, and whitespace. Different definitions require `--replace`.
+Conflicts leave the whole destination unchanged. `--dry-run` makes no files or
+connections. Import output reports names and paths, not credential values.
 
 | Source | Files read during explicit import |
 | --- | --- |
@@ -151,6 +152,8 @@ Credential writes obey `MCP_POOL_CREDENTIALS_READ_ONLY=1` and retire affected po
 views first. Preflight validation and conflict errors leave destination files unchanged.
 Config and credential files are committed separately. A later credential I/O failure
 can leave the config and earlier credentials imported; fix the store and rerun.
+An unchanged config still permits credential imports. Required credential checks,
+pool retirement, and credential writes run even when the config is not rewritten.
 
 **Cutover warning.** Copied refresh tokens may rotate. Stop using imported servers
 through mcporter after cutover, or one runtime can invalidate the other runtime's
@@ -220,11 +223,16 @@ exit unsuccessfully.
 documentation, typed signatures, examples, and a transport summary. Interactive
 output highlights tool names and parameters and dims explanatory text.
 `--no-color` or `NO_COLOR` disables colors; redirected output contains no color
-codes. The default shows up to five parameters plus any additional required
-ones. A notice identifies hidden optional fields; use `--all-parameters` to
-show them. `--brief` prints required-only signatures, and `--schema` adds the
-complete input schemas. `list SERVER.TOOL` selects one tool; a second positional
-argument is not accepted.
+codes. On Windows, listing colors require virtual-terminal support. The command
+enables it without clearing other console mode flags; if this fails, it reports
+the error and prints plain text. JSON and quiet listings do not change console
+modes. Examples preserve enum value types through local schema references,
+including array items. Cyclic or unresolved references use generic placeholders,
+not validated argument values. The default shows up to five parameters plus any
+additional required ones. A notice identifies hidden optional fields; use
+`--all-parameters` to show them. `--brief` prints required-only signatures, and
+`--schema` adds the complete input schemas. `list SERVER.TOOL` selects one tool;
+a second positional argument is not accepted.
 
 Interactive discovery, calls, resources, and native pool-control commands show
 a waiting indicator on stderr with the current phase and elapsed time.
@@ -360,11 +368,13 @@ and header values are redacted.
 `config add --copy-from SOURCE:NAME` starts with the same normalized definition
 as an explicit import, then applies the supplied target, environment, header,
 auth, description, and protocol overrides. The destination alias can differ
-from the source name. `--from PATH` selects the source file. Identical copies are
-idempotent; a different existing destination requires `--replace`. Copying does
-not read or transfer OAuth vault/cache credentials.
-Config mutations preserve unrelated JSON fields but rewrite formatting and
-remove JSONC comments. Use a separate file when the original must remain unchanged.
+from the source name. `--from PATH` selects the source file. An identical copy
+preserves the existing destination's bytes and modification time; a different
+existing destination requires `--replace`. Copying does not read or transfer
+OAuth vault/cache credentials.
+Config mutations preserve unrelated JSON fields. Except for unchanged imports
+and copies, writes reformat the file and remove JSONC comments. Use a separate
+file when the original must remain unchanged.
 Replacement and removal retire matching prior pool views before committing.
 If retirement fails, the config remains unchanged.
 

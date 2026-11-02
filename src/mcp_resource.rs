@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use serde_json::json;
+use serde_json::{Map, Value, json};
 
 use super::{connect, print_outcome, server};
 use crate::server_config::ServerConfiguration;
@@ -51,10 +51,15 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
             progress
                 .wait("Discovering MCP resources", client.list_resources())
                 .await
-                .map(|resources| json!({"resources":resources}))
+                .map(|resources| {
+                    Value::Object(Map::from_iter([(
+                        "resources".to_owned(),
+                        Value::Array(resources),
+                    )]))
+                })
         }
     }
     .await;
     progress.finish();
-    print_outcome(&selected, None, outcome, output)
+    print_outcome(&selected, None, &outcome, output)
 }

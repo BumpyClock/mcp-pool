@@ -154,6 +154,21 @@ async fn modern_http_requires_matching_derived_method_and_name_headers() -> Resu
         .await?;
     assert_eq!(missing_name.status(), StatusCode::BAD_REQUEST);
 
+    let wrong_name = client
+        .post(url.as_str())
+        .header("accept", ACCEPT)
+        .header("mcp-protocol-version", MODERN_VERSION)
+        .header("mcp-method", "tools/call")
+        .header("mcp-name", "alpha__other")
+        .json(&json!({
+            "jsonrpc":"2.0","id":"wrong-name","method":"tools/call",
+            "params":{"_meta":modern_metadata(),"name":"alpha__ping",
+                "arguments":{"value":"x".repeat(256 * 1024)}}
+        }))
+        .send()
+        .await?;
+    assert_eq!(wrong_name.status(), StatusCode::BAD_REQUEST);
+
     shutdown.send_replace(true);
     server.await??;
     Ok(())

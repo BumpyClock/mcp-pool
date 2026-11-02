@@ -209,6 +209,95 @@ fn examples_preserve_enum_values_and_leave_json_options_unchanged() {
 }
 
 #[test]
+fn examples_resolve_nested_local_references_without_changing_machine_descriptors() {
+    let tool = json!({"name":"configure","inputSchema":{
+        "$defs":{
+            "count":{"type":"integer","enum":[2,3]},
+            "ratio":{"type":"number","enum":[0.5,1.5]},
+            "alias":{"$ref":"#/$defs/count"},
+            "flag":{"type":"boolean","enum":[false]},
+            "nullable":{"type":["string","null"],"enum":[null,"value"]},
+            "values":{"type":"array","enum":[[2,3],[4]]},
+            "counts":{"type":"array","items":{"$ref":"#/$defs/alias"}},
+            "flags":{"type":"array","items":{"$ref":"#/$defs/flag"}},
+            "a/b":{"type":"string","enum":["owner's,label"]},
+            "labels":{"type":"array","items":{"$ref":"#/$defs/a~1b"}},
+            "matrix":{"type":"array","items":{"$ref":"#/$defs/values"}}
+        },
+        "required":["count","ratio","flag","nullable","values","counts","flags","labels","matrix"],
+        "properties":{
+            "count":{"$ref":"#/$defs/alias"},
+            "ratio":{"$ref":"#/$defs/ratio"},
+            "flag":{"$ref":"#/$defs/flag"},
+            "nullable":{"$ref":"#/$defs/nullable"},
+            "values":{"$ref":"#/$defs/values"},
+            "counts":{"$ref":"#/$defs/counts"},
+            "flags":{"$ref":"#/$defs/flags"},
+            "labels":{"$ref":"#/$defs/labels"},
+            "matrix":{"$ref":"#/$defs/matrix"}
+        }
+    }});
+    let original = tool.clone();
+    let options_before = crate::tool_output::options(&tool);
+    let example = plain().example("fixture", &tool);
+    let payload = example
+        .strip_prefix("mcp-pool call fixture.configure --args '")
+        .and_then(|payload| payload.strip_suffix('\''))
+        .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
+    assert_eq!(
+        payload,
+        Some(json!({"count":2,"ratio":0.5,"flag":false,"nullable":null,
+            "values":[2,3],"counts":[2],"flags":[false],"labels":["owner's,label"],
+            "matrix":[[2,3]]}))
+    );
+    assert!(plain().brief(&tool).contains("count: 2 | 3"));
+    assert!(plain().brief(&tool).contains("counts: (2 | 3)[]"));
+    assert_eq!(tool, original);
+    assert_eq!(crate::tool_output::options(&tool), options_before);
+    assert_eq!(
+        options_before.first(),
+        Some(
+            &json!({"property":"count","cliName":"count","required":true,
+            "type":"unknown","placeholder":"<count>"})
+        )
+    );
+}
+
+#[test]
+fn examples_and_signatures_bound_cyclic_unresolved_and_external_references() {
+    let schema = json!({
+        "$defs":{"cycle":{"$ref":"#/$defs/cycle"},
+            "array":{"type":"array","items":{"$ref":"#/$defs/array"}},
+            "one":{"$ref":"#/$defs/two"},"two":{"$ref":"#/$defs/one"}},
+        "required":["cycle","missing","external","mutual","array"],
+        "properties":{
+            "cycle":{"$ref":"#/$defs/cycle"},
+            "missing":{"$ref":"#/$defs/absent"},
+            "external":{"$ref":"https://example.com/schema"},
+            "mutual":{"$ref":"#/$defs/one"},
+            "array":{"$ref":"#/$defs/array"}
+        }
+    });
+    let tool = json!({"name":"bounded","inputSchema":schema});
+    let example = plain().example("fixture", &tool);
+    let payload = example
+        .strip_prefix("mcp-pool call fixture.bounded --args '")
+        .and_then(|payload| payload.strip_suffix('\''))
+        .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
+    assert_eq!(
+        payload,
+        Some(json!({
+            "cycle":"value","missing":"value","external":"value","mutual":"value",
+            "array":["value1","value2"]
+        }))
+    );
+    assert!(plain().brief(&tool).contains("cycle: unknown"));
+    assert!(plain().brief(&tool).contains("missing: unknown"));
+    assert!(plain().brief(&tool).contains("external: unknown"));
+    assert!(plain().brief(&tool).contains("mutual: unknown"));
+}
+
+#[test]
 fn examples_are_valid_json_arguments_and_do_not_break_shell_quoting() {
     let tool = json!({"name":"write","inputSchema":{"required":["id","enabled","count","data"],"properties":{
         "id":{"type":"string","default":"owner's-id"},
