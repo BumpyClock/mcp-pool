@@ -4,6 +4,9 @@
 
 ### Added
 
+- Opt-in offline pre-push checks for formatting, binary checking, and selected
+  Unix IPC tests. The repository pins Rust 1.95.0 with rustfmt and Clippy.
+  Hook installation is explicit and repository-local.
 - Opt-in `import mcporter --include-auth` copies cached HTTP/SSE OAuth tokens,
   client registrations, and discovery metadata into the destination credential
   scope. Supports vault and directory caches, redacted previews, conflict checks,
