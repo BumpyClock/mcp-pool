@@ -51,10 +51,10 @@ use `./dev.sh`.
 
 ### Reproducible opt-in push checks
 
-The checked-in toolchain pins Rust 1.95.0 with rustfmt. Prepare it, locked dependencies, and Python 3.11+ explicitly before opting in:
+The checked-in toolchain pins Rust 1.95.0 with rustfmt and Clippy. Prepare it, locked dependencies, and Python 3.11+ explicitly before opting in:
 
 ```sh
-rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
 cargo fetch --locked
 python3 scripts/test_pre_push.py -v
 ./scripts/install-hooks.sh
@@ -66,9 +66,9 @@ Push validation requires a clean checkout, including untracked files. Every nond
 
 The hook uses the already-installed pinned Rust toolchain, full project `cargo fmt --all -- --check`, and `cargo check --offline --locked --bin mcp-pool`. Missing tools, components or dependencies fail with setup instructions; the hook never installs or downloads them. Source, dependency, shared configuration and uncertain changes run the existing Unix security/transport filter serially on Unix. Socket fixtures use a fresh private, short `/tmp` MCP home, cleaned even on failure, never the user's MCP state. Markdown-only changes retain format/check but omit the IPC runtime gate. All failures propagate.
 
-Unix tests are not Windows acceptance. A non-Unix hook host reports that Unix IPC remains required in CI; Windows named-pipe/process behavior and the full suite still need native qualification. The hook does not invoke MCP commands, refresh tokens, launch providers, import credentials or restart daemons. Its fixture tests use stub commands in disposable Git repositories and make no outbound push. Run full project tests separately; no nine-second latency promise is made.
+Unix tests are not Windows acceptance. A non-Unix hook host reports that Unix IPC remains required in CI; Windows named-pipe/process behavior and the full suite still need native qualification. The hook does not invoke MCP commands, refresh tokens, launch providers, import credentials or restart daemons. Its fixture tests use stub commands in disposable Git repositories and make no outbound push. Run full project tests separately.
 
-The existing `unix-ipc` workflow already uses Boat. This change keeps that runner, PR/manual triggers and check identity, prepares the pinned compiler/Python, and tests hook fixtures alongside the existing serial IPC gate. Owner-only public execution follows the separately configured actor policy; outsiders and bots are not implicitly authorized. No runner migration, public-policy setting change or cache speedup is attributed to this toolchain/hook work. Cache retention still requires matched restore/setup/test/save measurements.
+The existing `unix-ipc` workflow uses Boat. It runs on pull requests and on manual dispatch. It prepares the pinned compiler and Python, then tests hook fixtures serially with the existing isolated Unix IPC gate. Owner-only public execution follows the separately configured actor policy; outsiders and bots are not implicitly authorized.
 
 ## Configuration and imports
 
