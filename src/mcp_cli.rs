@@ -252,19 +252,19 @@ pub(crate) fn resolve_tool(
 pub(crate) fn print_outcome(
     server: &ConfiguredServer,
     tool: Option<&str>,
-    outcome: Result<Value>,
+    outcome: &Result<Value>,
     output: Output,
 ) -> Result<()> {
     match outcome {
         Ok(result) => {
-            println!("{}", tool_output::render(&result, output)?);
-            if tool_output::failed(&result) {
+            println!("{}", tool_output::render(result, output)?);
+            if tool_output::failed(result) {
                 bail!("MCP operation returned an error result");
             }
             Ok(())
         }
         Err(error) => {
-            let message = safe_error(server, &error);
+            let message = safe_error(server, error);
             if matches!(output, Output::Json | Output::Raw) {
                 let mut envelope = json!({"server":server.name,"error":message,"issue":tool_discovery::issue(&message)});
                 if let Some(tool) = tool

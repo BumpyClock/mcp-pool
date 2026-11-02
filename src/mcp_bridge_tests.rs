@@ -12,6 +12,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 #[path = "mcp_bridge_concurrency_tests.rs"]
 mod concurrency_tests;
+#[path = "mcp_bridge_ownership_tests.rs"]
+mod ownership_tests;
 #[path = "mcp_bridge_reconnect_tests.rs"]
 mod reconnect_tests;
 #[path = "mcp_bridge_selection_tests.rs"]

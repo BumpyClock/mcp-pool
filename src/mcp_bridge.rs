@@ -269,7 +269,13 @@ impl BridgeState {
                 .with_client(&server_client.reconnect, |client| {
                     Box::pin(async move {
                         client
-                            .request("tools/call", json!({"name":tool, "arguments":arguments}))
+                            .request(
+                                "tools/call",
+                                Value::Object(serde_json::Map::from_iter([
+                                    ("name".to_owned(), Value::String(tool)),
+                                    ("arguments".to_owned(), arguments),
+                                ])),
+                            )
                             .await
                     })
                 })

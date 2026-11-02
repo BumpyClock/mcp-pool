@@ -118,13 +118,16 @@ if os.environ.get('HOOK_FAIL')==' '.join(call):sys.exit(37)
     def test_shared_config_rename_and_deletion(self):
         self.git("mv", "src/main.rs", "src/renamed file.rs")
         (self.repo / "Cargo.lock").write_text("fixture lock\n")
-        self.commit()
+        renamed_commit = self.commit()
         self.assertEqual(self.hook(self.record()).returncode, 0)
         self.assertIn(IPC, self.calls())
         (self.repo / "src/renamed file.rs").unlink()
         self.commit()
-        self.assertEqual(self.hook(self.record()).returncode, 0)
+        self.log.unlink()
+        self.assertEqual(self.hook(self.record(remote=renamed_commit)).returncode, 0)
+        self.assertIn(FORMAT, self.calls())
         self.assertIn(CHECK, self.calls())
+        self.assertIn(IPC, self.calls())
 
     def test_doc_only_keeps_format_and_check_without_ipc(self):
         self.update("README.md")

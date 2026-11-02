@@ -249,6 +249,29 @@ async fn hardens_only_the_application_socket_directories() -> io::Result<()> {
     Ok(())
 }
 
+#[test]
+fn socket_binding_works_from_a_long_working_directory() -> io::Result<()> {
+    let directory = TestDirectory::create()?;
+    let checkout = directory.0.join("checkout".repeat(20));
+    fs::create_dir(&checkout)?;
+    let output = std::process::Command::new(std::env::current_exe()?)
+        .args([
+            "--exact",
+            "local_security::unix::tests::hardens_only_the_application_socket_directories",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .current_dir(&checkout)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn refuses_symlink_and_non_socket_endpoints_without_removing_them() -> io::Result<()> {
     let directory = TestDirectory::create()?;

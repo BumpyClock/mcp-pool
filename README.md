@@ -51,10 +51,10 @@ use `./dev.sh`.
 
 ### Reproducible opt-in push checks
 
-The checked-in toolchain pins Rust 1.95.0 with rustfmt. Prepare it, locked dependencies, and Python 3.11+ explicitly before opting in:
+The checked-in toolchain pins Rust 1.95.0 with rustfmt and Clippy. Prepare it, locked dependencies, and Python 3.11+ explicitly before opting in:
 
 ```sh
-rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
 cargo fetch --locked
 python3 scripts/test_pre_push.py -v
 ./scripts/install-hooks.sh
@@ -66,9 +66,9 @@ Push validation requires a clean checkout, including untracked files. Every nond
 
 The hook uses the already-installed pinned Rust toolchain, full project `cargo fmt --all -- --check`, and `cargo check --offline --locked --bin mcp-pool`. Missing tools, components or dependencies fail with setup instructions; the hook never installs or downloads them. Source, dependency, shared configuration and uncertain changes run the existing Unix security/transport filter serially on Unix. Socket fixtures use a fresh private, short `/tmp` MCP home, cleaned even on failure, never the user's MCP state. Markdown-only changes retain format/check but omit the IPC runtime gate. All failures propagate.
 
-Unix tests are not Windows acceptance. A non-Unix hook host reports that Unix IPC remains required in CI; Windows named-pipe/process behavior and the full suite still need native qualification. The hook does not invoke MCP commands, refresh tokens, launch providers, import credentials or restart daemons. Its fixture tests use stub commands in disposable Git repositories and make no outbound push. Run full project tests separately; no nine-second latency promise is made.
+Unix tests are not Windows acceptance. A non-Unix hook host reports that Unix IPC remains required in CI; Windows named-pipe/process behavior and the full suite still need native qualification. The hook does not invoke MCP commands, refresh tokens, launch providers, import credentials or restart daemons. Its fixture tests use stub commands in disposable Git repositories and make no outbound push. Run full project tests separately.
 
-The existing `unix-ipc` workflow already uses Boat. This change keeps that runner, PR/manual triggers and check identity, prepares the pinned compiler/Python, and tests hook fixtures alongside the existing serial IPC gate. Owner-only public execution follows the separately configured actor policy; outsiders and bots are not implicitly authorized. No runner migration, public-policy setting change or cache speedup is attributed to this toolchain/hook work. Cache retention still requires matched restore/setup/test/save measurements.
+The existing `unix-ipc` workflow uses Boat. It runs on pull requests and on manual dispatch. It prepares the pinned compiler and Python, then tests hook fixtures serially with the existing isolated Unix IPC gate. Owner-only public execution follows the separately configured actor policy; outsiders and bots are not implicitly authorized.
 
 ## Configuration and imports
 
@@ -98,10 +98,11 @@ mcp-pool import mcp-pool --from OLD_CONFIG_TOML
 `import` and `config import` are equivalent. Imports default to the home config;
 use `--scope project` for `PROJECT/.mcp/config.json`, or `--config PATH` for an
 explicit destination. `--from PATH` selects a source file, and optional server
-names select a subset. Existing identical definitions are safe to reimport;
-different definitions require `--replace`. Conflicts leave the whole destination
-unchanged. `--dry-run` makes no files or connections. Import output reports names
-and paths, not credential values.
+names select a subset. If the imported definitions leave an existing destination
+unchanged, its bytes and modification time are preserved, including JSONC
+comments, a BOM, and whitespace. Different definitions require `--replace`.
+Conflicts leave the whole destination unchanged. `--dry-run` makes no files or
+connections. Import output reports names and paths, not credential values.
 
 | Source | Files read during explicit import |
 | --- | --- |
@@ -151,6 +152,8 @@ Credential writes obey `MCP_POOL_CREDENTIALS_READ_ONLY=1` and retire affected po
 views first. Preflight validation and conflict errors leave destination files unchanged.
 Config and credential files are committed separately. A later credential I/O failure
 can leave the config and earlier credentials imported; fix the store and rerun.
+An unchanged config still permits credential imports. Required credential checks,
+pool retirement, and credential writes run even when the config is not rewritten.
 
 **Cutover warning.** Copied refresh tokens may rotate. Stop using imported servers
 through mcporter after cutover, or one runtime can invalidate the other runtime's
@@ -220,11 +223,16 @@ exit unsuccessfully.
 documentation, typed signatures, examples, and a transport summary. Interactive
 output highlights tool names and parameters and dims explanatory text.
 `--no-color` or `NO_COLOR` disables colors; redirected output contains no color
-codes. The default shows up to five parameters plus any additional required
-ones. A notice identifies hidden optional fields; use `--all-parameters` to
-show them. `--brief` prints required-only signatures, and `--schema` adds the
-complete input schemas. `list SERVER.TOOL` selects one tool; a second positional
-argument is not accepted.
+codes. On Windows, listing colors require virtual-terminal support. The command
+enables it without clearing other console mode flags; if this fails, it reports
+the error and prints plain text. JSON and quiet listings do not change console
+modes. Examples preserve enum value types through local schema references,
+including array items. Cyclic or unresolved references use generic placeholders,
+not validated argument values. The default shows up to five parameters plus any
+additional required ones. A notice identifies hidden optional fields; use
+`--all-parameters` to show them. `--brief` prints required-only signatures, and
+`--schema` adds the complete input schemas. `list SERVER.TOOL` selects one tool;
+a second positional argument is not accepted.
 
 Interactive discovery, calls, resources, and native pool-control commands show
 a waiting indicator on stderr with the current phase and elapsed time.
@@ -360,11 +368,13 @@ and header values are redacted.
 `config add --copy-from SOURCE:NAME` starts with the same normalized definition
 as an explicit import, then applies the supplied target, environment, header,
 auth, description, and protocol overrides. The destination alias can differ
-from the source name. `--from PATH` selects the source file. Identical copies are
-idempotent; a different existing destination requires `--replace`. Copying does
-not read or transfer OAuth vault/cache credentials.
-Config mutations preserve unrelated JSON fields but rewrite formatting and
-remove JSONC comments. Use a separate file when the original must remain unchanged.
+from the source name. `--from PATH` selects the source file. An identical copy
+preserves the existing destination's bytes and modification time; a different
+existing destination requires `--replace`. Copying does not read or transfer
+OAuth vault/cache credentials.
+Config mutations preserve unrelated JSON fields. Except for unchanged imports
+and copies, writes reformat the file and remove JSONC comments. Use a separate
+file when the original must remain unchanged.
 Replacement and removal retire matching prior pool views before committing.
 If retirement fails, the config remains unchanged.
 

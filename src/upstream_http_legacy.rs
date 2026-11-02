@@ -266,9 +266,9 @@ async fn run_requests(
                     while workers.join_next().await.is_some() {}
                     return Ok(());
                 };
-                let request = match Request::parse(line.clone(), options) {
+                let request = match Request::parse(line, options) {
                     Ok(request) => request,
-                    Err(error) => {
+                    Err((line, error)) => {
                         let value = serde_json::from_str::<Value>(&line).ok();
                         let identifier = value.as_ref().and_then(|value| value.get("id"));
                         send_error(response_tx, identifier, &error).await;
@@ -344,7 +344,7 @@ async fn execute(
                 builder = builder.header("MCP-Protocol-Version", protocol);
             }
             let response = builder
-                .body(request.line.clone())
+                .body(request.line)
                 .send()
                 .await
                 .map_err(|_| "Legacy SSE POST failed; request was not replayed")?;

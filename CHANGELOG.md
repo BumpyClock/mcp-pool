@@ -9,6 +9,9 @@
   remains serialized. Operation deadlines include waiting for a connection.
 - Reproducible, isolated performance fixtures for CLI and retained bridge
   workloads, including protocol, concurrency, and resident-memory comparisons.
+- Opt-in offline pre-push checks for formatting, binary checking, and selected
+  Unix IPC tests. The repository pins Rust 1.95.0 with rustfmt and Clippy.
+  Hook installation is explicit and repository-local.
 - Opt-in `import mcporter --include-auth` copies cached HTTP/SSE OAuth tokens,
   client registrations, and discovery metadata into the destination credential
   scope. Supports vault and directory caches, redacted previews, conflict checks,
@@ -54,6 +57,9 @@
 - Short-lived CLI commands default to one Tokio worker rather than one per
   host CPU. Long-running commands and explicit `TOKIO_WORKER_THREADS` settings
   retain their previous behavior.
+- Stdio output encodes each JSON message once. CLI, client, and HTTP bridge
+  handoffs move owned JSON values instead of cloning consumed payloads.
+- Tool-name deduplication borrows names and preserves upstream order.
 - HTTP endpoint and OAuth credential-setting references now share configured-env
   precedence, keeping imported credential identities consistent with later runtime use.
 - Default daemon state and logs now use `~/.mcp/` on every platform, alongside
@@ -84,6 +90,10 @@
   delays, removing the unconditional initial 100 ms wait.
 - Unix IPC test fixtures use short private temporary paths, avoiding macOS
   socket-length failures caused by long checkout paths.
+- Identical explicit imports and `config add --copy-from` preserve existing
+  config bytes and modification times, including JSONC comments, BOMs, and
+  whitespace. Validation and required credential retirement/import still run;
+  config and credential commits remain separate.
 - Tool arguments preserve exact schema property names when another property's
   kebab-case alias has the same spelling.
 - Single-server discovery now matches mcporter's default exit status. Failures
