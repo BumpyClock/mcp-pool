@@ -1,6 +1,17 @@
 use serde_json::json;
 
-use super::credential_summary;
+use super::{credential_summary, escape_text};
+
+#[test]
+fn human_text_preserves_printable_content_and_escapes_unicode_controls() {
+    for text in [r"C:\Users\me\.mcp\config.json", "Docs' \"server\"", "東京"] {
+        assert_eq!(escape_text(text), text);
+    }
+    assert_eq!(
+        escape_text("line\n\u{1b}[2J\u{202e}"),
+        "line\\n\\u{1b}[2J\\u{202e}"
+    );
+}
 
 #[test]
 fn doctor_refresh_guidance_requires_cached_client_registration() {

@@ -117,7 +117,7 @@ pub(crate) async fn run_with_timeout(
                 }
                 println!(
                     "Config: {}",
-                    configuration.source.to_string_lossy().escape_debug()
+                    output::escape_text(&configuration.source.to_string_lossy())
                 );
             }
         }
@@ -160,7 +160,7 @@ pub(crate) async fn run_with_timeout(
             } else {
                 println!(
                     "Configuration valid: {} ({} servers)",
-                    configuration.source.to_string_lossy().escape_debug(),
+                    output::escape_text(&configuration.source.to_string_lossy()),
                     configuration.servers.len()
                 );
                 for (server, status) in &credentials {

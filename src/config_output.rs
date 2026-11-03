@@ -80,12 +80,25 @@ pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
     entry
 }
 
+pub(super) fn escape_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        // Retain Unicode safety without quoting ordinary paths or prose.
+        if matches!(character, '\\' | '\'' | '"') {
+            escaped.push(character);
+        } else {
+            escaped.extend(character.escape_debug());
+        }
+    }
+    escaped
+}
+
 pub(super) fn credential_summary(
     name: &str,
     oauth_configured: bool,
     credentials: &Value,
 ) -> String {
-    let name = name.escape_debug();
+    let name = escape_text(name);
     let flag = |key| credentials.get(key).and_then(Value::as_bool) == Some(true);
     let refreshable = flag("refreshable") && flag("hasClientRegistration");
     let status = if !flag("bindingValid") {
@@ -115,10 +128,10 @@ pub(super) fn credential_summary(
 
 pub(super) fn summary(server: &ConfiguredServer) {
     let entry = serialize(server);
-    println!("{}", server.name.escape_debug());
+    println!("{}", escape_text(&server.name));
     println!("  Transport: {}", server.definition.transport_kind());
     if let Some(command) = entry.get("command").and_then(Value::as_str) {
-        println!("  Command: {}", command.escape_debug());
+        println!("  Command: {}", escape_text(command));
         if let Some(arguments) = entry.get("args").and_then(Value::as_array)
             && !arguments.is_empty()
         {
@@ -139,7 +152,7 @@ pub(super) fn summary(server: &ConfiguredServer) {
         ("protocolVersion", "Protocol"),
     ] {
         if let Some(value) = entry.get(key).and_then(Value::as_str) {
-            println!("  {label}: {}", value.escape_debug());
+            println!("  {label}: {}", escape_text(value));
         }
     }
     if let Some(keep_alive) = server.configured_lifecycle() {
@@ -156,7 +169,7 @@ pub(super) fn summary(server: &ConfiguredServer) {
         if let Some(values) = entry.get(key).and_then(Value::as_object) {
             let names = values
                 .keys()
-                .map(|name| name.escape_debug().to_string())
+                .map(|name| escape_text(name))
                 .collect::<Vec<_>>()
                 .join(", ");
             println!("  {label}: {names} (values redacted)");
@@ -167,6 +180,6 @@ pub(super) fn summary(server: &ConfiguredServer) {
         .and_then(|source| source.get("path"))
         .and_then(Value::as_str)
     {
-        println!("  Source: local ({})", source.escape_debug());
+        println!("  Source: local ({})", escape_text(source));
     }
 }

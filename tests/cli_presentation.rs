@@ -175,7 +175,7 @@ async fn argument_values_are_resolved_and_unredacted_but_environment_values_are_
 #[tokio::test]
 async fn config_text_escapes_control_characters_without_changing_json() -> io::Result<()> {
     let fixture = Fixture::new().await?;
-    let description = "docs\u{1b}[2J\n  Source: forged";
+    let description = "Docs' \"server\" at C:\\Users\\me\u{1b}[2J\n  Source: forged";
     let configuration = json!({"imports":[],"mcpServers":{"local":{
         "command":"echo", "description":description
     }}});
@@ -192,7 +192,7 @@ async fn config_text_escapes_control_characters_without_changing_json() -> io::R
             "forged source line in {text:?}"
         );
         assert!(
-            text.contains("docs\\u{1b}[2J\\n  Source: forged"),
+            text.contains(r#"Docs' "server" at C:\Users\me\u{1b}[2J\n  Source: forged"#),
             "{text:?}"
         );
     }
