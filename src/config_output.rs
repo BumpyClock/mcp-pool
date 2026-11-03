@@ -2,6 +2,10 @@ use serde_json::{Value, json};
 
 use crate::server_config::ConfiguredServer;
 
+#[cfg(test)]
+#[path = "config_output_tests.rs"]
+mod tests;
+
 pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
     let definition = &server.definition;
     let mut entry = json!({"name":server.name,"source":{"kind":"local","path":server.source},
@@ -76,29 +80,118 @@ pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
     entry
 }
 
-pub(super) fn summary(entry: &Value) {
-    println!(
-        "{}",
-        entry
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("server")
-    );
-    println!(
-        "  Transport: {}",
-        entry
-            .get("transport")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-    );
-    if let Some(description) = entry.get("description").and_then(Value::as_str) {
-        println!("  Description: {description}");
+pub(super) fn escape_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        // Debug escaping also alters graphemes; only terminal, line, and bidi controls need escaping.
+        if character.is_control()
+            || matches!(character,
+                '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            escaped.extend(character.escape_debug());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
+pub(super) fn credential_summary(
+    name: &str,
+    oauth_configured: bool,
+    credentials: &Value,
+) -> String {
+    let flag = |key| credentials.get(key).and_then(Value::as_bool) == Some(true);
+    let refreshable = flag("refreshable") && flag("hasClientRegistration");
+    let status = if !flag("bindingValid") {
+        "credential binding mismatch"
+    } else if flag("authenticated") {
+        "cached OAuth credentials valid"
+    } else if flag("expired") && refreshable {
+        "cached OAuth credentials expired (refresh available on use)"
+    } else if flag("expired") {
+        "cached OAuth credentials expired"
+    } else if oauth_configured {
+        "no usable cached OAuth credentials"
+    } else {
+        "OAuth not configured (no usable cached credentials)"
+    };
+    let mut report = format!("  {}: {status}", escape_text(name));
+    if !flag("bindingValid")
+        || (flag("expired") && !refreshable)
+        || (oauth_configured && !flag("hasTokens"))
+    {
+        // Other aliases require shell-specific quoting, so do not interpolate them into commands.
+        let portable_name = !name.is_empty()
+            && !name.starts_with('-')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        if portable_name {
+            report.push_str(&format!(
+                "\n    Run mcp-pool auth {name} to authorize explicitly."
+            ));
+        } else {
+            report.push_str("\n    Run mcp-pool auth --help for explicit authorization options.");
+        }
+    }
+    report
+}
+
+pub(super) fn summary(server: &ConfiguredServer) {
+    let entry = serialize(server);
+    println!("{}", escape_text(&server.name));
+    println!("  Transport: {}", server.definition.transport_kind());
+    if let Some(command) = entry.get("command").and_then(Value::as_str) {
+        println!("  Command: {}", escape_text(command));
+        if let Some(arguments) = entry.get("args").and_then(Value::as_array)
+            && !arguments.is_empty()
+        {
+            let arguments = arguments
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|argument| format!("{argument:?}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("  Args: {arguments}");
+        }
+    }
+    for (key, label) in [
+        ("baseUrl", "URL"),
+        ("cwd", "CWD"),
+        ("description", "Description"),
+        ("auth", "Auth"),
+        ("protocolVersion", "Protocol"),
+    ] {
+        if let Some(value) = entry.get(key).and_then(Value::as_str) {
+            println!("  {label}: {}", escape_text(value));
+        }
+    }
+    if let Some(keep_alive) = server.configured_lifecycle() {
+        println!(
+            "  Lifecycle: {}",
+            if keep_alive {
+                "keep-alive"
+            } else {
+                "ephemeral"
+            }
+        );
+    }
+    for (key, label) in [("env", "Environment"), ("headers", "Headers")] {
+        if let Some(values) = entry.get(key).and_then(Value::as_object) {
+            let names = values
+                .keys()
+                .map(|name| escape_text(name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!("  {label}: {names} (values redacted)");
+        }
     }
     if let Some(source) = entry
         .get("source")
         .and_then(|source| source.get("path"))
         .and_then(Value::as_str)
     {
-        println!("  Source: local ({source})");
+        println!("  Source: local ({})", escape_text(source));
     }
 }

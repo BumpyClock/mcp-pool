@@ -220,7 +220,7 @@ pub async fn daemon(arguments: Vec<String>) -> Result<()> {
     let mut arguments = VecDeque::from(arguments);
     let command = arguments.pop_front().unwrap_or_else(|| "help".to_owned());
     if command == "help" {
-        crate::mcp_cli::command_help("daemon");
+        crate::mcp_cli::command_help("daemon", &arguments.into_iter().collect::<Vec<_>>());
         return Ok(());
     }
     if command == "migrate" {

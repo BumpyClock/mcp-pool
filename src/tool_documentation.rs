@@ -131,6 +131,19 @@ impl Style {
             output.push_str(&format!("   {}\n", self.muted("*/")));
         }
         output.push_str(&format!("  {}\n", self.signature(tool, &displayed)));
+        if hidden_parameters {
+            let visible_optional = displayed.iter().filter(|option| !required(option)).count();
+            let hidden = options
+                .iter()
+                .filter(|option| !required(option))
+                .skip(visible_optional)
+                .filter_map(|option| option.get("property").and_then(Value::as_str))
+                .collect::<Vec<_>>();
+            let text = format!("optional ({}): {}", hidden.len(), hidden.join(", "));
+            for line in wrap(&text, self.width, "  // ", "  // ") {
+                output.push_str(&format!("{}\n", self.muted(&line)));
+            }
+        }
         Documentation {
             text: output,
             hidden_parameters,

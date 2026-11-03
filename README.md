@@ -49,6 +49,9 @@ bacon --job clippy
 On Windows, `.\dev.ps1` starts the `bacon --job run` watcher. On macOS/Linux,
 use `./dev.sh`.
 
+The [CLI UX audit](docs/cli-ux-audit.md) compares every supported command family
+with mcporter using isolated local fixtures and retains command transcripts.
+
 ### Reproducible opt-in push checks
 
 The checked-in toolchain pins Rust 1.95.0 with rustfmt and Clippy. Prepare it, locked dependencies, and Python 3.11+ explicitly before opting in:
@@ -189,8 +192,10 @@ mcp-pool resource docs "docs://guide"  # read a resource
 ```
 
 Root `--help` exposes both MCP commands and native pool controls. `help call`
-and `call --help` describe the same command. Configured servers also support
-short forms:
+and `call --help` describe the same command. Nested commands such as
+`config get --help`, `daemon start --help`, and `vault set --help` show their
+own flags and examples without loading configuration. Configured servers also
+support short forms:
 
 ```sh
 mcp-pool docs
@@ -229,7 +234,7 @@ the error and prints plain text. JSON and quiet listings do not change console
 modes. Examples preserve enum value types through local schema references,
 including array items. Cyclic or unresolved references use generic placeholders,
 not validated argument values. The default shows up to five parameters plus any
-additional required ones. A notice identifies hidden optional fields; use
+additional required ones. Each tool names its hidden optional fields; use
 `--all-parameters` to show them. `--brief` prints required-only signatures, and
 `--schema` adds the complete input schemas. `list SERVER.TOOL` selects one tool;
 a second positional argument is not accepted.
@@ -357,6 +362,24 @@ mcp-pool config login docs            # explicit auth
 mcp-pool config logout docs           # clear stored OAuth credentials
 mcp-pool config help
 ```
+
+`config list` and `config get` show transport details, command arguments, source,
+and configured auth/protocol/lifecycle settings. Environment and header values
+are redacted; command arguments are resolved and unredacted, including secrets
+expanded from environment references. For servers that support it, pass secrets
+through the child environment rather than command arguments. Human config
+reports escape control characters for display; JSON preserves the values.
+Review output before sharing it.
+
+`config doctor` prints readable per-server credential health without connecting
+or refreshing tokens. Servers without explicit OAuth configuration and without
+usable cached credentials are labeled accordingly. Missing or invalid tokens
+are described as having no usable credentials. For scripts, use
+`config doctor --json`; its structured report is unchanged. The default report
+is human-readable, no longer JSON objects printed one per line.
+Doctor emits named authorization commands for simple ASCII aliases. For other
+names it points to `auth --help` rather than embedding untrusted configuration
+text in shell commands.
 
 `config add` and `config remove` change the selected JSON config, shared with
 native `add` and `remove`. By default they write an existing project config,

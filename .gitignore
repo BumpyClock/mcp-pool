@@ -1,2 +1,4 @@
 /target
+/.test-artifacts/
+__pycache__/
 .clawpatch

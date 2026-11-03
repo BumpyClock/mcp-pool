@@ -104,7 +104,7 @@ async fn run_command(arguments: Vec<String>, show_warnings: bool) -> Result<()> 
         .iter()
         .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
-        command_help(&command);
+        command_help(&command, &arguments);
         return Ok(());
     }
     if command == "config" {

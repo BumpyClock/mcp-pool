@@ -96,9 +96,11 @@ fn optional_field_limits_never_hide_required_parameters() {
     assert!(concise.hidden_parameters);
     assert!(concise.text.contains("last: boolean"));
     assert!(!concise.text.contains("sixth?"));
+    assert!(concise.text.contains("// optional (2): fifth, sixth"));
     let complete = plain().render(&tool, true);
     assert!(!complete.hidden_parameters);
     assert!(complete.text.contains("sixth?: string"));
+    assert!(!complete.text.contains("// optional"));
     assert!(plain().brief(&tool).contains("configure(last: boolean)"));
 }
 
