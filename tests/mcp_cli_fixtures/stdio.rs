@@ -140,7 +140,9 @@ pub fn response(request: &Value) -> io::Result<Value> {
         }
         "resources/read" => json!({"contents":[{
             "uri":parameters.get("uri"), "mimeType":"text/plain",
-            "text":std::env::var("MCP_POOL_TEST_RESOURCE_TEXT").unwrap_or_else(|_| "fixture resource body".to_owned())
+            "text":std::env::var_os("MCP_POOL_TEST_RESOURCE_FILE")
+                .map(std::fs::read_to_string).transpose()?
+                .unwrap_or_else(|| "fixture resource body".to_owned())
         }]}),
         "ping" => json!({}),
         _ => {

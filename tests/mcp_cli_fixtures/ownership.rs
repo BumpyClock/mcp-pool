@@ -187,7 +187,14 @@ async fn rpc_failure_does_not_run_artifact_actions() -> io::Result<()> {
 async fn large_resource_output_preserves_raw_envelope_and_text() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     let text = "resource body\n".repeat(16384);
-    set_environment(&fixture, "MCP_POOL_TEST_RESOURCE_TEXT", json!(text)).await?;
+    let resource_file = fixture.home.join("large-resource.txt");
+    tokio::fs::write(&resource_file, &text).await?;
+    set_environment(
+        &fixture,
+        "MCP_POOL_TEST_RESOURCE_FILE",
+        json!(resource_file),
+    )
+    .await?;
     fixture.warm("fixture").await?;
     let raw = fixture
         .success(&["resource", "fixture", "fixture://large", "--output", "raw"])

@@ -32,6 +32,7 @@ impl Fixture {
             std::process::id()
         ));
         std::fs::create_dir(&directory)?;
+        let directory = directory.canonicalize()?;
         Ok(Self { directory })
     }
 }

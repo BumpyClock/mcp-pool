@@ -27,7 +27,7 @@ pub(crate) async fn run_with_timeout(
     let mut arguments = VecDeque::from(arguments);
     let command = arguments.pop_front().unwrap_or_else(|| "help".to_owned());
     if command == "help" {
-        crate::mcp_cli::command_help("config");
+        crate::mcp_cli::command_help("config", &arguments.into_iter().collect::<Vec<_>>());
         return Ok(());
     }
     if command == "import" {
@@ -93,7 +93,7 @@ pub(crate) async fn run_with_timeout(
             if source.as_deref() == Some("import") {
                 bail!("Imported definitions are local copies; use --source local");
             }
-            let entries: Vec<Value> = configuration
+            let servers: Vec<_> = configuration
                 .servers
                 .values()
                 .filter(|server| {
@@ -101,21 +101,24 @@ pub(crate) async fn run_with_timeout(
                         filter == "source:local" || server.name.contains(filter)
                     })
                 })
-                .map(serialize)
                 .collect();
             if json_output {
+                let entries: Vec<_> = servers.into_iter().map(serialize).collect();
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({"servers":entries}))?
                 );
             } else {
-                if entries.is_empty() {
+                if servers.is_empty() {
                     println!("No local servers match the provided filters.");
                 }
-                for entry in &entries {
-                    summary(entry);
+                for server in servers {
+                    summary(server);
                 }
-                println!("Config: {}", configuration.source.display());
+                println!(
+                    "Config: {}",
+                    configuration.source.to_string_lossy().escape_debug()
+                );
             }
         }
         "get" => {
@@ -127,11 +130,10 @@ pub(crate) async fn run_with_timeout(
                 .servers
                 .get(name)
                 .with_context(|| format!("Unknown MCP server '{name}'"))?;
-            let entry = serialize(server);
             if json_output {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
+                println!("{}", serde_json::to_string_pretty(&serialize(server))?);
             } else {
-                summary(&entry);
+                summary(server);
             }
         }
         "doctor" => {
@@ -145,20 +147,31 @@ pub(crate) async fn run_with_timeout(
                     tokio::task::spawn_blocking(move || crate::oauth::credential_status(&selected))
                         .await
                         .context("Credential inspection task failed")??;
-                credentials.push(json!({"name":server.name,"credentials":status}));
+                credentials.push((server, status));
             }
-            let report = json!({"config":configuration.source,"valid":true,"serverCount":configuration.servers.len(),
-                "warnings":configuration.warnings,"servers":credentials});
             if json_output {
+                let servers: Vec<_> = credentials
+                    .iter()
+                    .map(|(server, status)| json!({"name":server.name,"credentials":status}))
+                    .collect();
+                let report = json!({"config":configuration.source,"valid":true,"serverCount":configuration.servers.len(),
+                    "warnings":configuration.warnings,"servers":servers});
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
                 println!(
                     "Configuration valid: {} ({} servers)",
-                    configuration.source.display(),
+                    configuration.source.to_string_lossy().escape_debug(),
                     configuration.servers.len()
                 );
-                for entry in credentials {
-                    println!("{}", serde_json::to_string(&entry)?);
+                for (server, status) in &credentials {
+                    println!(
+                        "{}",
+                        output::credential_summary(
+                            &server.name,
+                            server.oauth_settings().auth == Some("oauth"),
+                            status
+                        )
+                    );
                 }
             }
         }
