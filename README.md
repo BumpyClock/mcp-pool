@@ -377,6 +377,9 @@ usable cached credentials are labeled accordingly. Missing or invalid tokens
 are described as having no usable credentials. For scripts, use
 `config doctor --json`; its structured report is unchanged. The default report
 is human-readable, no longer JSON objects printed one per line.
+Doctor emits named authorization commands for simple ASCII aliases. For other
+names it points to `auth --help` rather than embedding untrusted configuration
+text in shell commands.
 
 `config add` and `config remove` change the selected JSON config, shared with
 native `add` and `remove`. By default they write an existing project config,

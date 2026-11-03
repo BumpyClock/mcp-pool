@@ -83,11 +83,14 @@ pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
 pub(super) fn escape_text(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
-        // Retain Unicode safety without quoting ordinary paths or prose.
-        if matches!(character, '\\' | '\'' | '"') {
-            escaped.push(character);
-        } else {
+        // Debug escaping also alters graphemes; only terminal, line, and bidi controls need escaping.
+        if character.is_control()
+            || matches!(character,
+                '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
             escaped.extend(character.escape_debug());
+        } else {
+            escaped.push(character);
         }
     }
     escaped
@@ -98,7 +101,6 @@ pub(super) fn credential_summary(
     oauth_configured: bool,
     credentials: &Value,
 ) -> String {
-    let name = escape_text(name);
     let flag = |key| credentials.get(key).and_then(Value::as_bool) == Some(true);
     let refreshable = flag("refreshable") && flag("hasClientRegistration");
     let status = if !flag("bindingValid") {
@@ -114,14 +116,24 @@ pub(super) fn credential_summary(
     } else {
         "OAuth not configured (no usable cached credentials)"
     };
-    let mut report = format!("  {name}: {status}");
+    let mut report = format!("  {}: {status}", escape_text(name));
     if !flag("bindingValid")
         || (flag("expired") && !refreshable)
         || (oauth_configured && !flag("hasTokens"))
     {
-        report.push_str(&format!(
-            "\n    Run mcp-pool auth {name} to authorize explicitly."
-        ));
+        // Other aliases require shell-specific quoting, so do not interpolate them into commands.
+        let portable_name = !name.is_empty()
+            && !name.starts_with('-')
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+        if portable_name {
+            report.push_str(&format!(
+                "\n    Run mcp-pool auth {name} to authorize explicitly."
+            ));
+        } else {
+            report.push_str("\n    Run mcp-pool auth --help for explicit authorization options.");
+        }
     }
     report
 }

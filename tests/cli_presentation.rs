@@ -207,6 +207,27 @@ async fn config_text_escapes_control_characters_without_changing_json() -> io::R
 }
 
 #[tokio::test]
+async fn doctor_keeps_untrusted_config_aliases_out_of_command_suggestions() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    let name = "alpha$(printf injected)";
+    let configuration = json!({"imports":[],"mcpServers":{name:{
+        "url":"https://example.invalid/mcp", "auth":"oauth"
+    }}});
+    tokio::fs::write(&fixture.config, configuration.to_string()).await?;
+    let output = fixture.success(&["config", "doctor"]).await?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("Run mcp-pool auth --help for explicit authorization options."),
+        "{text}"
+    );
+    assert!(!text.contains("Run mcp-pool auth alpha$("), "{text}");
+    let report = parse_json(&fixture.success(&["config", "doctor", "--json"]).await?)?;
+    assert_eq!(report.pointer("/servers/0/name"), Some(&json!(name)));
+    assert!(!fixture.counter.exists());
+    fixture.finish().await
+}
+
+#[tokio::test]
 async fn config_doctor_is_readable_by_default_and_json_on_request() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     let output = fixture.success(&["config", "doctor"]).await?;

@@ -4,13 +4,41 @@ use super::{credential_summary, escape_text};
 
 #[test]
 fn human_text_preserves_printable_content_and_escapes_unicode_controls() {
-    for text in [r"C:\Users\me\.mcp\config.json", "Docs' \"server\"", "東京"] {
+    for text in [
+        r"C:\Users\me\.mcp\config.json",
+        "Docs' \"server\"",
+        "東京",
+        "cafe\u{301}",
+        "👩\u{200d}💻",
+    ] {
         assert_eq!(escape_text(text), text);
     }
     assert_eq!(
-        escape_text("line\n\u{1b}[2J\u{202e}"),
-        "line\\n\\u{1b}[2J\\u{202e}"
+        escape_text("line\n\u{1b}[2J\u{202e}\u{061c}\u{2028}"),
+        "line\\n\\u{1b}[2J\\u{202e}\\u{61c}\\u{2028}"
     );
+}
+
+#[test]
+fn doctor_does_not_embed_unsafe_aliases_in_runnable_hints() {
+    for name in [
+        "alpha$(printf injected)",
+        "docs search",
+        "docs'local",
+        "--reset",
+        "cafe\u{301}",
+    ] {
+        let report =
+            credential_summary(name, true, &json!({"bindingValid":true,"hasTokens":false}));
+        assert!(
+            report.contains("Run mcp-pool auth --help for explicit authorization options."),
+            "{report}"
+        );
+        assert!(
+            !report.contains(&format!("Run mcp-pool auth {name} to authorize")),
+            "{report}"
+        );
+    }
 }
 
 #[test]
@@ -38,7 +66,7 @@ fn doctor_refresh_guidance_requires_cached_client_registration() {
 }
 
 #[test]
-fn doctor_escapes_names_in_both_status_and_recovery_hint() {
+fn doctor_escapes_names_and_keeps_unsafe_aliases_out_of_hints() {
     let report = credential_summary(
         "docs\nforged\u{1b}[2J",
         true,
@@ -55,7 +83,7 @@ fn doctor_escapes_names_in_both_status_and_recovery_hint() {
     );
     assert_eq!(
         report.matches("docs\\nforged\\u{1b}[2J").count(),
-        2,
+        1,
         "{report:?}"
     );
 }
