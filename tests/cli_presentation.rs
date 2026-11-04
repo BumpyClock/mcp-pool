@@ -228,6 +228,121 @@ async fn doctor_keeps_untrusted_config_aliases_out_of_command_suggestions() -> i
 }
 
 #[tokio::test]
+async fn doctor_multiple_stores_preserves_output_and_never_mutates() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    let mut configuration: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&fixture.config).await?)?;
+    let servers = configuration
+        .get_mut("mcpServers")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| io::Error::other("missing fixture servers"))?;
+    let mut preserved = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        let directory = fixture.home.join(format!("{name}-store"));
+        servers.insert(
+            name.to_owned(),
+            json!({"url":"https://example.invalid/mcp", "auth":"oauth",
+                "tokenCacheDir":directory}),
+        );
+        if name != "beta" {
+            tokio::fs::create_dir(&directory).await?;
+            for (file, contents) in [
+                (
+                    "tokens.json",
+                    json!({"access_token":"synthetic-doctor-access-secret",
+                        "token_type":"Bearer", "refresh_token":"synthetic-doctor-refresh-secret",
+                        "expires_at":if name == "alpha" {4102444800u64} else {1}})
+                    .to_string(),
+                ),
+                (
+                    "client.json",
+                    json!({"client_id":"synthetic-doctor-client-secret"}).to_string(),
+                ),
+            ] {
+                let path = directory.join(file);
+                tokio::fs::write(&path, &contents).await?;
+                preserved.push((path, contents.into_bytes()));
+            }
+        }
+    }
+    let configuration_bytes = configuration.to_string().into_bytes();
+    tokio::fs::write(&fixture.config, &configuration_bytes).await?;
+    preserved.push((fixture.config.clone(), configuration_bytes));
+    let vault = fixture.home.join("credentials.json");
+    let vault_bytes = b"{\"version\":2,\"entries\":{},\"serverUrls\":{}}";
+    tokio::fs::write(&vault, vault_bytes).await?;
+    preserved.push((vault, vault_bytes.to_vec()));
+
+    let human = fixture.success(&["config", "doctor"]).await?;
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.starts_with("Configuration valid:"), "{human}");
+    assert_eq!(
+        human.lines().skip(1).collect::<Vec<_>>(),
+        [
+            "  alpha: cached OAuth credentials valid",
+            "  array: OAuth not configured (no usable cached credentials)",
+            "  beta: no usable cached OAuth credentials",
+            "    Run mcp-pool auth beta to authorize explicitly.",
+            "  fixture: OAuth not configured (no usable cached credentials)",
+            "  gamma: cached OAuth credentials expired (refresh available on use)",
+        ]
+    );
+    let report = fixture.success(&["config", "doctor", "--json"]).await?;
+    let report_text = String::from_utf8_lossy(&report.stdout);
+    let report = parse_json(&report)?;
+    assert_eq!(report.get("serverCount"), Some(&json!(5)));
+    let expected: Vec<_> = ["alpha", "array", "beta", "fixture", "gamma"]
+        .into_iter()
+        .map(|name| {
+            let has_tokens = matches!(name, "alpha" | "gamma");
+            json!({"name":name,"credentials":{
+                "server":name,"authenticated":name == "alpha","hasTokens":has_tokens,
+                "hasClientRegistration":has_tokens,"refreshable":has_tokens,
+                "expired":if has_tokens {json!(name == "gamma")} else {json!(null)},
+                "bindingValid":true
+            }})
+        })
+        .collect();
+    assert_eq!(report.get("servers"), Some(&json!(expected)));
+    for secret in [
+        "synthetic-doctor-access-secret",
+        "synthetic-doctor-refresh-secret",
+        "synthetic-doctor-client-secret",
+    ] {
+        assert!(!human.contains(secret), "{human}");
+        assert!(!report_text.contains(secret), "{report_text}");
+    }
+    for (path, bytes) in &preserved {
+        assert_eq!(tokio::fs::read(path).await?, *bytes, "{}", path.display());
+    }
+    assert!(!fixture.home.join("beta-store").exists());
+    assert!(!fixture.counter.exists());
+
+    let malformed = fixture.home.join("alpha-store/tokens.json");
+    tokio::fs::write(&malformed, b"{malformed credential snapshot").await?;
+    for arguments in [vec!["config", "doctor"], vec!["config", "doctor", "--json"]] {
+        let failed = fixture.command(&arguments).await?;
+        assert!(!failed.status.success(), "{failed:?}");
+        assert!(
+            failed.stdout.is_empty(),
+            "partial doctor output: {failed:?}"
+        );
+        assert!(!failed.stderr.is_empty(), "{failed:?}");
+        for (path, bytes) in &preserved {
+            let expected = if path == &malformed {
+                b"{malformed credential snapshot".as_slice()
+            } else {
+                bytes.as_slice()
+            };
+            assert_eq!(tokio::fs::read(path).await?, expected, "{}", path.display());
+        }
+        assert!(!fixture.home.join("beta-store").exists());
+        assert!(!fixture.counter.exists());
+    }
+    fixture.finish().await
+}
+
+#[tokio::test]
 async fn config_doctor_is_readable_by_default_and_json_on_request() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     let output = fixture.success(&["config", "doctor"]).await?;

@@ -1,6 +1,9 @@
 use super::*;
 use tokio::sync::oneshot;
 
+#[path = "socket_proxy_shutdown_tests.rs"]
+mod shutdown_tests;
+
 static NEXT_SOCKET: AtomicU32 = AtomicU32::new(0);
 
 pub(super) fn proxy() -> Arc<SocketProxy> {

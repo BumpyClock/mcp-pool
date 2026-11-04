@@ -41,7 +41,16 @@ pub(super) async fn run(
                 if !request.discover {
                     first_request = false;
                 }
-                if request.initialization_barrier {
+                let established_modern_refresh = if request.discover && request.modern {
+                    matches!(
+                        &*session.lock().await,
+                        Session::Ready { identifier: None, protocol }
+                            if protocol == crate::mcp_protocol::MODERN_VERSION
+                    )
+                } else {
+                    false
+                };
+                if request.initialization_barrier && !established_modern_refresh {
                     if request.initialize || request.discover {
                         let worker_client = client.clone();
                         let worker_url = url.clone();

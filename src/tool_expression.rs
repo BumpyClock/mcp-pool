@@ -26,10 +26,8 @@ pub(super) fn split_expression(contents: &str) -> Result<Vec<String>> {
             '[' => delimiters.push(']'),
             '{' => delimiters.push('}'),
             '(' => delimiters.push(')'),
-            ']' | '}' | ')' => {
-                if delimiters.pop() != Some(character) {
-                    bail!("Unbalanced call expression");
-                }
+            ']' | '}' | ')' if delimiters.pop() != Some(character) => {
+                bail!("Unbalanced call expression");
             }
             ',' if delimiters.is_empty() => {
                 if let Some(part) = contents.get(start..offset) {

@@ -3,6 +3,9 @@ use super::*;
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[path = "upstream_http_refresh_tests.rs"]
+mod refresh_tests;
+
 fn modern_request(
     identifier: i64,
     method: &str,
@@ -99,6 +102,175 @@ async fn modern_discovery_and_calls_own_version_method_and_name_headers() -> Tes
     }
     stop(&mut handle).await?;
     server.await?
+}
+
+#[tokio::test]
+async fn initial_modern_discovery_blocks_call_until_session_ready() -> TestResult {
+    let (listener, url) = fixture().await?;
+    let (discovery_seen, discovery_observed) = oneshot::channel();
+    let (release_discovery, discovery_released) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut discovery, _) = listener.accept().await?;
+        assert_eq!(
+            incoming(&mut discovery).await?.body.get("method"),
+            Some(&json!("server/discover"))
+        );
+        discovery_seen
+            .send(())
+            .map_err(|_| "discovery observer closed")?;
+        discovery_released.await?;
+        assert!(
+            timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "call arrived before discovery completed"
+        );
+        reply(&mut discovery, 200, "Content-Type: application/json\r\n", &json!({"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{}}}).to_string()).await?;
+        let (mut call, _) = listener.accept().await?;
+        let request = incoming(&mut call).await?;
+        assert_eq!(request.body.get("id"), Some(&json!(2)));
+        assert_eq!(
+            request
+                .headers
+                .get("mcp-protocol-version")
+                .map(String::as_str),
+            Some("2026-07-28")
+        );
+        assert_eq!(
+            request.headers.get("mcp-method").map(String::as_str),
+            Some("tools/call")
+        );
+        reply(
+            &mut call,
+            200,
+            "Content-Type: application/json\r\n",
+            r#"{"jsonrpc":"2.0","id":2,"result":{"ok":true}}"#,
+        )
+        .await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let (responses, mut receiver) = mpsc::channel(8);
+    let mut handle =
+        spawn_configured(url, false, BTreeMap::new(), Some(5000), None, responses).await?;
+    handle
+        .request_tx
+        .send(modern_request(1, "server/discover", json!({}))?)
+        .await?;
+    timeout(Duration::from_secs(3), discovery_observed).await??;
+    handle
+        .request_tx
+        .send(modern_request(
+            2,
+            "tools/call",
+            json!({"name":"echo","arguments":{}}),
+        )?)
+        .await?;
+    release_discovery
+        .send(())
+        .map_err(|_| "discovery release closed")?;
+    assert_eq!(message(&mut receiver).await?.get("id"), Some(&json!(1)));
+    assert_eq!(message(&mut receiver).await?.get("id"), Some(&json!(2)));
+    stop(&mut handle).await?;
+    server.await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn established_modern_refresh_does_not_block_an_unrelated_call() -> TestResult {
+    let (listener, url) = fixture().await?;
+    let (refresh_seen, refresh_observed) = oneshot::channel();
+    let (release_refresh, refresh_released) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let result =
+            json!({"supportedVersions":["2026-07-28"],"capabilities":{"tools":{}},"ttlMs":0});
+        let (mut initial, _) = listener.accept().await?;
+        let request = incoming(&mut initial).await?;
+        assert_eq!(request.body.get("id"), Some(&json!(1)));
+        assert_eq!(request.body.get("method"), Some(&json!("server/discover")));
+        reply(
+            &mut initial,
+            200,
+            "Content-Type: application/json\r\n",
+            &json!({"jsonrpc":"2.0","id":1,"result":result}).to_string(),
+        )
+        .await?;
+        let (mut refresh, _) = listener.accept().await?;
+        let request = incoming(&mut refresh).await?;
+        assert_eq!(request.body.get("id"), Some(&json!(2)));
+        assert_eq!(request.body.get("method"), Some(&json!("server/discover")));
+        refresh_seen
+            .send(())
+            .map_err(|_| "refresh observer closed")?;
+        let (mut call, _) = listener.accept().await?;
+        let request = incoming(&mut call).await?;
+        assert_eq!(request.body.get("id"), Some(&json!(3)));
+        assert_eq!(request.body.get("method"), Some(&json!("tools/call")));
+        assert_eq!(
+            request
+                .headers
+                .get("mcp-protocol-version")
+                .map(String::as_str),
+            Some("2026-07-28")
+        );
+        assert_eq!(
+            request.headers.get("mcp-method").map(String::as_str),
+            Some("tools/call")
+        );
+        assert_eq!(
+            request.headers.get("mcp-name").map(String::as_str),
+            Some("echo")
+        );
+        assert!(!request.headers.contains_key("mcp-session-id"));
+        reply(
+            &mut call,
+            200,
+            "Content-Type: application/json\r\n",
+            r#"{"jsonrpc":"2.0","id":3,"result":{"ok":true}}"#,
+        )
+        .await?;
+        refresh_released.await?;
+        reply(
+            &mut refresh,
+            200,
+            "Content-Type: application/json\r\n",
+            &json!({"jsonrpc":"2.0","id":2,"result":result}).to_string(),
+        )
+        .await?;
+        Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+    });
+    let (responses, mut receiver) = mpsc::channel(8);
+    let mut handle =
+        spawn_configured(url, false, BTreeMap::new(), Some(5000), None, responses).await?;
+    handle
+        .request_tx
+        .send(modern_request(1, "server/discover", json!({}))?)
+        .await?;
+    assert!(message(&mut receiver).await?.get("result").is_some());
+    handle
+        .request_tx
+        .send(modern_request(2, "server/discover", json!({}))?)
+        .await?;
+    timeout(Duration::from_secs(3), refresh_observed).await??;
+    handle
+        .request_tx
+        .send(modern_request(
+            3,
+            "tools/call",
+            json!({"name":"echo","arguments":{}}),
+        )?)
+        .await?;
+    let response = message(&mut receiver).await?;
+    assert_eq!(response.get("id"), Some(&json!(3)));
+    assert_eq!(response.pointer("/result/ok"), Some(&json!(true)));
+    release_refresh
+        .send(())
+        .map_err(|_| "refresh release closed")?;
+    let response = message(&mut receiver).await?;
+    assert_eq!(response.get("id"), Some(&json!(2)));
+    assert!(response.get("result").is_some());
+    stop(&mut handle).await?;
+    server.await??;
+    Ok(())
 }
 
 #[tokio::test]

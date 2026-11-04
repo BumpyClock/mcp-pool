@@ -172,6 +172,57 @@ async fn missing_pseudo_tools_fall_back_to_discovery_without_calling_a_tool() ->
 }
 
 #[tokio::test]
+async fn pseudo_discovery_does_not_traverse_cursor_pages_twice() -> io::Result<()> {
+    for pseudo in ["help", "list_tools"] {
+        for filtered in [false, true] {
+            let fixture = Fixture::new().await?;
+            if filtered {
+                let mut configuration: Value =
+                    serde_json::from_slice(&tokio::fs::read(&fixture.config).await?)
+                        .map_err(io::Error::other)?;
+                let server = configuration
+                    .pointer_mut("/mcpServers/fixture")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| io::Error::other("missing fixture server"))?;
+                server.insert("allowedTools".to_owned(), json!(["echo", "delayed"]));
+                tokio::fs::write(&fixture.config, configuration.to_string()).await?;
+            }
+            fixture.warm("fixture").await?;
+            let before = fixture.event_count("tools/list").await?;
+            let selector = format!("fixture.{pseudo}");
+            let output = fixture
+                .success(&["call", &selector, "--output", "json", "--no-oauth"])
+                .await?;
+            let report = parse_json(&output)?;
+            assert_eq!(report.get("mode"), Some(&json!("server")));
+            assert_eq!(report.get("status"), Some(&json!("ok")));
+            let names = report
+                .get("tools")
+                .and_then(Value::as_array)
+                .ok_or_else(|| io::Error::other("missing tools"))?
+                .iter()
+                .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+                .collect::<Vec<_>>();
+            let expected = if filtered {
+                vec!["delayed", "echo"]
+            } else {
+                vec!["delayed", "echo", "fail_rpc", "fail_tool"]
+            };
+            assert_eq!(names, expected);
+            assert!(report.pointer("/tools/0/inputSchema").is_some());
+            assert!(report.pointer("/tools/0/options").is_some());
+            assert_eq!(fixture.event_count("tools/list").await?, before + 2);
+            assert_eq!(fixture.event_count("tools/call").await?, 0);
+            fixture.finish().await?;
+        }
+    }
+    Ok(())
+}
+
+#[path = "mcp_cli_fixtures/pseudo_discovery.rs"]
+mod pseudo_discovery;
+
+#[tokio::test]
 async fn pseudo_discovery_rejects_tool_arguments_without_calling_a_tool() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     configure_synthetic(&fixture, &["echo"], None).await?;
@@ -354,7 +405,8 @@ mod synthetic {
         })
     }
 
-    fn response(request: &Value, names: &[&str]) -> io::Result<Value> {
+    fn response(request: &Value, names: &[&str], listed: &mut bool) -> io::Result<Value> {
+        let modern_once = std::env::var_os("MCP_POOL_SYNTHETIC_MODERN_ONCE").is_some();
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         let id = request.get("id").cloned();
         let result = match method {
@@ -370,6 +422,12 @@ mod synthetic {
                     }
                 }));
             }
+            "ping" => json!({}),
+            "server/discover" if modern_once => json!({
+                "supportedVersions":["2026-07-28"],
+                "capabilities":{"tools":{}},
+                "instructions":"First catalog only."
+            }),
             "server/discover" => {
                 return Ok(json!({
                     "jsonrpc":"2.0",
@@ -379,7 +437,20 @@ mod synthetic {
             }
             "tools/list" => {
                 record("tools/list")?;
-                json!({"tools":names.iter().map(|name| tool(name)).collect::<Vec<_>>()})
+                if modern_once {
+                    if request.pointer("/params/_meta/io.modelcontextprotocol~1protocolVersion")
+                        != Some(&json!("2026-07-28"))
+                    {
+                        return Err(io::Error::other("modern list omitted version metadata"));
+                    }
+                    if *listed {
+                        return Ok(json!({"jsonrpc":"2.0","id":id,
+                            "error":{"code":-32000,"message":"second catalog rejected"}}));
+                    }
+                }
+                *listed = true;
+                json!({"resultType":"complete","ttlMs":if modern_once {0} else {60_000},
+                    "tools":names.iter().map(|name| tool(name)).collect::<Vec<_>>()})
             }
             "tools/call" => {
                 record("tools/call")?;
@@ -412,12 +483,13 @@ mod synthetic {
             .collect::<Vec<_>>();
         let stdout = io::stdout();
         let mut output = stdout.lock();
+        let mut listed = false;
         for line in io::stdin().lock().lines() {
             let request: Value = serde_json::from_str(&line?).map_err(io::Error::other)?;
             if request.get("id").is_none() {
                 continue;
             }
-            writeln!(output, "{}", response(&request, &names)?)?;
+            writeln!(output, "{}", response(&request, &names, &mut listed)?)?;
             output.flush()?;
         }
         Ok(())

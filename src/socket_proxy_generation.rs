@@ -393,7 +393,7 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
                 let responses = expire_pending_requests(
                     &generation.request_map, &generation.handshake_cache,
                 );
-                for (client_id, payload) in responses {
+                for (client_id, payload) in sweep_recipients(responses, &generation.clients) {
                     tokio::select! {
                         _ = &mut shutdown => return,
                         result = tokio::time::timeout(

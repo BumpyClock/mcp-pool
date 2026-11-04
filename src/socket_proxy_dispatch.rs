@@ -172,10 +172,53 @@ pub(super) async fn send_to_client(
         }
     }
 }
+pub(super) fn sweep_recipients(
+    responses: Vec<(String, String)>,
+    clients: &Mutex<HashMap<String, ClientSender>>,
+) -> Vec<(String, String)> {
+    let mut blocked = std::collections::HashSet::new();
+    let mut deferred = Vec::new();
+    for (client_id, payload) in responses {
+        if blocked.contains(&client_id) {
+            deferred.push((client_id, payload));
+            continue;
+        }
+        let sender = clients.lock().get(&client_id).cloned();
+        let Some(sender) = sender else {
+            diagnostics::log(format!("pool_response_orphaned client_id={client_id}"));
+            continue;
+        };
+        let bytes = payload.len();
+        match sender.try_send(payload) {
+            Ok(()) => diagnostics::log(format!(
+                "pool_response_routed client_id={client_id} bytes={bytes}"
+            )),
+            Err(mpsc::error::TrySendError::Full(payload)) => {
+                blocked.insert(client_id.clone());
+                deferred.push((client_id, payload));
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                diagnostics::log(format!("pool_response_send_failed client_id={client_id}"));
+            }
+        }
+    }
+    deferred
+}
+
 pub(super) async fn broadcast_to_all(line: &str, clients: &Mutex<HashMap<String, ClientSender>>) {
     let senders: Vec<ClientSender> = clients.lock().values().cloned().collect();
+    let mut deferred = Vec::new();
     for sender in &senders {
-        if sender.send(line.to_string()).await.is_err() {
+        match sender.try_send(line.to_string()) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(payload)) => deferred.push((sender, payload)),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                diagnostics::log("pool_broadcast_client_closed")
+            }
+        }
+    }
+    for (sender, payload) in deferred {
+        if sender.send(payload).await.is_err() {
             diagnostics::log("pool_broadcast_client_closed");
         }
     }

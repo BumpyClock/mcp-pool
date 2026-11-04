@@ -1,7 +1,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -20,6 +20,9 @@ pub(crate) mod files;
 mod flow;
 #[path = "oauth_import.rs"]
 pub(crate) mod import;
+#[cfg(test)]
+#[path = "oauth_prepare_tests.rs"]
+mod prepare_tests;
 #[path = "oauth_protocol.rs"]
 mod protocol;
 #[path = "oauth_reconcile.rs"]
@@ -88,7 +91,14 @@ pub struct AuthOptions {
 }
 
 pub async fn prepare(server: &ConfiguredServer, no_oauth: bool) -> Result<ServerDef> {
-    let mut definition = identity_definition(server)?;
+    let mut definition = if server.definition.is_remote() {
+        let server = server.clone();
+        tokio::task::spawn_blocking(move || identity_definition(&server))
+            .await
+            .context("OAuth credential identity inspection task failed")??
+    } else {
+        identity_definition(server)?
+    };
     if let Some(authentication) = definition.auth.as_mut() {
         authentication.cached_only = no_oauth;
         let snapshot = read_snapshot(authentication).await?;

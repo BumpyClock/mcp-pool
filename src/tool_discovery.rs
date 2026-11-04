@@ -140,20 +140,28 @@ pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> 
     execute(selected, flags, selected_tool, detailed, progress).await
 }
 
-pub(crate) async fn single_server(
+pub(crate) fn completed_server(
     server: ConfiguredServer,
-    timeout: Option<u64>,
-    no_oauth: bool,
+    tools: Vec<Value>,
+    filter: &crate::tool_filter::ToolFilter,
+    connection: Option<crate::mcp_protocol::ConnectionInfo>,
+    duration: u64,
     output: Output,
 ) -> Result<()> {
+    let outcome = prepare(&server, tools, filter, connection, None);
     let flags = Flags {
         json: matches!(output, Output::Json | Output::Raw),
-        timeout,
-        no_oauth,
         ..Flags::default()
     };
-    let progress = crate::cli_progress::Progress::new(!flags.json && !flags.quiet);
-    execute(vec![server], flags, None, true, progress).await
+    render(
+        vec![ServerReport {
+            server,
+            duration,
+            outcome,
+        }],
+        &flags,
+        true,
+    )
 }
 
 async fn execute(
@@ -192,6 +200,10 @@ async fn execute(
     progress.finish();
     completed.sort_by_key(|(index, _)| *index);
     let reports: Vec<ServerReport> = completed.into_iter().map(|(_, report)| report).collect();
+    render(reports, &flags, detailed)
+}
+
+fn render(reports: Vec<ServerReport>, flags: &Flags, detailed: bool) -> Result<()> {
     let view = View {
         detailed,
         schema: flags.schema,
@@ -218,7 +230,7 @@ async fn execute(
         for report in &reports {
             report.print_text(&view, &style)?;
         }
-        if total == 0 {
+        if reports.is_empty() {
             println!("No MCP servers configured.");
         }
     }

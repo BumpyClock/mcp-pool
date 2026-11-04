@@ -266,7 +266,9 @@ never execute the suggested tool. Tool-specific discovery uses the same resolver
 `call SERVER.list_tools` and `call SERVER.help` fall back to discovery only when
 there is no corresponding real tool. Real tools, including excluded tools, are
 never bypassed by these fallbacks. Tool arguments are not accepted by a discovery
-fallback.
+fallback. It renders the already-discovered catalog without reconnecting or
+traversing pages again. Its duration and deadlines cover that initial call-side
+discovery, not a second list operation.
 `--raw-strings`/`--no-coerce` preserves string values instead of coercing JSON
 numbers, booleans, or collections. Calls and resources accept
 `--output auto|text|markdown|json|raw` and `--timeout MILLISECONDS`.
@@ -339,6 +341,17 @@ restarts or replay. If an older stdio server exits or ignores unknown methods,
 set its `protocolVersion` to `legacy`. An operation whose outcome is unknown is
 never retried automatically.
 
+For example, the 1Password desktop `1password-mcp` server can exit with
+`ExpectedInitializeRequest` when probed with `server/discover`, surfaced by the
+client as EOF. Set `protocolVersion` explicitly for that server:
+
+```json
+{"mcpServers":{"1password":{"command":"1password-mcp","protocolVersion":"legacy"}}}
+```
+
+Then run `mcp-pool list 1password` to verify tool discovery. This changes only
+negotiation; it does not authorize access to 1Password Environments.
+
 Server entries can use `allowedTools` or `blockedTools` arrays, with
 `allowed_tools` and `blocked_tools` as aliases, to filter discovery, calls,
 and bridge exposure. All three paths use the same filter. Names match upstream tool
@@ -379,7 +392,10 @@ are described as having no usable credentials. For scripts, use
 is human-readable, no longer JSON objects printed one per line.
 Doctor emits named authorization commands for simple ASCII aliases. For other
 names it points to `auth --help` rather than embedding untrusted configuration
-text in shell commands.
+text in shell commands. Credential inspections run in read-only batches of at
+most four. Reports remain in server-name order. A failed batch drains its started
+inspections before returning the first name-ordered error, without partial output
+or starting another batch.
 
 `config add` and `config remove` change the selected JSON config, shared with
 native `add` and `remove`. By default they write an existing project config,
@@ -709,6 +725,9 @@ umask during bind.
 Windows named pipes use an owner-only DACL, reject remote clients, and verify the
 server's user. Cancelled accepts retain their pending instance. A client that
 disconnects before accept does not prevent later clients from connecting.
+Raw proxy attachment retries unavailable or busy local endpoints. Permanent
+permission, path, data, or unsupported-operation errors return immediately instead
+of consuming the readiness retry budget.
 
 ## Lifecycle and readiness
 
@@ -732,8 +751,11 @@ launch directly; batch launchers use Rust's batch argument encoding. Batch
 arguments containing carriage returns or newlines are rejected before launch.
 Diagnostic stderr is decoded lossily, so non-UTF-8 output does not stop a server.
 
-If daemon shutdown fails, failed pools remain blocked and visible in status.
-The daemon resumes accepting lifecycle commands for unrelated pools.
+Shutdown signals all current owned generations before waiting for individual
+retirements, including replacements from already-admitted restarts. It still
+waits for every retirement result. If daemon shutdown fails, failed pools remain
+blocked and visible in status. The daemon resumes accepting lifecycle commands
+for unrelated pools.
 
 Restart creates fresh routing and discovery state. It disconnects existing proxy
 clients; agents must reconnect. Pool identities include the configured name,
@@ -759,6 +781,9 @@ Coalesced initialization and tool discovery use a shared transport deadline
 as described below. Empty 202/204 responses are accepted for notifications.
 Transport failures produce
 JSON-RPC errors with the requesting client's original ID.
+After stateless modern negotiation succeeds, a discovery refresh shares ordinary
+bounded HTTP admission with unrelated calls. Initial negotiation and legacy
+initialization remain ordering barriers.
 
 Deliberate HTTP shutdown sends a session DELETE when a session ID exists. DELETE
 has a two-second deadline. Unsupported DELETE or a timeout is logged without
@@ -781,6 +806,9 @@ agents. Request multiplexing does not make those sequences atomic.
 Successful `initialize` and unpaginated `tools/list` results are cached for later
 clients. A `notifications/tools/list_changed` notification invalidates tool
 discovery. Upstream notifications are broadcast to connected clients.
+Within a response, notification, or expiration batch, ready client queues receive
+messages before delivery waits on full queues. Each client's message order and
+the barrier before routing the next upstream message remain unchanged.
 
 Concurrent initialization and cacheable, unpaginated `tools/list` requests share
 one upstream request. Each MCP command caller keeps its own local deadline.

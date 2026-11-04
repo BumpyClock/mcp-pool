@@ -139,6 +139,9 @@ impl Pool {
             .iter()
             .map(|(name, proxy)| (name.clone(), proxy.clone()))
             .collect();
+        for (_, proxy) in &proxies {
+            proxy.request_stop();
+        }
         let mut failure = None;
         for (name, proxy) in proxies {
             match proxy.stop().await {

@@ -287,6 +287,10 @@ impl Drop for SocketProxy {
 }
 
 #[cfg(test)]
+#[path = "socket_proxy_delivery_tests.rs"]
+mod delivery_tests;
+
+#[cfg(test)]
 #[path = "socket_proxy_cursor_tests.rs"]
 mod cursor_tests;
 #[cfg(test)]

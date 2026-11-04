@@ -11,6 +11,8 @@ pub(crate) mod write;
 use write::{WritePolicy, write_checked_mutation};
 #[path = "config_commands_copy.rs"]
 mod copy;
+#[path = "config_doctor.rs"]
+mod doctor;
 #[path = "config_commands_input.rs"]
 mod input;
 #[path = "config_output.rs"]
@@ -140,15 +142,7 @@ pub(crate) async fn run_with_timeout(
             if !positional.is_empty() {
                 bail!("Usage: config doctor [--json]");
             }
-            let mut credentials = Vec::new();
-            for server in configuration.servers.values() {
-                let selected = server.clone();
-                let status =
-                    tokio::task::spawn_blocking(move || crate::oauth::credential_status(&selected))
-                        .await
-                        .context("Credential inspection task failed")??;
-                credentials.push((server, status));
-            }
+            let credentials = doctor::inspect(&configuration).await?;
             if json_output {
                 let servers: Vec<_> = credentials
                     .iter()

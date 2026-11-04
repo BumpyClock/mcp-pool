@@ -13,7 +13,7 @@ pub(super) fn command_tokens(command: &str) -> Result<Vec<String>> {
                 quote = Some(character);
                 started = true;
             }
-            '\\' if !current.get(1..3).is_some_and(|part| part == ":\\") => {
+            '\\' if current.get(1..3).is_none_or(|part| part != ":\\") => {
                 match characters.peek().copied() {
                     Some(next) if matches!(next, '\'' | '"') || next.is_whitespace() => {
                         current.push(next);

@@ -30,6 +30,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     let mut tool = parsed.tool.clone();
     let mut discovery_fallback = None;
     let outcome: Result<Value> = async {
+        let started = std::time::Instant::now();
         let filter = selected.tool_filter()?;
         let mut client = progress
             .wait(
@@ -40,6 +41,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
         let tools = progress
             .wait("Discovering MCP tools", client.list_tools())
             .await?;
+        let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if let Some(requested) = tool.as_deref()
             && is_discovery_pseudo(requested)
             && !has_real_tool(&tools, requested)
@@ -52,7 +54,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
             {
                 bail!("Pseudo-tool '{requested}' does not accept tool arguments or positionals");
             }
-            discovery_fallback = Some((parsed.timeout, parsed.no_oauth, parsed.output));
+            discovery_fallback = Some((tools, filter, client.connection_info().cloned(), duration));
             return Ok(Value::Null);
         }
         let resolved = super::resolve_tool(&selected, &tools, tool.as_deref(), &filter)?;
@@ -86,9 +88,16 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     }
     .await;
     progress.finish();
-    if let Some((timeout, no_oauth, output)) = discovery_fallback {
+    if let Some((tools, filter, connection, duration)) = discovery_fallback {
         outcome?;
-        crate::tool_discovery::single_server(selected, timeout, no_oauth, output).await?;
+        crate::tool_discovery::completed_server(
+            selected,
+            tools,
+            &filter,
+            connection,
+            duration,
+            parsed.output,
+        )?;
         return Ok(());
     }
     let rendered = print_outcome(&selected, tool.as_deref(), &outcome, parsed.output);

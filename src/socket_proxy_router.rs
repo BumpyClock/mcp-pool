@@ -36,7 +36,7 @@ pub(super) async fn route_response(
                             .map(|pending| restore_response(&value, pending, handshake_cache))
                     };
                     if let Some(responses) = responses {
-                        for (client_id, payload) in responses {
+                        for (client_id, payload) in sweep_recipients(responses, clients) {
                             send_to_client(&client_id, payload, clients).await;
                         }
                         request_recovery_if_session_not_found(&value, handshake_cache, recovery_tx);

@@ -5,6 +5,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{config, diagnostics, transport};
 
+#[cfg(test)]
+#[path = "proxy_retry_tests.rs"]
+mod retry_tests;
+
 pub async fn run_resolved(name: &str, definition: &config::ServerDef) -> anyhow::Result<()> {
     crate::daemon_client::ensure_definition_started(name, definition).await?;
     let stream = connect_with_retry(&config::server_socket_path(name)).await?;
@@ -35,8 +39,20 @@ async fn bridge(stream: transport::LocalStream, name: &str) -> anyhow::Result<()
 
 async fn connect_with_retry(path: &Path) -> std::io::Result<transport::LocalStream> {
     for _ in 0..49 {
-        if let Ok(stream) = transport::connect(path).await {
-            return Ok(stream);
+        match transport::connect(path).await {
+            Ok(stream) => return Ok(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::InvalidInput
+                        | std::io::ErrorKind::InvalidData
+                        | std::io::ErrorKind::Unsupported
+                ) =>
+            {
+                return Err(error);
+            }
+            Err(_) => {}
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
