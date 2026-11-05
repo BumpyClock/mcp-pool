@@ -255,6 +255,7 @@ async fn caller_guard_serializes_into_request_for_an_unguarded_worker() -> Resul
             serde_json::to_string(&fixture.server)?,
         )
         .env("OAUTH_SYNTHETIC_REQUEST_PATH", &request_path)
+        .env("MCP_CLI_CREDENTIALS_READ_ONLY", "0")
         .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -275,6 +276,7 @@ async fn caller_guard_serializes_into_request_for_an_unguarded_worker() -> Resul
         ])
         .env("OAUTH_SYNTHETIC_CONTEXT", serde_json::to_string(&request)?)
         .env("OAUTH_SYNTHETIC_READ_ONLY", "1")
+        .env_remove("MCP_CLI_CREDENTIALS_READ_ONLY")
         .env_remove("MCP_POOL_CREDENTIALS_READ_ONLY")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -300,7 +302,7 @@ async fn caller_guard_prepare_child() -> Result<()> {
         !server
             .definition
             .env
-            .contains_key("MCP_POOL_CREDENTIALS_READ_ONLY"),
+            .contains_key("MCP_CLI_CREDENTIALS_READ_ONLY"),
         "guard must come from the calling process, not the remote config env"
     );
     let definition = super::prepare(&server, false).await?;

@@ -12,7 +12,7 @@ async fn pseudo_discovery_reuses_first_zero_ttl_modern_catalog() -> io::Result<(
             .pointer_mut("/mcpServers/fixture/env")
             .and_then(Value::as_object_mut)
             .ok_or_else(|| io::Error::other("missing fixture environment"))?
-            .insert("MCP_POOL_SYNTHETIC_MODERN_ONCE".to_owned(), json!("1"));
+            .insert("MCP_CLI_SYNTHETIC_MODERN_ONCE".to_owned(), json!("1"));
         tokio::fs::write(&fixture.config, configuration.to_string()).await?;
         let mut proxy = RpcProcess::fixture_proxy(fixture.spawn(&["proxy", "fixture"])?)?;
         let pong = proxy

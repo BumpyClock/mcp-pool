@@ -30,7 +30,7 @@ async fn artifact_result(fixture: &Fixture, failed: bool, data: &str) -> io::Res
 async fn artifact_flags_render_first_and_export_only_when_requested() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     let result = artifact_result(&fixture, false, "aGVsbG8=").await?;
-    set_environment(&fixture, "MCP_POOL_TEST_RESULT", json!(result.to_string())).await?;
+    set_environment(&fixture, "MCP_CLI_TEST_RESULT", json!(result.to_string())).await?;
     fixture.warm("fixture").await?;
     for (index, save, tail) in [
         (0, false, false),
@@ -73,7 +73,7 @@ async fn artifact_flags_render_first_and_export_only_when_requested() -> io::Res
 async fn error_result_still_exports_images_and_tails_after_rendering() -> io::Result<()> {
     let fixture = Fixture::new().await?;
     let result = artifact_result(&fixture, true, "aGVsbG8=").await?;
-    set_environment(&fixture, "MCP_POOL_TEST_RESULT", json!(result.to_string())).await?;
+    set_environment(&fixture, "MCP_CLI_TEST_RESULT", json!(result.to_string())).await?;
     fixture.warm("fixture").await?;
     let directory = fixture.home.join("images");
     let output = fixture
@@ -111,7 +111,7 @@ async fn failed_image_export_keeps_completed_result_and_rendered_error_priority(
     for failed in [false, true] {
         let fixture = Fixture::new().await?;
         let result = artifact_result(&fixture, failed, "not-base64").await?;
-        set_environment(&fixture, "MCP_POOL_TEST_RESULT", json!(result.to_string())).await?;
+        set_environment(&fixture, "MCP_CLI_TEST_RESULT", json!(result.to_string())).await?;
         fixture.warm("fixture").await?;
         let directory = fixture.home.join("images");
         let output = fixture
@@ -189,12 +189,7 @@ async fn large_resource_output_preserves_raw_envelope_and_text() -> io::Result<(
     let text = "resource body\n".repeat(16384);
     let resource_file = fixture.home.join("large-resource.txt");
     tokio::fs::write(&resource_file, &text).await?;
-    set_environment(
-        &fixture,
-        "MCP_POOL_TEST_RESOURCE_FILE",
-        json!(resource_file),
-    )
-    .await?;
+    set_environment(&fixture, "MCP_CLI_TEST_RESOURCE_FILE", json!(resource_file)).await?;
     fixture.warm("fixture").await?;
     let raw = fixture
         .success(&["resource", "fixture", "fixture://large", "--output", "raw"])

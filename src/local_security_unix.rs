@@ -296,13 +296,13 @@ fn verify_generic_directory(path: &Path, user_id: u32) -> io::Result<()> {
 fn app_owned_directories(path: &Path) -> Vec<PathBuf> {
     let mut directories = Vec::new();
     match path.file_name().and_then(std::ffi::OsStr::to_str) {
-        Some("mcp-pool" | ".mcp") => directories.push(path.to_path_buf()),
+        Some("mcp-pool" | "mcp-cli" | ".mcp") => directories.push(path.to_path_buf()),
         Some("run")
             if matches!(
                 path.parent()
                     .and_then(Path::file_name)
                     .and_then(std::ffi::OsStr::to_str),
-                Some("mcp-pool" | ".mcp")
+                Some("mcp-pool" | "mcp-cli" | ".mcp")
             ) =>
         {
             if let Some(application_directory) = path.parent() {

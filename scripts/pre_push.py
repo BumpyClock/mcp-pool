@@ -77,7 +77,7 @@ def main():
     run("rustup", "run", toolchain, "rustfmt", "--version")
     cargo = ("rustup", "run", toolchain, "cargo")
     run(*cargo, "fmt", "--all", "--", "--check")
-    run(*cargo, "check", "--offline", "--locked", "--bin", "mcp-pool")
+    run(*cargo, "check", "--offline", "--locked", "--bin", "mcp-cli")
     relevant = any(not path.endswith(".md") or path.startswith(("src/", "tests/", "scripts/", ".githooks/", ".cargo/")) for path in paths)
     if relevant:
         if os.name != "posix":
@@ -85,9 +85,9 @@ def main():
             return
         # Keep sockets out of real MCP state and below macOS's socket path limit.
         with tempfile.TemporaryDirectory(prefix="mp-hook-", dir="/tmp") as home:
-            os.environ["MCP_POOL_HOME"] = home
-            os.environ["MCP_POOL_CREDENTIALS_READ_ONLY"] = "1"
-            run(*cargo, "test", "--offline", "--locked", "--bin", "mcp-pool", "--",
+            os.environ["MCP_CLI_HOME"] = home
+            os.environ["MCP_CLI_CREDENTIALS_READ_ONLY"] = "1"
+            run(*cargo, "test", "--offline", "--locked", "--bin", "mcp-cli", "--",
                 "local_security", "transport::tests", "--test-threads=1")
 
 

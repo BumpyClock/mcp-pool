@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use tokio::process::Command;
 
-const BINARY: &str = env!("CARGO_BIN_EXE_mcp-pool");
+const BINARY: &str = env!("CARGO_BIN_EXE_mcp-cli");
 
 #[path = "../common/fixture_home.rs"]
 mod fixture_home;
@@ -40,13 +40,13 @@ impl Fixture {
         let mut command = Command::new(BINARY);
         command
             .current_dir(project)
-            .env("MCP_POOL_HOME", self.directory.join("pool"))
+            .env("MCP_CLI_HOME", self.directory.join("pool"))
             .env("HOME", &self.directory)
             .env("USERPROFILE", &self.directory)
             .env("APPDATA", &self.directory)
             .env_remove("XDG_DATA_HOME")
-            .env_remove("MCP_POOL_CONFIG")
-            .env_remove("MCP_POOL_CREDENTIALS_READ_ONLY")
+            .env_remove("MCP_CLI_CONFIG")
+            .env_remove("MCP_CLI_CREDENTIALS_READ_ONLY")
             .env("CLAUDE_CONFIG_DIR", &self.directory)
             .env_remove("CODEX_HOME")
             .env("MCPORTER_CONFIG", self.directory.join("must-not-read.json"))
@@ -101,7 +101,7 @@ impl Drop for Fixture {
         match std::process::Command::new(BINARY)
             .args(["daemon", "stop"])
             .current_dir(&self.project)
-            .env("MCP_POOL_HOME", self.directory.join("pool"))
+            .env("MCP_CLI_HOME", self.directory.join("pool"))
             .output()
         {
             Ok(output) if output.status.success() => {}

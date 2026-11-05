@@ -28,7 +28,7 @@ impl Progress {
             io::stderr().is_terminal(),
             std::env::var("TERM").ok().as_deref(),
             std::env::var("CI").ok().as_deref(),
-            std::env::var("MCP_POOL_NO_PROGRESS").ok().as_deref(),
+            crate::environment::string("MCP_CLI_NO_PROGRESS").as_deref(),
             std::env::var("MCPORTER_NO_SPINNER").ok().as_deref(),
         );
         Self {

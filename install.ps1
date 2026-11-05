@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [string]$BinDir = (Join-Path $HOME ".local\bin")
+    [string]$BinDir = $(if ($env:MCP_CLI_BIN_DIR) { $env:MCP_CLI_BIN_DIR } elseif ($env:MCP_POOL_BIN_DIR) { $env:MCP_POOL_BIN_DIR } else { Join-Path $HOME ".local\bin" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,13 +31,13 @@ $requestedBinDir = if ([string]::IsNullOrWhiteSpace($BinDir)) {
 $resolvedBinDir = [IO.Path]::GetFullPath($requestedBinDir)
 $hostTarget = $null
 $sourcePath = $null
-$destinationPath = [IO.Path]::GetFullPath((Join-Path $resolvedBinDir "mcp-pool.exe"))
+$destinationPath = [IO.Path]::GetFullPath((Join-Path $resolvedBinDir "mcp-cli.exe"))
 $temporaryPath = $null
 
 try {
     New-Item -ItemType Directory -Path $resolvedBinDir -Force | Out-Null
     $resolvedBinDir = (Get-Item -LiteralPath $resolvedBinDir).FullName
-    $destinationPath = [IO.Path]::GetFullPath((Join-Path $resolvedBinDir "mcp-pool.exe"))
+    $destinationPath = [IO.Path]::GetFullPath((Join-Path $resolvedBinDir "mcp-cli.exe"))
 
     $rustcVersion = (& rustc -vV 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0 -or $rustcVersion -notmatch '(?m)^host:\s*(\S+)\s*$') {
@@ -45,7 +45,7 @@ try {
     }
     $hostTarget = $Matches[1]
     $sourcePath = [IO.Path]::GetFullPath(
-        (Join-Path $targetDir (Join-Path $hostTarget "release\mcp-pool.exe"))
+        (Join-Path $targetDir (Join-Path $hostTarget "release\mcp-cli.exe"))
     )
 
     Push-Location $repoRoot
@@ -84,7 +84,7 @@ try {
         }
     }
 
-    $temporaryPath = Join-Path $resolvedBinDir (".mcp-pool.install.$PID.$([Guid]::NewGuid().ToString('N')).tmp.exe")
+    $temporaryPath = Join-Path $resolvedBinDir (".mcp-cli.install.$PID.$([Guid]::NewGuid().ToString('N')).tmp.exe")
     [IO.File]::Copy($sourcePath, $temporaryPath, $false)
     $sourceHash = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash
     $temporaryHash = (Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash
@@ -104,7 +104,7 @@ try {
     $temporaryPath = $null
 }
 catch {
-    throw "Could not install mcp-pool safely. The prior executable was retained when replacement was not completed. $($_.Exception.Message)"
+    throw "Could not install mcp-cli safely. The prior executable was retained when replacement was not completed. $($_.Exception.Message)"
 }
 finally {
     Remove-TemporaryFile $temporaryPath
@@ -117,13 +117,13 @@ if ($LASTEXITCODE -ne 0) {
 Write-Output "Installed executable: $destinationPath"
 Write-Output "Installed version: $installedVersion"
 
-$selectedCommand = Get-Command mcp-pool -ErrorAction SilentlyContinue
+$selectedCommand = Get-Command mcp-cli -ErrorAction SilentlyContinue
 if ($null -eq $selectedCommand) {
-    Write-Warning "mcp-pool is not currently on PATH; no PATH changes were made."
+    Write-Warning "mcp-cli is not currently on PATH; no PATH changes were made."
 } else {
     $selectedPath = $selectedCommand.Source
     if ([string]::IsNullOrWhiteSpace($selectedPath) -or
         ([IO.Path]::GetFullPath($selectedPath) -ne [IO.Path]::GetFullPath($destinationPath))) {
-        Write-Warning "PATH mismatch: the selected mcp-pool command is '$selectedPath', not '$destinationPath'."
+        Write-Warning "PATH mismatch: the selected mcp-cli command is '$selectedPath', not '$destinationPath'."
     }
 }

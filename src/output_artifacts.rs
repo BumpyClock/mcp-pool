@@ -19,7 +19,7 @@ pub(super) async fn save_images(result: &Value, directory: Option<&Path>) -> Res
         .await
         .context("Image write task failed")??;
     for path in paths {
-        eprintln!("[mcp-pool] Saved image: {}", path.display());
+        eprintln!("[mcp-cli] Saved image: {}", path.display());
     }
     Ok(())
 }
@@ -73,7 +73,7 @@ fn save(directory: &Path, content: &[Value]) -> Result<Vec<PathBuf>> {
                     if let Err(error) = file.write_all(&data).and_then(|_| file.sync_all()) {
                         drop(file);
                         if let Err(cleanup) = std::fs::remove_file(&path) {
-                            eprintln!("[mcp-pool] Could not clean incomplete image: {cleanup}");
+                            eprintln!("[mcp-cli] Could not clean incomplete image: {cleanup}");
                         }
                         return Err(error).context("Writing image content");
                     }
@@ -94,7 +94,7 @@ pub(super) async fn tail_log(result: &Value) -> Result<()> {
         .iter()
         .find_map(|key| result.get(key).and_then(Value::as_str));
     let Some(path) = path else {
-        eprintln!("[mcp-pool] --tail-log: result has no log path");
+        eprintln!("[mcp-cli] --tail-log: result has no log path");
         return Ok(());
     };
     let path = PathBuf::from(path);
@@ -107,7 +107,7 @@ pub(super) async fn tail_log(result: &Value) -> Result<()> {
             println!("--- tail {} ---", path.display());
             println!("{lines}");
         }
-        Err(error) => eprintln!("[mcp-pool] --tail-log: {error}"),
+        Err(error) => eprintln!("[mcp-cli] --tail-log: {error}"),
     }
     Ok(())
 }

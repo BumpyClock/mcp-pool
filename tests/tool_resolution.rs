@@ -65,15 +65,12 @@ async fn configure_synthetic(
         .get_mut("env")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| io::Error::other("missing fixture environment"))?;
-    environment.insert("MCP_POOL_SYNTHETIC".to_owned(), json!("1"));
+    environment.insert("MCP_CLI_SYNTHETIC".to_owned(), json!("1"));
     environment.insert(
-        "MCP_POOL_SYNTHETIC_COUNTER".to_owned(),
+        "MCP_CLI_SYNTHETIC_COUNTER".to_owned(),
         json!(fixture.counter.to_string_lossy()),
     );
-    environment.insert(
-        "MCP_POOL_SYNTHETIC_TOOLS".to_owned(),
-        json!(names.join(",")),
-    );
+    environment.insert("MCP_CLI_SYNTHETIC_TOOLS".to_owned(), json!(names.join(",")));
     server.remove("allowedTools");
     server.remove("allowed_tools");
     server.remove("blockedTools");
@@ -103,7 +100,7 @@ async fn exact_and_normalized_names_call_the_real_upstream_tool() -> io::Result<
         .pointer_mut("/mcpServers/fixture/env")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| io::Error::other("missing fixture environment"))?
-        .insert("MCP_POOL_TEST_DOTTED_TOOL".to_owned(), json!("1"));
+        .insert("MCP_CLI_TEST_DOTTED_TOOL".to_owned(), json!("1"));
     tokio::fs::write(&fixture.config, configuration.to_string()).await?;
     fixture.warm("fixture").await?;
 
@@ -386,7 +383,7 @@ mod synthetic {
     use serde_json::{Value, json};
 
     fn record(event: &str) -> io::Result<()> {
-        let path = std::env::var_os("MCP_POOL_SYNTHETIC_COUNTER")
+        let path = std::env::var_os("MCP_CLI_SYNTHETIC_COUNTER")
             .ok_or_else(|| io::Error::other("synthetic counter path is missing"))?;
         OpenOptions::new()
             .create(true)
@@ -406,7 +403,7 @@ mod synthetic {
     }
 
     fn response(request: &Value, names: &[&str], listed: &mut bool) -> io::Result<Value> {
-        let modern_once = std::env::var_os("MCP_POOL_SYNTHETIC_MODERN_ONCE").is_some();
+        let modern_once = std::env::var_os("MCP_CLI_SYNTHETIC_MODERN_ONCE").is_some();
         let method = request.get("method").and_then(Value::as_str).unwrap_or("");
         let id = request.get("id").cloned();
         let result = match method {
@@ -472,11 +469,11 @@ mod synthetic {
 
     #[test]
     fn upstream() -> io::Result<()> {
-        if std::env::var_os("MCP_POOL_SYNTHETIC").is_none() {
+        if std::env::var_os("MCP_CLI_SYNTHETIC").is_none() {
             return Ok(());
         }
         let configured_names =
-            std::env::var("MCP_POOL_SYNTHETIC_TOOLS").map_err(io::Error::other)?;
+            std::env::var("MCP_CLI_SYNTHETIC_TOOLS").map_err(io::Error::other)?;
         let names = configured_names
             .split(',')
             .filter(|name| !name.is_empty())

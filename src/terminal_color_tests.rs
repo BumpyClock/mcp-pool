@@ -18,7 +18,7 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
 };
 
-const FIXTURE: &str = "MCP_POOL_COLOR_FIXTURE";
+const FIXTURE: &str = "MCP_CLI_COLOR_FIXTURE";
 
 fn wide(value: &std::ffi::OsStr) -> Vec<u16> {
     value.encode_wide().chain(Some(0)).collect()

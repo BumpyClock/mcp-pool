@@ -262,7 +262,7 @@ pub async fn daemon(arguments: Vec<String>) -> Result<()> {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         println!(
-            "Daemon {} (mcp-pool broker)",
+            "Daemon {} (mcp-cli broker)",
             if active { "running" } else { "stopped" }
         );
         if active && let Some(servers) = result.get("servers").and_then(Value::as_array) {

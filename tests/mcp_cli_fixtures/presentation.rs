@@ -32,7 +32,7 @@ async fn server_discovery_displays_complete_docs_and_keeps_brief_and_json_modes(
             "function echo(label: string, count?: number, enabled?: boolean, delay_ms?: number);"
         ));
         assert!(text.contains("Examples:"));
-        assert!(text.contains("mcp-pool call fixture.delayed --args '{\"label\":\"value\"}'"));
+        assert!(text.contains("mcp-cli call fixture.delayed --args '{\"label\":\"value\"}'"));
         assert!(!text.contains('\x1b'));
     }
     let no_color = fixture.success(&["--no-color", "list", "fixture"]).await?;
@@ -71,7 +71,7 @@ async fn referenced_schema_examples_match_real_calls_and_preserve_json_metadata(
         .pointer_mut("/mcpServers/fixture/env")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| io::Error::other("missing fixture environment"))?
-        .insert("MCP_POOL_TEST_REFERENCED_SCHEMA".to_owned(), json!("1"));
+        .insert("MCP_CLI_TEST_REFERENCED_SCHEMA".to_owned(), json!("1"));
     tokio::fs::write(&fixture.config, configuration.to_string()).await?;
     fixture.warm("fixture").await?;
     let output = fixture.success(&["list", "fixture.echo"]).await?;
@@ -81,7 +81,7 @@ async fn referenced_schema_examples_match_real_calls_and_preserve_json_metadata(
         .lines()
         .find_map(|line| {
             line.trim()
-                .strip_prefix("mcp-pool call fixture.echo --args '")
+                .strip_prefix("mcp-cli call fixture.echo --args '")
         })
         .and_then(|line| line.strip_suffix('\''))
         .ok_or_else(|| io::Error::other("missing generated example"))?;
@@ -134,11 +134,7 @@ async fn delayed_piped_commands_preserve_results_without_progress_output() -> io
                     format,
                 ],
                 None,
-                &[
-                    ("CI", "0"),
-                    ("TERM", "xterm"),
-                    ("MCP_POOL_NO_PROGRESS", "0"),
-                ],
+                &[("CI", "0"), ("TERM", "xterm"), ("MCP_CLI_NO_PROGRESS", "0")],
             )
             .await?;
         assert!(output.status.success(), "{output:?}");

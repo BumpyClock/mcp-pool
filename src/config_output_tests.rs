@@ -31,11 +31,11 @@ fn doctor_does_not_embed_unsafe_aliases_in_runnable_hints() {
         let report =
             credential_summary(name, true, &json!({"bindingValid":true,"hasTokens":false}));
         assert!(
-            report.contains("Run mcp-pool auth --help for explicit authorization options."),
+            report.contains("Run mcp-cli auth --help for explicit authorization options."),
             "{report}"
         );
         assert!(
-            !report.contains(&format!("Run mcp-pool auth {name} to authorize")),
+            !report.contains(&format!("Run mcp-cli auth {name} to authorize")),
             "{report}"
         );
     }
@@ -58,7 +58,7 @@ fn doctor_refresh_guidance_requires_cached_client_registration() {
             "{report}"
         );
         assert_eq!(
-            report.contains("Run mcp-pool auth docs"),
+            report.contains("Run mcp-cli auth docs"),
             !registered,
             "{report}"
         );
@@ -164,7 +164,7 @@ fn doctor_reports_cached_credential_health_and_actionable_recovery() {
         assert!(report.starts_with("  docs:"), "{report}");
         assert!(report.contains(expected), "missing {expected} in {report}");
         assert_eq!(
-            report.contains("Run mcp-pool auth docs"),
+            report.contains("Run mcp-cli auth docs"),
             needs_auth,
             "{report}"
         );

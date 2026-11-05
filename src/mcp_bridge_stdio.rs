@@ -80,7 +80,7 @@ async fn serve_loop(state: Arc<BridgeState>, mut input: mpsc::Receiver<InputFram
                 match completed {
                     Some(Ok(Some(response))) => write_response(&mut output, response).await?,
                     Some(Ok(None)) => {}
-                    Some(Err(_)) => eprintln!("mcp-pool bridge request task failed."),
+                    Some(Err(_)) => eprintln!("mcp-cli bridge request task failed."),
                     None => {}
                 }
             }

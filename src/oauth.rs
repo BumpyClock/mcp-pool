@@ -289,7 +289,7 @@ fn context_with_settings(
         directory_stores,
         identity_key,
         directory_primary: token_cache_directory.is_some(),
-        client_name: resolve(settings.client_name)?.unwrap_or_else(|| "mcp-pool".to_owned()),
+        client_name: resolve(settings.client_name)?.unwrap_or_else(|| "mcp-cli".to_owned()),
         client_id: resolve(settings.client_id)?,
         client_secret_env: resolve(settings.client_secret_env)?,
         token_auth_method: resolve(settings.token_auth_method)?,
@@ -300,11 +300,10 @@ fn context_with_settings(
             .timeout_ms
             .unwrap_or(300_000)
             .clamp(1_000, 900_000),
-        read_only: definition
-            .env
-            .get("MCP_POOL_CREDENTIALS_READ_ONLY")
-            .is_some_and(|value| value == "1")
-            || std::env::var("MCP_POOL_CREDENTIALS_READ_ONLY").is_ok_and(|value| value == "1"),
+        read_only: crate::environment::READ_ONLY_NAMES
+            .iter()
+            .any(|name| definition.env.get(*name).is_some_and(|value| value == "1"))
+            || crate::environment::credentials_read_only(),
         cached_only: false,
     })
 }
@@ -336,17 +335,15 @@ pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 
 pub(crate) fn missing(authentication: &HttpAuth) -> anyhow::Error {
     anyhow::anyhow!(
-        "OAuth credentials missing or expired; run `mcp-pool auth {}` explicitly",
+        "OAuth credentials missing or expired; run `mcp-cli auth {}` explicitly",
         authentication.server_name
     )
 }
 
 pub(crate) fn ensure_writable(authentication: &HttpAuth) -> Result<()> {
-    if authentication.read_only
-        || std::env::var("MCP_POOL_CREDENTIALS_READ_ONLY").is_ok_and(|value| value == "1")
-    {
+    if authentication.read_only || crate::environment::credentials_read_only() {
         bail!(
-            "credential validation is read-only; expired tokens cannot refresh and auth/vault mutations are disabled; remove MCP_POOL_CREDENTIALS_READ_ONLY only for an explicitly authorized runtime operation"
+            "credential validation is read-only; expired tokens cannot refresh and auth/vault mutations are disabled; remove MCP_CLI_CREDENTIALS_READ_ONLY and MCP_POOL_CREDENTIALS_READ_ONLY only for an explicitly authorized runtime operation"
         );
     }
     Ok(())

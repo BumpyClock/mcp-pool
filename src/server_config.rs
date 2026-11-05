@@ -283,7 +283,7 @@ fn normalize_document(
         legacy_imports(raw).map_err(|error| anyhow!("MCP config {} {error}", source.display()))?;
     if !imports.is_empty() {
         warnings.push(format!(
-                    "Ignoring {} legacy import(s) in {}; run `mcp-pool import SOURCE` to copy server definitions explicitly.",
+                    "Ignoring {} legacy import(s) in {}; run `mcp-cli import SOURCE` to copy server definitions explicitly.",
                     imports.len(),
                     source.display()
                 ));

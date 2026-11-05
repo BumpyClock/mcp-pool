@@ -12,8 +12,8 @@ SOURCE = Path(__file__).resolve().parents[1]
 ZERO = "0" * 40
 CARGO = ["rustup", "run", "1.95.0", "cargo"]
 FORMAT = CARGO + ["fmt", "--all", "--", "--check"]
-CHECK = CARGO + ["check", "--offline", "--locked", "--bin", "mcp-pool"]
-IPC = CARGO + ["test", "--offline", "--locked", "--bin", "mcp-pool", "--", "local_security", "transport::tests", "--test-threads=1"]
+CHECK = CARGO + ["check", "--offline", "--locked", "--bin", "mcp-cli"]
+IPC = CARGO + ["test", "--offline", "--locked", "--bin", "mcp-cli", "--", "local_security", "transport::tests", "--test-threads=1"]
 
 
 class HookTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class HookTests(unittest.TestCase):
             (self.tools / tool).symlink_to(executable)
         self.env = dict(os.environ, PATH=str(self.tools), GIT_CONFIG_GLOBAL=os.devnull,
                         GIT_CONFIG_NOSYSTEM="1", HOOK_TEST_LOG=str(self.log),
-                        HOOK_IPC_LOG=str(self.ipc_log), MCP_POOL_HOME=str(self.user_home))
+                        HOOK_IPC_LOG=str(self.ipc_log), MCP_CLI_HOME=str(self.user_home))
         self.git("init", "-q")
         self.git("config", "user.name", "Hook fixture")
         self.git("config", "user.email", "fixture@example.invalid")
@@ -57,9 +57,9 @@ call=['rustup',*sys.argv[1:]]
 assert os.environ['CARGO_NET_OFFLINE']=='true'
 with open(os.environ['HOOK_TEST_LOG'],'a') as f:f.write(json.dumps(call)+'\\n')
 if 'cargo' in call and 'test' in call:
-    home=pathlib.Path(os.environ['MCP_POOL_HOME'])
+    home=pathlib.Path(os.environ['MCP_CLI_HOME'])
     assert str(home).startswith('/tmp/mp-hook-') and home.stat().st_mode & 0o777 == 0o700
-    assert os.environ['MCP_POOL_CREDENTIALS_READ_ONLY']=='1'
+    assert os.environ['MCP_CLI_CREDENTIALS_READ_ONLY']=='1'
     pathlib.Path(os.environ['HOOK_IPC_LOG']).write_text(str(home))
     (home/'fixture-marker').write_text('temporary only')
 if os.environ.get('HOOK_FAIL')==' '.join(call):sys.exit(37)
@@ -231,7 +231,7 @@ if os.environ.get('HOOK_FAIL')==' '.join(call):sys.exit(37)
             raise RuntimeError('Prepare Bash before running workflow fixtures.')
         functions = '''
 mktemp() { if [ "$WORKFLOW_MKTEMP_EXIT" != 0 ]; then return "$WORKFLOW_MKTEMP_EXIT"; fi; printf '%s\\n' "$WORKFLOW_HOME"; }
-cargo() { printf '%s' "$MCP_POOL_HOME" > "$WORKFLOW_CARGO_MARKER"; return "$WORKFLOW_CARGO_EXIT"; }
+cargo() { printf '%s' "$MCP_CLI_HOME" > "$WORKFLOW_CARGO_MARKER"; return "$WORKFLOW_CARGO_EXIT"; }
 rm() { printf '%s' "$*" > "$WORKFLOW_CLEANUP_MARKER"; }
 '''
         env = dict(self.env, WORKFLOW_MKTEMP_EXIT=str(mktemp_exit), WORKFLOW_CARGO_EXIT=str(cargo_exit),

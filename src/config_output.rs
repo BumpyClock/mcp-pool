@@ -129,10 +129,10 @@ pub(super) fn credential_summary(
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
         if portable_name {
             report.push_str(&format!(
-                "\n    Run mcp-pool auth {name} to authorize explicitly."
+                "\n    Run mcp-cli auth {name} to authorize explicitly."
             ));
         } else {
-            report.push_str("\n    Run mcp-pool auth --help for explicit authorization options.");
+            report.push_str("\n    Run mcp-cli auth --help for explicit authorization options.");
         }
     }
     report

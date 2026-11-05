@@ -8,7 +8,7 @@ use tokio::process::Command;
 #[path = "common/fixture_home.rs"]
 mod fixture_home;
 
-const FIXTURE: &str = "MCP_POOL_STDERR_FIXTURE";
+const FIXTURE: &str = "MCP_CLI_STDERR_FIXTURE";
 
 #[test]
 fn diagnostic_fixture() -> io::Result<()> {
@@ -27,11 +27,11 @@ fn diagnostic_fixture() -> io::Result<()> {
 #[tokio::test]
 async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     let home = fixture_home::create("ps")?;
-    let binary = env!("CARGO_BIN_EXE_mcp-pool");
+    let binary = env!("CARGO_BIN_EXE_mcp-cli");
     let fixture = std::env::current_exe()?.to_string_lossy().into_owned();
     let mut add = Command::new(binary);
-    add.env("MCP_POOL_HOME", &home)
-        .env_remove("MCP_POOL_CONFIG")
+    add.env("MCP_CLI_HOME", &home)
+        .env_remove("MCP_CLI_CONFIG")
         .current_dir(&home)
         .args([
             "add",
@@ -45,8 +45,8 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     let output = add.output().await?;
     assert!(output.status.success(), "{output:?}");
     let mut daemon = Command::new(binary)
-        .env("MCP_POOL_HOME", &home)
-        .env_remove("MCP_POOL_CONFIG")
+        .env("MCP_CLI_HOME", &home)
+        .env_remove("MCP_CLI_CONFIG")
         .current_dir(&home)
         .env(FIXTURE, "1")
         .args(["pool", "serve"])
@@ -59,7 +59,7 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
         loop {
             #[cfg(unix)]
             let ready =
-                tokio::net::UnixStream::connect(home.join("state").join("mcp-pool-control.sock"))
+                tokio::net::UnixStream::connect(home.join("state").join("mcp-cli-control.sock"))
                     .await
                     .is_ok();
             #[cfg(windows)]
@@ -70,7 +70,7 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
                     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
                 }
                 tokio::net::windows::named_pipe::ClientOptions::new()
-                    .open(format!(r"\\.\pipe\mcp-pool-{:08x}-control", hash as u32))
+                    .open(format!(r"\\.\pipe\mcp-cli-{:08x}-control", hash as u32))
                     .is_ok()
             };
             if ready {
@@ -82,8 +82,8 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     .await
     .map_err(io::Error::other)?;
     let mut proxy = Command::new(binary)
-        .env("MCP_POOL_HOME", &home)
-        .env_remove("MCP_POOL_CONFIG")
+        .env("MCP_CLI_HOME", &home)
+        .env_remove("MCP_CLI_CONFIG")
         .env(FIXTURE, "1")
         .current_dir(&home)
         .args(["proxy", "diagnostics"])
@@ -123,8 +123,8 @@ async fn invalid_utf8_diagnostics_do_not_retire_server() -> io::Result<()> {
     .map_err(io::Error::other)??;
     assert_eq!(received, ["echo:first", "echo:second"]);
     let shutdown = Command::new(binary)
-        .env("MCP_POOL_HOME", &home)
-        .env_remove("MCP_POOL_CONFIG")
+        .env("MCP_CLI_HOME", &home)
+        .env_remove("MCP_CLI_CONFIG")
         .current_dir(&home)
         .arg("shutdown")
         .output()

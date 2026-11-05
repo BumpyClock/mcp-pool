@@ -187,7 +187,7 @@ fn examples_preserve_enum_values_and_leave_json_options_unchanged() {
     }}});
     let example = plain().example("fixture", &tool);
     let payload = example
-        .strip_prefix("mcp-pool call fixture.configure --args '")
+        .strip_prefix("mcp-cli call fixture.configure --args '")
         .and_then(|payload| payload.strip_suffix('\''))
         .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
     assert_eq!(
@@ -243,7 +243,7 @@ fn examples_resolve_nested_local_references_without_changing_machine_descriptors
     let options_before = crate::tool_output::options(&tool);
     let example = plain().example("fixture", &tool);
     let payload = example
-        .strip_prefix("mcp-pool call fixture.configure --args '")
+        .strip_prefix("mcp-cli call fixture.configure --args '")
         .and_then(|payload| payload.strip_suffix('\''))
         .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
     assert_eq!(
@@ -283,7 +283,7 @@ fn examples_and_signatures_bound_cyclic_unresolved_and_external_references() {
     let tool = json!({"name":"bounded","inputSchema":schema});
     let example = plain().example("fixture", &tool);
     let payload = example
-        .strip_prefix("mcp-pool call fixture.bounded --args '")
+        .strip_prefix("mcp-cli call fixture.bounded --args '")
         .and_then(|payload| payload.strip_suffix('\''))
         .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
     assert_eq!(
@@ -306,7 +306,7 @@ fn examples_are_valid_json_arguments_and_do_not_break_shell_quoting() {
         "enabled":{"type":"boolean"},"count":{"type":"integer"},"data":{"type":"object"}
     }}});
     let example = plain().example("fixture", &tool);
-    let prefix = "mcp-pool call fixture.write --args '";
+    let prefix = "mcp-cli call fixture.write --args '";
     let payload = example
         .strip_prefix(prefix)
         .and_then(|payload| payload.strip_suffix('\''))

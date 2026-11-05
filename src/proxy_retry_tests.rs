@@ -10,14 +10,14 @@ async fn unavailable_endpoint_retries_and_attaches_when_listener_becomes_ready()
     let (path, directory) = {
         use std::os::unix::fs::PermissionsExt;
         let directory =
-            std::env::temp_dir().join(format!("mcp-pool-proxy-ready-{}", std::process::id()));
+            std::env::temp_dir().join(format!("mcp-cli-proxy-ready-{}", std::process::id()));
         std::fs::create_dir(&directory)?;
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
         (directory.join("ready.sock"), directory)
     };
     #[cfg(windows)]
     let path = std::path::PathBuf::from(format!(
-        r"\\.\pipe\mcp-pool-proxy-ready-{}",
+        r"\\.\pipe\mcp-cli-proxy-ready-{}",
         std::process::id()
     ));
     let start = tokio::time::Instant::now();
@@ -49,7 +49,7 @@ async fn permanent_local_connect_error_has_no_retry_delay() -> std::io::Result<(
     let (path, directory) = {
         use std::os::unix::fs::PermissionsExt;
         let directory =
-            std::env::temp_dir().join(format!("mcp-pool-proxy-retry-{}", std::process::id()));
+            std::env::temp_dir().join(format!("mcp-cli-proxy-retry-{}", std::process::id()));
         std::fs::create_dir(&directory)?;
         std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
         let path = directory.join("not-a-socket");

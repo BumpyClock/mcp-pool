@@ -13,7 +13,7 @@ async fn remove_retires_old_environment_view_and_preserves_unrelated_pool() -> i
         .pointer_mut("/mcpServers/fixture/env")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| io::Error::other("fixture environment missing"))?;
-    environment.insert("MCP_POOL_TEST_VALUE".into(), json!("$env:FIXTURE_VALUE"));
+    environment.insert("MCP_CLI_TEST_VALUE".into(), json!("$env:FIXTURE_VALUE"));
     tokio::fs::write(&fixture.config, configuration.to_string()).await?;
     let first_environment = [("FIXTURE_VALUE", "A")];
     fixture

@@ -10,8 +10,8 @@ mod support;
 
 use support::{Fixture, parse_json};
 
-#[test]
-fn non_unicode_arguments_return_an_error_without_panicking() -> io::Result<()> {
+#[tokio::test]
+async fn non_unicode_arguments_return_an_error_without_panicking() -> io::Result<()> {
     #[cfg(unix)]
     let argument = {
         use std::os::unix::ffi::OsStringExt;
@@ -22,9 +22,10 @@ fn non_unicode_arguments_return_an_error_without_panicking() -> io::Result<()> {
         use std::os::windows::ffi::OsStringExt;
         std::ffi::OsString::from_wide(&[0xd800])
     };
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mcp-pool"))
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcp-cli"))
         .arg(argument)
-        .output()?;
+        .output()
+        .await?;
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(error.contains("command-line arguments must be valid Unicode"));
@@ -32,16 +33,17 @@ fn non_unicode_arguments_return_an_error_without_panicking() -> io::Result<()> {
     Ok(())
 }
 
-#[test]
-fn serve_help_describes_concurrency_without_loading_config() -> io::Result<()> {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_mcp-pool"))
+#[tokio::test]
+async fn serve_help_describes_concurrency_without_loading_config() -> io::Result<()> {
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcp-cli"))
         .args([
             "--config",
             "missing-serve-help-config.json",
             "serve",
             "--help",
         ])
-        .output()?;
+        .output()
+        .await?;
     assert!(output.status.success(), "{output:?}");
     let help = String::from_utf8_lossy(&output.stdout);
     assert!(help.contains("--concurrency 1..64"));
@@ -164,7 +166,7 @@ async fn root_help_names_mcp_commands_and_native_pool_commands() -> io::Result<(
     let nested_call = fixture.command(&["pool", "call", "--help"]).await?;
     assert!(!nested_call.status.success());
     for (arguments, expected) in [
-        (&["help", "call"][..], "Usage: mcp-pool call"),
+        (&["help", "call"][..], "Usage: mcp-cli call"),
         (&["help", "start"][..], "Start pooled MCP server"),
         (&["pool", "list", "--help"][..], "native pool entries"),
         (&["pool", "serve", "--help"][..], "native MCP pool daemon"),
@@ -286,7 +288,7 @@ async fn exact_dotted_servers_and_explicit_native_commands_win() -> io::Result<(
         .pointer_mut("/env")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| io::Error::other("missing fixture environment"))?
-        .insert("MCP_POOL_TEST_DOTTED_TOOL".to_owned(), json!("1"));
+        .insert("MCP_CLI_TEST_DOTTED_TOOL".to_owned(), json!("1"));
     let status_server = fixture_server.clone();
     let servers = configuration
         .pointer_mut("/mcpServers")

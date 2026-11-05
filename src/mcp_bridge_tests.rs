@@ -81,8 +81,8 @@ async fn initialize_and_notifications_follow_mcp_handshake_contract() -> Result<
             "result":{
                 "protocolVersion":"2025-06-18",
                 "capabilities":{"tools":{}},
-                "serverInfo":{"name":"mcp-pool","version":env!("CARGO_PKG_VERSION")},
-                "instructions":"mcp-pool bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool."
+                "serverInfo":{"name":"mcp-cli","version":env!("CARGO_PKG_VERSION")},
+                "instructions":"mcp-cli bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool."
             }
         }))
     );

@@ -9,7 +9,7 @@ use windows_sys::Win32::Security::{
 
 #[tokio::test]
 async fn first_and_later_instances_accept_only_the_current_user() -> io::Result<()> {
-    let name = format!(r"\\.\pipe\mcp-pool-local-security-{}", std::process::id());
+    let name = format!(r"\\.\pipe\mcp-cli-local-security-{}", std::process::id());
     let first = create_named_pipe(&name, true)?;
     assert_eq!(
         create_named_pipe(&name, true)
@@ -137,7 +137,7 @@ fn constructs_protected_owner_only_pipe_descriptor() -> io::Result<()> {
 
 #[test]
 fn rejects_nonlocal_pipe_names() {
-    assert!(validate_pipe_name(r"\\server\pipe\mcp-pool").is_err());
-    assert!(validate_pipe_name(r"\\.\pipe\mcp-pool\nested").is_err());
-    assert!(validate_pipe_name(r"\\.\pipe\mcp-pool").is_ok());
+    assert!(validate_pipe_name(r"\\server\pipe\mcp-cli").is_err());
+    assert!(validate_pipe_name(r"\\.\pipe\mcp-cli\nested").is_err());
+    assert!(validate_pipe_name(r"\\.\pipe\mcp-cli").is_ok());
 }

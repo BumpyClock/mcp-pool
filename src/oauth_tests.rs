@@ -50,7 +50,7 @@ async fn missing_oauth_is_actionable_and_no_oauth_keeps_valid_cached_tokens() ->
         .await
         .err()
         .ok_or_else(|| anyhow::anyhow!("expected auth failure"))?;
-    assert!(error.to_string().contains("mcp-pool auth"));
+    assert!(error.to_string().contains("mcp-cli auth"));
     assert!(prepare(&fixture.server, true).await.is_err());
     assert!(
         !context(&fixture.server)?.vault_path.exists(),
@@ -58,6 +58,23 @@ async fn missing_oauth_is_actionable_and_no_oauth_keeps_valid_cached_tokens() ->
     );
     fixture.valid()?;
     assert!(prepare(&fixture.server, true).await?.auth.is_some());
+    Ok(())
+}
+
+#[test]
+fn legacy_read_only_override_cannot_be_neutralized_by_new_name() -> Result<()> {
+    let mut fixture = Fixture::new("https://synthetic.invalid/mcp")?;
+    fixture
+        .server
+        .definition
+        .env
+        .insert("MCP_CLI_CREDENTIALS_READ_ONLY".into(), "0".into());
+    fixture
+        .server
+        .definition
+        .env
+        .insert("MCP_POOL_CREDENTIALS_READ_ONLY".into(), "1".into());
+    assert!(context(&fixture.server)?.read_only);
     Ok(())
 }
 
@@ -71,7 +88,7 @@ async fn read_only_validation_reuses_valid_tokens_and_blocks_all_writes() -> Res
         .server
         .definition
         .env
-        .insert("MCP_POOL_CREDENTIALS_READ_ONLY".to_owned(), "1".to_owned());
+        .insert("MCP_CLI_CREDENTIALS_READ_ONLY".to_owned(), "1".to_owned());
     let definition = prepare(&fixture.server, false).await?;
     let mut authentication = definition
         .auth

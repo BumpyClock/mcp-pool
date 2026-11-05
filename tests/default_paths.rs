@@ -26,14 +26,16 @@ impl Drop for FixtureHome {
 }
 
 fn command(home: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_mcp-pool"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mcp-cli"));
     command
         .current_dir(home)
         .env("HOME", home)
         .env("XDG_STATE_HOME", home.join("old-state"))
         .env("XDG_DATA_HOME", home.join("old-data"))
-        .env("MCP_POOL_DEBUG", "1")
+        .env("MCP_CLI_DEBUG", "1")
+        .env_remove("MCP_CLI_HOME")
         .env_remove("MCP_POOL_HOME")
+        .env_remove("MCP_CLI_CONFIG")
         .env_remove("MCP_POOL_CONFIG")
         .env_remove("MCPORTER_DAEMON_LOG")
         .env_remove("MCPORTER_DAEMON_LOG_PATH")
@@ -84,11 +86,11 @@ async fn default_home_lifecycle(start_arguments: &[&str]) -> Result<()> {
             ensure!(std::fs::metadata(directory)?.permissions().mode() & 0o777 == 0o700);
         }
         ensure!(
-            std::fs::symlink_metadata(application.join("mcp-pool-control.sock"))?
+            std::fs::symlink_metadata(application.join("mcp-cli-control.sock"))?
                 .file_type()
                 .is_socket()
         );
-        ensure!(application.join("logs/mcp-pool.log").is_file());
+        ensure!(application.join("logs/mcp-cli.log").is_file());
         ensure!(!home.join("old-state").exists());
         ensure!(!home.join("old-data").exists());
         ensure!(std::fs::read(application.join("config.json"))? == configuration.as_bytes());
@@ -99,7 +101,7 @@ async fn default_home_lifecycle(start_arguments: &[&str]) -> Result<()> {
     let shutdown = success(&home, &["daemon", "stop"]).await;
     result?;
     shutdown?;
-    ensure!(!application.join("mcp-pool-control.sock").exists());
+    ensure!(!application.join("mcp-cli-control.sock").exists());
     for entry in application.join("run").read_dir()? {
         ensure!(!entry?.file_type()?.is_socket());
     }

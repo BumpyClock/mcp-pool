@@ -1,4 +1,4 @@
-# mcp-pool
+# mcp-cli
 
 Standalone, platform-independent CLI for pooling MCP (Model Context Protocol) servers,
 with discovery, call, resource, and auth commands inspired by mcporter.
@@ -9,13 +9,13 @@ over a local socket, with JSON-RPC requests multiplexed by `id`.
 
 Tools like `claude-code` spawn every configured MCP server themselves. If you run
 several agent sessions in parallel, the same heavy MCP (e.g. an `npx` server) gets
-launched once per session. `mcp-pool` deduplicates that: one upstream, many clients.
+launched once per session. `mcp-cli` deduplicates that: one upstream, many clients.
 
 ## Install / build
 
 ```sh
 cargo build --release
-# binary at target/release/mcp-pool
+# binary at target/release/mcp-cli
 ```
 
 Build and install the current checkout explicitly:
@@ -34,8 +34,10 @@ The installers default to `~/.local/bin`, build the host target from this
 repository even when invoked elsewhere, and verify the staged executable before
 replacing an existing file. A locked Windows executable fails without stopping its
 daemon. The scripts do not change `PATH`; they warn if another executable would
-still be selected. `mcp-pool --version` includes the Git revision and a source
+still be selected. `mcp-cli --version` includes the Git revision and a source
 fingerprint, so two different dirty builds no longer look identical.
+`MCP_CLI_BIN_DIR` selects the default install directory; `MCP_POOL_BIN_DIR`
+remains a fallback. An explicit `--bin-dir` or `-BinDir` takes precedence.
 
 ## Development
 
@@ -67,7 +69,7 @@ The tracked executable hook is never installed automatically. The installer is i
 
 Push validation requires a clean checkout, including untracked files. Every nondeleted pushed ref must resolve to checked-out `HEAD`; other refs fail rather than validating unrelated code. Multiple refs, new branches, missing base objects, empty input/diffs, renames and deletions broaden checks conservatively. A deletion-only update runs no project commands. No fetching, stashing or source rewriting occurs.
 
-The hook uses the already-installed pinned Rust toolchain, full project `cargo fmt --all -- --check`, and `cargo check --offline --locked --bin mcp-pool`. Missing tools, components or dependencies fail with setup instructions; the hook never installs or downloads them. Source, dependency, shared configuration and uncertain changes run the existing Unix security/transport filter serially on Unix. Socket fixtures use a fresh private, short `/tmp` MCP home, cleaned even on failure, never the user's MCP state. Markdown-only changes retain format/check but omit the IPC runtime gate. All failures propagate.
+The hook uses the already-installed pinned Rust toolchain, full project `cargo fmt --all -- --check`, and `cargo check --offline --locked --bin mcp-cli`. Missing tools, components or dependencies fail with setup instructions; the hook never installs or downloads them. Source, dependency, shared configuration and uncertain changes run the existing Unix security/transport filter serially on Unix. Socket fixtures use a fresh private, short `/tmp` MCP home, cleaned even on failure, never the user's MCP state. Markdown-only changes retain format/check but omit the IPC runtime gate. All failures propagate.
 
 Unix tests are not Windows acceptance. A non-Unix hook host reports that Unix IPC remains required in CI; Windows named-pipe/process behavior and the full suite still need native qualification. The hook does not invoke MCP commands, refresh tokens, launch providers, import credentials or restart daemons. Its fixture tests use stub commands in disposable Git repositories and make no outbound push. Run full project tests separately.
 
@@ -79,23 +81,23 @@ All commands use the same JSONC format at `~/.mcp/config.json` and
 `PROJECT/.mcp/config.json`. Project entries override same-named home entries;
 other home entries remain available. Project lookup uses the nearest `.mcp`
 directory or Git root, falling back to the current directory. `--root DIR`
-selects a project explicitly. `--config PATH` or `MCP_POOL_CONFIG` selects just
+selects a project explicitly. `--config PATH` or `MCP_CLI_CONFIG` selects just
 one file instead of merging. `MCPORTER_CONFIG` is no longer read.
 
 Import existing definitions once, then use only the copied configuration:
 
 ```sh
-mcp-pool import claude --dry-run
-mcp-pool import claude
-mcp-pool import codex --scope project
-mcp-pool import project --scope project
-mcp-pool import mcporter --from PATH
-mcp-pool import mcporter --include-auth --dry-run
-mcp-pool import mcporter --include-auth
-mcp-pool import cursor --scope project
-mcp-pool import vscode --from PATH --dry-run
-mcp-pool config import claude docs --scope project
-mcp-pool import mcp-pool --from OLD_CONFIG_TOML
+mcp-cli import claude --dry-run
+mcp-cli import claude
+mcp-cli import codex --scope project
+mcp-cli import project --scope project
+mcp-cli import mcporter --from PATH
+mcp-cli import mcporter --include-auth --dry-run
+mcp-cli import mcporter --include-auth
+mcp-cli import cursor --scope project
+mcp-cli import vscode --from PATH --dry-run
+mcp-cli config import claude docs --scope project
+mcp-cli import mcp-pool --from OLD_CONFIG_TOML
 ```
 
 `import` and `config import` are equivalent. Imports default to the home config;
@@ -151,7 +153,7 @@ or `unsupported`), never credential values. Missing auth does not stop definitio
 imports. Different destination credentials, client registrations, and unfinished
 authorization state require `--replace`; identical copies are idempotent.
 Destinations that alias source credential files, including symlinks, are rejected. `--dry-run` reads and validates without writing or retiring pools.
-Credential writes obey `MCP_POOL_CREDENTIALS_READ_ONLY=1` and retire affected pool
+Credential writes obey `MCP_CLI_CREDENTIALS_READ_ONLY=1` and retire affected pool
 views first. Preflight validation and conflict errors leave destination files unchanged.
 Config and credential files are committed separately. A later credential I/O failure
 can leave the config and earlier credentials imported; fix the store and rerun.
@@ -161,7 +163,7 @@ pool retirement, and credential writes run even when the config is not rewritten
 **Cutover warning.** Copied refresh tokens may rotate. Stop using imported servers
 through mcporter after cutover, or one runtime can invalidate the other runtime's
 credentials. `--replace` can also overwrite newer destination tokens with an older
-source copy. If the source is stale, authorize through mcp-pool instead.
+source copy. If the source is stale, authorize through mcp-cli instead.
 
 Windows resolves extensionless commands such as `npx` using `PATH` and
 `PATHEXT`, preferring Windows launchers such as `npx.cmd` over sibling
@@ -180,15 +182,15 @@ Other commands reject it. Cached-token refresh retains its fixed OAuth deadline;
 use `--timeout` for a call or discovery operation's wait budget.
 
 ```sh
-mcp-pool list                         # connect and discover configured servers
-mcp-pool list docs --schema           # show tool signatures and input schemas
-mcp-pool describe docs                # alias for list
-mcp-pool list-tools docs              # alias for list
-mcp-pool list docs.search --json       # one tool's metadata
-mcp-pool call docs.search query="MCP" --output json
-mcp-pool call --server docs --tool search --args '{"query":"MCP"}'
-mcp-pool resources docs               # list resources
-mcp-pool resource docs "docs://guide"  # read a resource
+mcp-cli list                         # connect and discover configured servers
+mcp-cli list docs --schema           # show tool signatures and input schemas
+mcp-cli describe docs                # alias for list
+mcp-cli list-tools docs              # alias for list
+mcp-cli list docs.search --json       # one tool's metadata
+mcp-cli call docs.search query="MCP" --output json
+mcp-cli call --server docs --tool search --args '{"query":"MCP"}'
+mcp-cli resources docs               # list resources
+mcp-cli resource docs "docs://guide"  # read a resource
 ```
 
 Root `--help` exposes both MCP commands and native pool controls. `help call`
@@ -198,11 +200,11 @@ own flags and examples without loading configuration. Configured servers also
 support short forms:
 
 ```sh
-mcp-pool docs
-mcp-pool docs list --schema
-mcp-pool docs.search query="MCP"
-mcp-pool docs search query="MCP"
-mcp-pool 'docs.search(query: "MCP")'
+mcp-cli docs
+mcp-cli docs list --schema
+mcp-cli docs.search query="MCP"
+mcp-cli docs search query="MCP"
+mcp-cli 'docs.search(query: "MCP")'
 ```
 
 The first two discover tools; the remaining forms call a tool. A server-first
@@ -244,7 +246,7 @@ a waiting indicator on stderr with the current phase and elapsed time.
 Discovery also shows the number of completed servers.
 The indicator clears before results or errors are printed. JSON, raw, plain,
 quiet, redirected output, CI, and `TERM=dumb` remain free of progress output.
-Set `MCP_POOL_NO_PROGRESS=1` to disable the indicator; the existing
+Set `MCP_CLI_NO_PROGRESS=1` to disable the indicator; the existing
 `MCPORTER_NO_SPINNER=1` setting is also honored. Proxy and bridge streams are
 never decorated with progress output.
 For MCP commands, `--plain` suppresses progress without changing the selected
@@ -349,7 +351,7 @@ client as EOF. Set `protocolVersion` explicitly for that server:
 {"mcpServers":{"1password":{"command":"1password-mcp","protocolVersion":"legacy"}}}
 ```
 
-Then run `mcp-pool list 1password` to verify tool discovery. This changes only
+Then run `mcp-cli list 1password` to verify tool discovery. This changes only
 negotiation; it does not authorize access to 1Password Environments.
 
 Server entries can use `allowedTools` or `blockedTools` arrays, with
@@ -363,17 +365,17 @@ or direct access to the upstream; they are not a global access-control boundary.
 ### Manage config explicitly
 
 ```sh
-mcp-pool config list --json           # local definitions, without discovery
-mcp-pool config get docs --json
-mcp-pool config doctor --json         # config and credential status, not a live probe
-mcp-pool config add echo --command npx --arg -y --arg @modelcontextprotocol/server-everything --arg stdio --dry-run
-mcp-pool config add remote https://example.com/mcp --scope project
-mcp-pool config add docs-copy --copy-from cursor:docs --scope project --dry-run
-mcp-pool config add docs-copy --copy-from vscode:docs --from PATH --protocol-version legacy
-mcp-pool --config .\.mcp\config.json config remove remote
-mcp-pool config login docs            # explicit auth
-mcp-pool config logout docs           # clear stored OAuth credentials
-mcp-pool config help
+mcp-cli config list --json           # local definitions, without discovery
+mcp-cli config get docs --json
+mcp-cli config doctor --json         # config and credential status, not a live probe
+mcp-cli config add echo --command npx --arg -y --arg @modelcontextprotocol/server-everything --arg stdio --dry-run
+mcp-cli config add remote https://example.com/mcp --scope project
+mcp-cli config add docs-copy --copy-from cursor:docs --scope project --dry-run
+mcp-cli config add docs-copy --copy-from vscode:docs --from PATH --protocol-version legacy
+mcp-cli --config .\.mcp\config.json config remove remote
+mcp-cli config login docs            # explicit auth
+mcp-cli config logout docs           # clear stored OAuth credentials
+mcp-cli config help
 ```
 
 `config list` and `config get` show transport details, command arguments, source,
@@ -422,23 +424,35 @@ If retirement fails, the config remains unchanged.
 Defaults use `~/.mcp/` on every platform (`%USERPROFILE%\.mcp\` on Windows).
 Home config and credentials remain `config.json` and `credentials.json` in that
 directory. Logs use `~/.mcp/logs/`. Unix server sockets use `~/.mcp/run/`, and
-the control socket is `~/.mcp/mcp-pool-control.sock`. Windows endpoints remain
+the control socket is `~/.mcp/mcp-cli-control.sock`. Windows endpoints remain
 home-scoped named pipes, not filesystem sockets. Unix socket directories are
 private (`0700`); symlinked application socket directories are rejected.
 
-Before upgrading from the platform-specific state location, stop the old daemon
-with the old executable (`mcp-pool daemon stop`). Old state is not migrated or
-automatically reattached from its former location. Config and credentials do not
-move. Long Unix home paths can still require a shorter `MCP_POOL_HOME`.
+Before upgrading, stop the old daemon with the old executable
+(`mcp-pool daemon stop`) before starting `mcp-cli`. Repeat this for each original
+`MCP_POOL_HOME` override with that same value. Socket names changed, so the
+new CLI cannot discover or retire old-brand daemons. Starting both can create
+duplicate upstreams that still share `.mcp` config and credentials. Old runtime
+state is not migrated. Config and credentials stay in `.mcp`; no data is moved
+or deleted. Long Unix home paths can still require a shorter `MCP_CLI_HOME`.
+The legacy `import mcp-pool` selector, `_mcp_pool_timeout_ms` local wire field,
+`__mcp_pool_commit` credential metadata, and `mcp-pool-legacy-v1` retirement
+journals retain their existing names for compatibility.
 
-`MCP_POOL_HOME` redirects the home config and home credential layer to
-`MCP_POOL_HOME/config/`, and keeps daemon state, sockets, and logs under
-`MCP_POOL_HOME/state/`. This override is unchanged. It does
-not relocate project config or project credentials. Use `MCP_POOL_CONFIG` or
+`MCP_CLI_HOME` redirects the home config and home credential layer to
+`MCP_CLI_HOME/config/`, and keeps daemon state, sockets, and logs under
+`MCP_CLI_HOME/state/`. This override is unchanged. It does
+not relocate project config or project credentials. Use `MCP_CLI_CONFIG` or
 `--config PATH` for a fully explicit configuration and adjacent credential scope.
 
-Set `MCP_POOL_CREDENTIALS_READ_ONLY=1` in the calling process to
+Set `MCP_CLI_CREDENTIALS_READ_ONLY=1` in the calling process to
 allow use of valid cached credentials without refresh or credential writes.
+`MCP_CLI_HOME`, `MCP_CLI_CONFIG`, `MCP_CLI_DEBUG`, `MCP_CLI_NO_PROGRESS`, and
+`MCP_CLI_RAW_UPSTREAM_STDERR` are primary names; corresponding `MCP_POOL_*`
+names remain fallback aliases. A set new value wins, even when empty. For
+read-only policy, either `MCP_CLI_CREDENTIALS_READ_ONLY=1` or
+`MCP_POOL_CREDENTIALS_READ_ONLY=1` enforces restriction; setting the other to
+`0` cannot weaken it.
 Expired credentials cannot refresh in this mode; auth and vault mutations fail.
 The read-only policy travels with the server request, including to an existing
 daemon that was started without the flag.
@@ -448,26 +462,26 @@ For example, this PowerShell sequence selects the home config explicitly while
 keeping daemon state in the repository and credentials read-only:
 
 ```powershell
-$env:MCP_POOL_HOME = Join-Path $PWD "target\mcp-validation"
-$env:MCP_POOL_CONFIG = Join-Path $HOME ".mcp\config.json"
-$env:MCP_POOL_CREDENTIALS_READ_ONLY = "1"
-mcp-pool list --json --exit-code
-mcp-pool daemon stop
+$env:MCP_CLI_HOME = Join-Path $PWD "target\mcp-validation"
+$env:MCP_CLI_CONFIG = Join-Path $HOME ".mcp\config.json"
+$env:MCP_CLI_CREDENTIALS_READ_ONLY = "1"
+mcp-cli list --json --exit-code
+mcp-cli daemon stop
 ```
 
 Authentication is explicit. `list`, `call`, resources, and `proxy` do not open
 a consent flow. They can use existing credentials; normal operation can refresh
 an expired token when a refresh token is available. Missing credentials require
-`mcp-pool auth SERVER` rather than automatic authorization. Provider availability,
+`mcp-cli auth SERVER` rather than automatic authorization. Provider availability,
 account permissions, and consent are not guaranteed by CLI compatibility.
 Discovery, calls, and resources accept `--no-oauth` to use valid cached OAuth
 tokens without refresh. This does not remove headers explicitly supplied in config.
 
 ```sh
-mcp-pool auth docs
-mcp-pool auth docs --no-browser        # do not launch a browser automatically
-mcp-pool vault set docs --tokens-file tokens.json
-mcp-pool vault clear docs
+mcp-cli auth docs
+mcp-cli auth docs --no-browser        # do not launch a browser automatically
+mcp-cli vault set docs --tokens-file tokens.json
+mcp-cli vault clear docs
 ```
 
 Credentials use `~/.mcp/credentials.json` and
@@ -478,7 +492,7 @@ An expired or invalid project credential never falls back to a home account.
 Refresh updates the selected credential store, not a copy of a rotating token.
 `auth`, `vault set`, and logout/clear target the active project scope;
 `--config PATH` targets credentials beside that config. To authorize at home,
-run `mcp-pool --config ~/.mcp/config.json auth SERVER`.
+run `mcp-cli --config ~/.mcp/config.json auth SERVER`.
 Clearing a project credential restores home fallback. Credential scopes also
 separate pooled connections, including projects using different accounts.
 Explicit `tokenCacheDir` still opts into that cache and can intentionally share
@@ -522,10 +536,10 @@ credentials for a provider or bypass its consent and registration requirements.
 ### Daemon control
 
 ```sh
-mcp-pool daemon start
-mcp-pool daemon status --json
-mcp-pool daemon restart
-mcp-pool daemon stop
+mcp-cli daemon start
+mcp-cli daemon status --json
+mcp-cli daemon restart
+mcp-cli daemon stop
 ```
 
 These commands use the same native pool broker, not a second mcporter daemon.
@@ -559,9 +573,9 @@ Top-level `serve` exposes selected keep-alive servers through an MCP bridge.
 It is different from `pool serve`, which runs the pool daemon's control socket.
 
 ```sh
-mcp-pool serve --stdio --servers docs
-mcp-pool serve --http 3333 --servers docs
-mcp-pool serve --http 3333 --servers docs --concurrency 8
+mcp-cli serve --stdio --servers docs
+mcp-cli serve --http 3333 --servers docs
+mcp-cli serve --http 3333 --servers docs --concurrency 8
 ```
 
 Stdio is the default. HTTP accepts `--http PORT` and an optional `--host HOST`;
@@ -643,8 +657,8 @@ Do not treat synthetic throughput as a hosted service's capacity or summed
 process RSS as unique physical memory.
 
 ```sh
-python3 benchmarks/run.py --products mcp-pool --mcp-pool target/release/mcp-pool --self-test
-python3 benchmarks/run.py --products mcp-pool --mcp-pool target/release/mcp-pool \
+python3 benchmarks/run.py --products mcp-cli --mcp-cli target/release/mcp-cli --self-test
+python3 benchmarks/run.py --products mcp-cli --mcp-cli target/release/mcp-cli \
   --cases bridge,hol --bridge-modes 1,8
 ```
 
@@ -685,31 +699,31 @@ The former top-level native `list` and `serve` are now `pool list` and
 
 ```sh
 # Define a stdio MCP (command + trailing args after --)
-mcp-pool add echo -- npx -y @modelcontextprotocol/server-everything stdio
+mcp-cli add echo -- npx -y @modelcontextprotocol/server-everything stdio
 
 # Define a remote HTTP/SSE MCP
-mcp-pool add remote --url https://example.com/mcp --transport http
+mcp-cli add remote --url https://example.com/mcp --transport http
 
 # Lifecycle (drives a long-lived daemon over a control socket)
-mcp-pool start echo        # pre-warm the pooled upstream (optional)
-mcp-pool status            # show all pools
-mcp-pool restart echo
-mcp-pool stop echo
-mcp-pool pool list         # configured servers; no discovery
-mcp-pool remove echo
+mcp-cli start echo        # pre-warm the pooled upstream (optional)
+mcp-cli status            # show all pools
+mcp-cli restart echo
+mcp-cli stop echo
+mcp-cli pool list         # configured servers; no discovery
+mcp-cli remove echo
 
 # Run the daemon explicitly (otherwise auto-launched on first command)
-mcp-pool pool serve
+mcp-cli pool serve
 
 # Bridge an agent's stdio to a pool socket. Put this in the agent's MCP config:
-#   command = "mcp-pool", args = ["proxy", "echo"]
+#   command = "mcp-cli", args = ["proxy", "echo"]
 # proxy is self-starting: if the upstream is already running it just attaches
 # (shared), otherwise it auto-starts the upstream (and the daemon) first. No
 # separate `start` step is required — `start` is only for pre-warming.
-mcp-pool proxy echo
+mcp-cli proxy echo
 ```
 
-Set `MCP_POOL_DEBUG=1` to enable diagnostic logging to the state dir.
+Set `MCP_CLI_DEBUG=1` to enable diagnostic logging to the state dir.
 
 `proxy NAME` and `pool proxy NAME` both resolve the merged `.mcp` configuration,
 including scoped credentials. Both accept `--config` and `--root`.

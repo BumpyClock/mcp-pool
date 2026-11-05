@@ -98,7 +98,7 @@ pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("credential store has no parent"))?;
     create_directory(parent)?;
     let suffix = oauth2::CsrfToken::new_random().secret().to_owned();
-    let staging = parent.join(format!(".mcp-pool-{}-{suffix}.pending", std::process::id()));
+    let staging = parent.join(format!(".mcp-cli-{}-{suffix}.pending", std::process::id()));
     let result = (|| {
         let mut file = private_file(&staging)?;
         file.write_all(bytes)?;

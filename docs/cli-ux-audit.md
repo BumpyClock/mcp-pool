@@ -2,7 +2,7 @@
 
 ## Contract
 
-Compare supported mcp-pool commands with mcporter using identical local MCP tool
+Compare supported mcp-cli commands with mcporter using identical local MCP tool
 schemas, calls, resources, and synthetic OAuth credentials. Check readable human
 output, useful help, reliable errors, and clean machine output. Native pool
 commands have no mcporter equivalent. Byte-for-byte parity and mcporter's
@@ -10,20 +10,20 @@ generator, SDK, record, and replay features are not goals.
 
 ## Reproduce
 
-Requires Python 3.11+, mcporter on PATH, and a built mcp-pool executable.
+Requires Python 3.11+, mcporter on PATH, and a built mcp-cli executable.
 The runner targets macOS/Linux. It does not qualify Windows behavior.
 
 ```sh
 cargo build --release --locked
 python3 -m unittest discover -s scripts -p 'test_cli_ux*.py' -v
 python3 scripts/cli_ux_audit.py \
-  --mcp-pool target/release/mcp-pool \
+  --mcp-cli target/release/mcp-cli \
   --output .test-artifacts/cli-ux-new
 ```
 
 Choose a new output directory for every run. `results.json` records arguments,
 exit code, stdout, stderr, and failed assertions for every scenario. Individual
-text transcripts support side-by-side review. The exit status gates mcp-pool;
+text transcripts support side-by-side review. The exit status gates mcp-cli;
 mcporter reference differences are reported separately. They require assessment
 against each product's contract rather than automatic adoption.
 
@@ -73,7 +73,7 @@ external tool calls are deliberately excluded from the runner.
 Use the existing release benchmark runner without changing its measurement logic:
 
 ```sh
-python3 benchmarks/run.py --mcp-pool "$PWD/target/release/mcp-pool" \
+python3 benchmarks/run.py --mcp-cli "$PWD/target/release/mcp-cli" \
   --cases cold,warm,memory --transports stdio,http --protocols legacy \
   --cold-rounds 5 --warm-rounds 12 --clients 1,8 --repeats 5 \
   --output benchmarks/results/cli-ux-new

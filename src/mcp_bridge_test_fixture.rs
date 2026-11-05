@@ -287,7 +287,7 @@ async fn initialize(remote: &mut BufReader<DuplexStream>) -> Result<()> {
     );
     anyhow::ensure!(
         request.pointer("/params/protocolVersion") == Some(&json!("2025-11-25"))
-            && request.pointer("/params/clientInfo/name") == Some(&json!("mcp-pool")),
+            && request.pointer("/params/clientInfo/name") == Some(&json!("mcp-cli")),
         "unexpected initialize metadata"
     );
     reply(

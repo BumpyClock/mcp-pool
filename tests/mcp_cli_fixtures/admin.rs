@@ -263,7 +263,7 @@ async fn discovery_reports_auth_failure_and_quiet_health_exit_code() -> io::Resu
     assert_eq!(response.pointer("/servers/2/status"), Some(&json!("auth")));
     assert_eq!(
         response.pointer("/servers/2/authCommand"),
-        Some(&json!("mcp-pool auth locked"))
+        Some(&json!("mcp-cli auth locked"))
     );
     let quiet = fixture.command(&["list", "--quiet"]).await?;
     assert!(!quiet.status.success());
@@ -327,7 +327,7 @@ async fn caller_read_only_policy_reaches_existing_daemon_without_refresh_or_writ
         vec!["call", "guarded.headers", "--output", "json"],
     ] {
         let output = fixture
-            .command_input_environment(&arguments, None, &[("MCP_POOL_CREDENTIALS_READ_ONLY", "1")])
+            .command_input_environment(&arguments, None, &[("MCP_CLI_CREDENTIALS_READ_ONLY", "1")])
             .await?;
         assert!(!output.status.success(), "{output:?}");
         assert_eq!(tokio::fs::read(&vault).await?, snapshot);

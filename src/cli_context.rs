@@ -151,7 +151,7 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
 
 pub(crate) fn warning(message: &str) {
     if WARNINGS.load(Ordering::SeqCst) {
-        eprintln!("[mcp-pool] {message}");
+        eprintln!("[mcp-cli] {message}");
     }
 }
 

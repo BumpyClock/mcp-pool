@@ -286,7 +286,7 @@ async fn probe(path: &Path, method: &str) -> Result<Option<Value>> {
             }
             Err(error) => return Err(error).context("Verifying legacy named-pipe owner"),
         };
-        stream.write_all(serde_json::to_string(&json!({"id":format!("mcp-pool-migration-{}",std::process::id()),"method":method,"params":{}}))?.as_bytes()).await?;
+        stream.write_all(serde_json::to_string(&json!({"id":format!("mcp-cli-migration-{}",std::process::id()),"method":method,"params":{}}))?.as_bytes()).await?;
         stream.flush().await?;
         let mut content = Vec::new();
         let mut buffer = vec![0u8; 4096];

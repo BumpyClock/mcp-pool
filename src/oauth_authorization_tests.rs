@@ -182,7 +182,7 @@ async fn read_only_environment_guard_prevents_refresh_even_in_new_process() -> R
             serde_json::to_string(&authentication)?,
         )
         .env("OAUTH_SYNTHETIC_READ_ONLY", "1")
-        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .env("MCP_CLI_CREDENTIALS_READ_ONLY", "1")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)

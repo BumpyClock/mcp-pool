@@ -332,7 +332,7 @@ async fn two_socket_clients_reuse_one_pool_with_different_request_deadlines() ->
     });
     #[cfg(windows)]
     let path = std::path::PathBuf::from(format!(
-        r"\\.\pipe\mcp-pool-deadline-{}-{port}",
+        r"\\.\pipe\mcp-cli-deadline-{}-{port}",
         std::process::id()
     ));
     #[cfg(unix)]

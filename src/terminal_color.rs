@@ -6,7 +6,7 @@ pub(crate) fn stdout_supports_ansi() -> bool {
         match enable_ansi(std::io::stdout().as_raw_handle()) {
             Ok(()) => true,
             Err(error) => {
-                eprintln!("mcp-pool: colored output unavailable; using plain output: {error}");
+                eprintln!("mcp-cli: colored output unavailable; using plain output: {error}");
                 false
             }
         }

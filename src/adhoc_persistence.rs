@@ -45,7 +45,7 @@ pub(crate) async fn persist(server: &ConfiguredServer, options: &AdHoc) -> Resul
         |_| async { Ok(()) },
     )
     .await?;
-    eprintln!("[mcp-pool] Saved ad-hoc server to {}", path.display());
+    eprintln!("[mcp-cli] Saved ad-hoc server to {}", path.display());
     Ok(())
 }
 

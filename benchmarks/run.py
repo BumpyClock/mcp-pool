@@ -27,10 +27,10 @@ def selection(value, choices):
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--mcp-pool", default=shutil.which("mcp-pool"))
+    parser.add_argument("--mcp-cli", dest="mcp_cli", default=shutil.which("mcp-cli"))
     parser.add_argument("--mcporter", default=shutil.which("mcporter"))
-    parser.add_argument("--products", type=lambda value: selection(value, ["mcp-pool", "mcporter"]),
-                        default=["mcp-pool", "mcporter"])
+    parser.add_argument("--products", type=lambda value: selection(value, ["mcp-cli", "mcporter"]),
+                        default=["mcp-cli", "mcporter"])
     parser.add_argument("--cases", type=lambda value: selection(value, ["cold", "warm", "bridge", "hol", "memory", "fixture"]),
                         default=["cold", "warm", "bridge", "hol", "memory"])
     parser.add_argument("--transports", type=lambda value: selection(value, ["stdio", "http"]),
@@ -38,7 +38,7 @@ def arguments():
     parser.add_argument("--protocols", type=lambda value: selection(value, ["legacy", "modern"]),
                         default=["legacy", "modern"])
     parser.add_argument("--bridge-modes", type=lambda value: [int(item) for item in selection(value, ["1", "8"])],
-                        default=[1], help="mcp-pool serve concurrency; mcporter is always unmodified")
+                        default=[1], help="mcp-cli serve concurrency; mcporter is always unmodified")
     parser.add_argument("--explicit-bridge-concurrency", action="store_true",
                         help="Also pass --concurrency 1. Omitted by default for installed-release checks.")
     parser.add_argument("--clients", type=lambda value: [int(item) for item in selection(value, ["1", "8"])],
@@ -192,7 +192,7 @@ def bridges(runtime, options, mode, kind):
     for _ in range(3):
         idle.append(runtime.snapshot())
         time.sleep(options.sample_interval)
-    return {"serve_concurrency": mode if runtime.product == "mcp-pool" and not direct else None,
+    return {"serve_concurrency": mode if runtime.product == "mcp-cli" and not direct else None,
             "mode_1_flag": "explicit" if options.explicit_bridge_concurrency else "default omitted",
             "raw_runs": rows, "after_bridge_disconnect_idle_samples": idle}
 
@@ -206,7 +206,7 @@ def run(options, results, result_path):
                 products = options.products if kind != "fixture" else options.products[:1]
                 for product in products:
                     binary = getattr(options, product.replace("-", "_"))
-                    modes = options.bridge_modes if kind in ("bridge", "hol") and product == "mcp-pool" else [1]
+                    modes = options.bridge_modes if kind in ("bridge", "hol") and product == "mcp-cli" else [1]
                     repetitions = range(options.cold_rounds) if kind == "cold" else [None]
                     for mode in modes:
                         for repeat in repetitions:

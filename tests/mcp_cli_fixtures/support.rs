@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
-const BINARY: &str = env!("CARGO_BIN_EXE_mcp-pool");
+const BINARY: &str = env!("CARGO_BIN_EXE_mcp-cli");
 
 #[path = "../common/fixture_home.rs"]
 mod fixture_home;
@@ -38,7 +38,7 @@ impl Fixture {
         ];
         let environment = json!({
             super::stdio::MARKER:"1", super::stdio::COUNTER:counter,
-            "MCP_POOL_TEST_VALUE":"synthetic environment",
+            "MCP_CLI_TEST_VALUE":"synthetic environment",
             "HOME":home, "USERPROFILE":home, "XDG_DATA_HOME":home
         });
         let contents = json!({"imports":[], "mcpServers":{
@@ -78,7 +78,7 @@ impl Fixture {
     async fn control_is_live(&self) -> bool {
         #[cfg(unix)]
         {
-            tokio::net::UnixStream::connect(self.home.join("state").join("mcp-pool-control.sock"))
+            tokio::net::UnixStream::connect(self.home.join("state").join("mcp-cli-control.sock"))
                 .await
                 .is_ok()
         }
@@ -90,7 +90,7 @@ impl Fixture {
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
             tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(format!(r"\\.\pipe\mcp-pool-{:08x}-control", hash as u32))
+                .open(format!(r"\\.\pipe\mcp-cli-{:08x}-control", hash as u32))
                 .is_ok()
         }
     }
@@ -172,7 +172,7 @@ impl Fixture {
             }
             Err(error) => {
                 let exit_status = child.try_wait();
-                let log_path = self.home.join("state").join("logs").join("mcp-pool.log");
+                let log_path = self.home.join("state").join("logs").join("mcp-cli.log");
                 let diagnostics = match std::fs::read_to_string(&log_path) {
                     Ok(contents) => contents
                         .lines()
@@ -250,8 +250,8 @@ impl Drop for Fixture {
         }
         match std::process::Command::new(BINARY)
             .args(["daemon", "stop"])
-            .env("MCP_POOL_HOME", &self.home)
-            .env("MCP_POOL_CONFIG", &self.config)
+            .env("MCP_CLI_HOME", &self.home)
+            .env("MCP_CLI_CONFIG", &self.config)
             .output()
         {
             Ok(output) if output.status.success() => {}
@@ -270,8 +270,8 @@ impl Drop for Fixture {
 pub(super) fn isolated_command(home: &std::path::Path, config: &std::path::Path) -> Command {
     let mut command = Command::new(BINARY);
     command
-        .env("MCP_POOL_HOME", home)
-        .env("MCP_POOL_CONFIG", config)
+        .env("MCP_CLI_HOME", home)
+        .env("MCP_CLI_CONFIG", config)
         .env("MCPORTER_DAEMON_DIR", home.join("synthetic-legacy"))
         .env("HOME", home)
         .env("USERPROFILE", home)
@@ -289,7 +289,7 @@ pub(super) fn isolated_command(home: &std::path::Path, config: &std::path::Path)
         .env_remove("MCPORTER_DAEMON_LOG")
         .env_remove("MCPORTER_DAEMON_LOG_PATH")
         .env_remove("MCPORTER_DAEMON_LOG_SERVERS")
-        .env_remove("MCP_POOL_CREDENTIALS_READ_ONLY")
+        .env_remove("MCP_CLI_CREDENTIALS_READ_ONLY")
         .kill_on_drop(true);
     command
 }

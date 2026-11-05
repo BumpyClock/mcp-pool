@@ -73,13 +73,13 @@ fn str_field<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
 fn print_status_table(data: Option<&serde_json::Value>, filter: Option<&str>, color: bool) {
     let (green, yellow, red, reset) = colors(color);
     let Some(data) = data else {
-        eprintln!("mcp-pool: status response omitted data");
+        eprintln!("mcp-cli: status response omitted data");
         std::process::exit(1);
     };
     let status: crate::types::PoolStatusResponse = match serde_json::from_value(data.clone()) {
         Ok(status) => status,
         Err(error) => {
-            eprintln!("mcp-pool: invalid status response: {error}");
+            eprintln!("mcp-cli: invalid status response: {error}");
             std::process::exit(1);
         }
     };

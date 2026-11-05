@@ -38,7 +38,7 @@ class Bridge:
                            "--protocol", self.runtime.protocol]
             else:
                 command = self.runtime.base + ["serve", "--stdio", "--servers", "fixture"]
-                if self.runtime.product == "mcp-pool" and (self.mode != 1 or self.explicit_mode):
+                if self.runtime.product == "mcp-cli" and (self.mode != 1 or self.explicit_mode):
                     command += ["--concurrency", str(self.mode)]
             self.process = self.runtime.spawn(command, "bridge")
             self.reader = threading.Thread(target=self.read, daemon=True)

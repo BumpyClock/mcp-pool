@@ -62,7 +62,7 @@ async fn assert_arguments(
     mut environment: BTreeMap<String, String>,
 ) -> io::Result<()> {
     environment.insert(FIXTURE.to_string(), "argv".to_string());
-    environment.insert("MCP_POOL_LITERAL".to_string(), "EXPANDED".to_string());
+    environment.insert("MCP_CLI_LITERAL".to_string(), "EXPANDED".to_string());
     let expected = arguments(literals);
     let (responses, mut receiver) = mpsc::channel(32);
     let mut handle = spawn(
@@ -116,8 +116,8 @@ async fn native_arguments_are_not_shell_syntax() -> io::Result<()> {
             "a&b",
             "a|b",
             "a^b",
-            "%MCP_POOL_LITERAL%",
-            "!MCP_POOL_LITERAL!",
+            "%MCP_CLI_LITERAL%",
+            "!MCP_CLI_LITERAL!",
         ],
         BTreeMap::new(),
     )
@@ -137,8 +137,8 @@ async fn batch_paths_and_argument_literals() -> io::Result<()> {
                 "a&b",
                 "a|b",
                 "a^b",
-                "%MCP_POOL_LITERAL%",
-                "!MCP_POOL_LITERAL!",
+                "%MCP_CLI_LITERAL%",
+                "!MCP_CLI_LITERAL!",
                 "(parentheses)",
                 "trailing slash \\",
                 "quote \" inside",
@@ -156,7 +156,7 @@ async fn batch_launcher_resolves_from_configured_path_and_pathext() -> io::Resul
     directory.launcher("pool-npm-launcher.cmd")?;
     assert_arguments(
         Path::new("pool-npm-launcher"),
-        &["argument with spaces", "a&b", "%MCP_POOL_LITERAL%"],
+        &["argument with spaces", "a&b", "%MCP_CLI_LITERAL%"],
         BTreeMap::from([
             (
                 "pAtH".to_string(),
@@ -184,7 +184,7 @@ async fn windows_launcher_takes_precedence_over_extensionless_shell_script() -> 
     for command in [Path::new("pool-npm-launcher"), command.as_path()] {
         assert_arguments(
             command,
-            &["argument with spaces", "a&b", "%MCP_POOL_LITERAL%"],
+            &["argument with spaces", "a&b", "%MCP_CLI_LITERAL%"],
             environment.clone(),
         )
         .await?;
@@ -199,7 +199,7 @@ async fn native_launcher_resolves_the_selected_path_candidate() -> io::Result<()
     std::fs::copy(std::env::current_exe()?, &executable)?;
     assert_arguments(
         Path::new("pool-native-launcher"),
-        &["argument with spaces", "a&b", "%MCP_POOL_LITERAL%"],
+        &["argument with spaces", "a&b", "%MCP_CLI_LITERAL%"],
         BTreeMap::from([
             (
                 "PATH".to_string(),

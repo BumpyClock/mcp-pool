@@ -70,7 +70,7 @@ async fn home_and_project_merge_before_environment_resolution_and_explicit_confi
         &fixture.home_config(),
         &json!({"mcpServers":{
             "home":{"command":"home-fixture"},
-            "same":{"command":"${MCP_POOL_INTENTIONALLY_UNSET_OVERRIDDEN}"}
+            "same":{"command":"${MCP_CLI_INTENTIONALLY_UNSET_OVERRIDDEN}"}
         }}),
     )?;
     fixture.write(
@@ -275,7 +275,7 @@ async fn start_all_reports_failure_and_project_native_starts_use_the_callers_con
     let fixture = Fixture::new()?;
     fixture.write(
         &fixture.home_config(),
-        &json!({"mcpServers":{"broken":{"command":"mcp-pool-intentionally-absent-executable"}}}),
+        &json!({"mcpServers":{"broken":{"command":"mcp-cli-intentionally-absent-executable"}}}),
     )?;
     let start = fixture.run(&["start"]).await?;
     assert!(!start.status.success());

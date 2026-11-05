@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use super::spawn;
 use crate::upstream::UpstreamHandle;
 
-const FIXTURE: &str = "MCP_POOL_PROCESS_FIXTURE";
+const FIXTURE: &str = "MCP_CLI_PROCESS_FIXTURE";
 const FIXTURE_TEST: &str = "upstream_stdio::tests::process_fixture";
 const FINAL_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":19,"result":{"final":true}}"#;
 
@@ -362,7 +362,7 @@ async fn stdout_io_failure_retires_process_tree() -> io::Result<()> {
 async fn missing_command_fails_before_returning_handle() {
     let (responses, _receiver) = mpsc::channel(1);
     let result = spawn(
-        "mcp-pool-test-nonexistent-executable-58c099ec".to_string(),
+        "mcp-cli-test-nonexistent-executable-58c099ec".to_string(),
         Vec::new(),
         BTreeMap::new(),
         responses,
@@ -381,7 +381,7 @@ async fn invalid_environment_fails_before_returning_handle() -> io::Result<()> {
         std::env::current_exe()?.to_string_lossy().into_owned(),
         Vec::new(),
         BTreeMap::from([(
-            "MCP_POOL_TEST_VALUE".to_string(),
+            "MCP_CLI_TEST_VALUE".to_string(),
             "embedded\0nul".to_string(),
         )]),
         responses,

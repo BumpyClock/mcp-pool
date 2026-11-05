@@ -170,7 +170,7 @@ pub(super) fn subscription_completion(id: &Value) -> Value {
             "_meta":{
                 "io.modelcontextprotocol/subscriptionId":id,
                 "io.modelcontextprotocol/serverInfo":{
-                    "name":"mcp-pool",
+                    "name":"mcp-cli",
                     "version":env!("CARGO_PKG_VERSION")
                 }
             }
@@ -269,16 +269,16 @@ fn initialize_result(
     }
 
     let instructions = match only_server {
-        Some(server) => format!("mcp-pool bridge exposing the '{server}' server."),
+        Some(server) => format!("mcp-cli bridge exposing the '{server}' server."),
         None => {
-            "mcp-pool bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool."
+            "mcp-cli bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool."
                 .to_owned()
         }
     };
     Ok(json!({
         "protocolVersion": negotiate_protocol_version(requested_version),
         "capabilities": {"tools": {}},
-        "serverInfo": {"name":"mcp-pool", "version":env!("CARGO_PKG_VERSION")},
+        "serverInfo": {"name":"mcp-cli", "version":env!("CARGO_PKG_VERSION")},
         "instructions": instructions,
     }))
 }
@@ -288,9 +288,9 @@ fn discover_result(
     supports_listen: bool,
 ) -> std::result::Result<Value, BridgeFailure> {
     let instructions = match only_server {
-        Some(server) => format!("mcp-pool bridge exposing the '{server}' server."),
+        Some(server) => format!("mcp-cli bridge exposing the '{server}' server."),
         None => {
-            "mcp-pool bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool."
+            "mcp-cli bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool."
                 .to_owned()
         }
     };
@@ -305,7 +305,7 @@ fn discover_result(
         "instructions":instructions,
         "_meta":{
             "io.modelcontextprotocol/serverInfo":{
-                "name":"mcp-pool",
+                "name":"mcp-cli",
                 "version":env!("CARGO_PKG_VERSION")
             }
         }

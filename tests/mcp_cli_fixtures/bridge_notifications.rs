@@ -49,7 +49,7 @@ async fn pooled_http_notifications_broadcast_survive_idle_and_cancel_on_disconne
             if diagnostics.read_line(&mut line).await? == 0 {
                 return Err(io::Error::other("bridge exited before listening"));
             }
-            if let Some(url) = line.strip_prefix("mcp-pool MCP bridge listening at ") {
+            if let Some(url) = line.strip_prefix("mcp-cli MCP bridge listening at ") {
                 return Ok(url.trim().to_owned());
             }
         }

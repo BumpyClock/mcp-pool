@@ -27,7 +27,7 @@ pub fn set_stderr_mirror(enabled: bool) {
 }
 
 pub fn init_from_env() {
-    if let Ok(value) = std::env::var("MCP_POOL_DEBUG") {
+    if let Some(value) = crate::environment::string("MCP_CLI_DEBUG") {
         let truthy = matches!(value.as_str(), "1" | "true" | "TRUE" | "yes");
         set_enabled(truthy);
     }
@@ -62,7 +62,7 @@ pub fn log(message: impl AsRef<str>) {
     }
     if let Some(result) = logging::write(message) {
         if let Err(error) = result {
-            eprintln!("mcp-pool: daemon log write failed: {error}");
+            eprintln!("mcp-cli: daemon log write failed: {error}");
         }
         return;
     }
@@ -70,16 +70,16 @@ pub fn log(message: impl AsRef<str>) {
         return;
     };
     if let Err(error) = std::fs::create_dir_all(&dir) {
-        eprintln!("mcp-pool: diagnostic log directory unavailable: {error}");
+        eprintln!("mcp-cli: diagnostic log directory unavailable: {error}");
         return;
     }
     let result = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("mcp-pool.log"))
+        .open(dir.join("mcp-cli.log"))
         .and_then(|mut file| writeln!(file, "{message}"));
     if let Err(error) = result {
-        eprintln!("mcp-pool: diagnostic log write failed: {error}");
+        eprintln!("mcp-cli: diagnostic log write failed: {error}");
     }
 }
 

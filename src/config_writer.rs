@@ -42,7 +42,7 @@ impl Drop for Guard {
         if let Err(error) = std::fs::remove_file(&self.path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
-            eprintln!("[mcp-pool] Could not remove config write guard: {error}");
+            eprintln!("[mcp-cli] Could not remove config write guard: {error}");
         }
     }
 }
@@ -126,6 +126,7 @@ where
         drop(file);
         Some(guard)
     };
+    #[cfg(windows)]
     drop(permissions);
     before(previous).await?;
     let outcome = (|| {

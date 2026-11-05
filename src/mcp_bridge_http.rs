@@ -68,7 +68,7 @@ pub(super) async fn serve(state: Arc<BridgeState>, host: String, port: u16) -> R
             notification_listeners: Arc::new(Semaphore::new(MAX_NOTIFICATION_LISTENERS)),
             shutdown,
         });
-    eprintln!("mcp-pool MCP bridge listening at http://{address}/mcp");
+    eprintln!("mcp-cli MCP bridge listening at http://{address}/mcp");
     axum::serve(listener, application)
         .with_graceful_shutdown(async move {
             wait_for_shutdown().await;
@@ -80,7 +80,7 @@ pub(super) async fn serve(state: Arc<BridgeState>, host: String, port: u16) -> R
 
 async fn wait_for_shutdown() {
     if tokio::signal::ctrl_c().await.is_err() {
-        eprintln!("mcp-pool MCP bridge could not register Ctrl-C shutdown.");
+        eprintln!("mcp-cli MCP bridge could not register Ctrl-C shutdown.");
     }
 }
 

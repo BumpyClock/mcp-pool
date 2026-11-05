@@ -11,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 
-const BINARY: &str = env!("CARGO_BIN_EXE_mcp-pool");
+const BINARY: &str = env!("CARGO_BIN_EXE_mcp-cli");
 #[path = "common/fixture_home.rs"]
 mod fixture_home;
 
@@ -22,13 +22,13 @@ struct Daemon {
 
 impl Daemon {
     async fn launch(config: Value) -> io::Result<Self> {
-        let home = fixture_home::create("mcp-pool-cli")?;
+        let home = fixture_home::create("mcp-cli-cli")?;
         tokio::fs::create_dir(home.join("config")).await?;
         tokio::fs::write(home.join("config").join("config.json"), config.to_string()).await?;
         let child = Command::new(BINARY)
             .args(["pool", "serve"])
-            .env("MCP_POOL_HOME", &home)
-            .env_remove("MCP_POOL_CONFIG")
+            .env("MCP_CLI_HOME", &home)
+            .env_remove("MCP_CLI_CONFIG")
             .current_dir(&home)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -52,7 +52,7 @@ impl Daemon {
     async fn control_is_live(&self) -> bool {
         #[cfg(unix)]
         {
-            tokio::net::UnixStream::connect(self.home.join("state").join("mcp-pool-control.sock"))
+            tokio::net::UnixStream::connect(self.home.join("state").join("mcp-cli-control.sock"))
                 .await
                 .is_ok()
         }
@@ -63,7 +63,7 @@ impl Daemon {
                 hash ^= u64::from(*byte);
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
-            let pipe = format!(r"\\.\pipe\mcp-pool-{:08x}-control", hash as u32);
+            let pipe = format!(r"\\.\pipe\mcp-cli-{:08x}-control", hash as u32);
             tokio::net::windows::named_pipe::ClientOptions::new()
                 .open(&pipe)
                 .is_ok()
@@ -75,8 +75,8 @@ impl Daemon {
             Duration::from_secs(15),
             Command::new(BINARY)
                 .args(args)
-                .env("MCP_POOL_HOME", &self.home)
-                .env_remove("MCP_POOL_CONFIG")
+                .env("MCP_CLI_HOME", &self.home)
+                .env_remove("MCP_CLI_CONFIG")
                 .current_dir(&self.home)
                 .kill_on_drop(true)
                 .output(),
@@ -94,8 +94,8 @@ impl Daemon {
     fn proxy(&self) -> io::Result<Child> {
         Command::new(BINARY)
             .args(["proxy", "echo"])
-            .env("MCP_POOL_HOME", &self.home)
-            .env_remove("MCP_POOL_CONFIG")
+            .env("MCP_CLI_HOME", &self.home)
+            .env_remove("MCP_CLI_CONFIG")
             .current_dir(&self.home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -353,7 +353,7 @@ async fn concurrent_proxy_clients_share_one_initialized_session() -> io::Result<
 #[tokio::test]
 async fn start_reports_missing_executable_and_keeps_daemon_usable() -> io::Result<()> {
     let daemon = Daemon::launch(json!({
-        "mcpServers": {"broken": {"command": "mcp-pool-definitely-missing-executable"}}
+        "mcpServers": {"broken": {"command": "mcp-cli-definitely-missing-executable"}}
     }))
     .await?;
     let output = daemon.command(&["start", "broken"]).await?;

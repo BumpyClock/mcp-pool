@@ -192,7 +192,7 @@ where
         std::io::Error::new(std::io::ErrorKind::TimedOut, "control socket unreachable")
     });
     Err(anyhow::anyhow!(
-        "could not reach daemon after launch ({error}). Try `mcp-pool pool serve` manually."
+        "could not reach daemon after launch ({error}). Try `mcp-cli pool serve` manually."
     ))
 }
 

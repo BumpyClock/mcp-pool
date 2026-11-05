@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 pub(crate) fn home_directory() -> Result<PathBuf> {
-    match std::env::var_os("MCP_POOL_HOME") {
+    match crate::environment::value("MCP_CLI_HOME") {
         Some(home) => Ok(PathBuf::from(home).join("config")),
         None => Ok(dirs::home_dir()
             .context("Home directory unavailable")?
@@ -42,7 +42,7 @@ pub(crate) fn project_config(root: Option<&Path>) -> Result<PathBuf> {
 }
 
 pub(crate) fn explicit(path: Option<PathBuf>) -> Result<Option<PathBuf>> {
-    path.or_else(|| std::env::var_os("MCP_POOL_CONFIG").map(PathBuf::from))
+    path.or_else(|| crate::environment::value("MCP_CLI_CONFIG").map(PathBuf::from))
         .map(|path| absolute(&path))
         .transpose()
 }

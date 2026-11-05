@@ -36,8 +36,8 @@ mod windows {
             .join("target")
             .join("fixture-host")
             .join("release")
-            .join("mcp-pool.exe");
-        let destination = fixture.0.join("bin").join("mcp-pool.exe");
+            .join("mcp-cli.exe");
+        let destination = fixture.0.join("bin").join("mcp-cli.exe");
         let other_directory = fixture.0.join("other working directory");
         std::fs::create_dir_all(
             source
@@ -50,7 +50,7 @@ mod windows {
                 .ok_or_else(|| io::Error::other("destination parent"))?,
         )?;
         std::fs::create_dir(&other_directory)?;
-        std::fs::copy(env!("CARGO_BIN_EXE_mcp-pool"), &source)?;
+        std::fs::copy(env!("CARGO_BIN_EXE_mcp-cli"), &source)?;
         std::fs::write(&destination, b"previous executable")?;
         std::fs::copy(
             repository.join("install.ps1"),
@@ -97,9 +97,7 @@ if (-not $?) { throw 'Installer failed' }
         assert_eq!(std::fs::read(&destination)?, std::fs::read(&source)?);
         let installed = Command::new(&destination).arg("--version").output().await?;
         assert!(installed.status.success());
-        assert!(
-            String::from_utf8_lossy(&installed.stdout).contains(env!("MCP_POOL_BUILD_VERSION"))
-        );
+        assert!(String::from_utf8_lossy(&installed.stdout).contains(env!("MCP_CLI_BUILD_VERSION")));
         let staging_files =
             std::fs::read_dir(fixture.0.join("bin"))?.collect::<io::Result<Vec<_>>>()?;
         assert_eq!(staging_files.len(), 1, "Installer left a staged executable");

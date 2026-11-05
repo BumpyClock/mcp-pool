@@ -1,19 +1,19 @@
-# AGENTS.md — mcp-pool
+# AGENTS.md — mcp-cli
 
 ## Core goal
-`mcp-pool` is a standalone, platform-independent CLI that lets users create and
+`mcp-cli` is a standalone, platform-independent CLI that lets users create and
 manage **MCP (Model Context Protocol) server pools**. Each pooled MCP server
 runs **exactly once** as a single upstream; many agent clients share it over a
 local socket, with JSON-RPC requests multiplexed by `id`.
 
 It is intentionally decoupled from any terminal emulator or agent runner. An
 agent (claude-code, codex, etc.) that would normally spawn its own MCP instead
-points its MCP config at `mcp-pool proxy <name>`, which bridges the agent's
+points its MCP config at `mcp-cli proxy <name>`, which bridges the agent's
 stdio to the shared pool socket. Net effect: N parallel agent sessions reuse one
 upstream process/connection instead of launching N copies.
 
 ## Architecture
-- **Daemon + control socket.** `mcp-pool pool serve` runs the daemon holding
+- **Daemon + control socket.** `mcp-cli pool serve` runs the daemon holding
   the `Pool` registry. Native `start`/`stop`/`restart`/`status` use its local
   control socket through `daemon_client.rs` and auto-launch it when absent.
   Callers resolve config and send definitions; the daemon does not load config
@@ -188,7 +188,7 @@ upstream process/connection instead of launching N copies.
 ## Paths & identity
 - Config: `~/.mcp/config.json` merged with `PROJECT/.mcp/config.json`;
   project entries replace same-named home entries before environment resolution.
-  `--config PATH`, then `MCP_POOL_CONFIG`, selects only that file.
+  `--config PATH`, then `MCP_CLI_CONFIG`, selects only that file.
   `MCPORTER_CONFIG` and legacy config paths are not read at runtime.
 - Project lookup uses the nearest `.mcp` directory or Git root, otherwise cwd.
   `--root` chooses an explicit project.
@@ -201,24 +201,27 @@ upstream process/connection instead of launching N copies.
   remains supported; legacy credential directories are not auto-discovered.
 - Default state: `~/.mcp/` on every platform (`%USERPROFILE%\.mcp\` on Windows).
   Logs use `~/.mcp/logs/`; Unix server sockets use `~/.mcp/run/`.
-  `MCP_POOL_HOME` overrides retain their `state/` layout. Stop the old daemon
+  `MCP_CLI_HOME` overrides retain their `state/` layout. Stop the old daemon
   with the old executable before upgrading; former runtime state is not migrated.
-- Control socket: `~/.mcp/mcp-pool-control.sock` /
-  `\\.\pipe\mcp-pool-<home-hash>-control`.
-- Per-server socket: `mcp-pool-<name>.sock` /
-  `\\.\pipe\mcp-pool-<home-hash>-<name>`.
-- `MCP_POOL_HOME` redirects home config/credentials to its `config/` directory
+- Control socket: `~/.mcp/mcp-cli-control.sock` /
+  `\\.\pipe\mcp-cli-<home-hash>-control`.
+- Per-server socket: `mcp-cli-<name>.sock` /
+  `\\.\pipe\mcp-cli-<home-hash>-<name>`.
+- `MCP_CLI_HOME` redirects home config/credentials to its `config/` directory
   and isolates daemon state; project and explicit credential paths remain separate.
-- `MCP_POOL_CREDENTIALS_READ_ONLY=1` allows valid cached credentials but blocks
+  Home, config, debug, progress, and raw-stderr settings accept corresponding
+  `MCP_POOL_*` fallback aliases. A set `MCP_CLI_*` value wins, including empty values.
+- `MCP_CLI_CREDENTIALS_READ_ONLY=1` or `MCP_POOL_CREDENTIALS_READ_ONLY=1` allows valid cached credentials but blocks
   refresh, consent, and vault mutations. The caller's policy is sent to the daemon,
   including an existing daemon started without the flag.
+  Setting either alias to `0` does not cancel the other's restriction.
   It does not block explicit config writes.
 - Config replacement/removal and credential mutations retire matching prior pool views.
   Failed retirement blocks the mutation; clients can be disconnected.
 - Credential reconciliation uses committed generation ordering, not token expiration.
   Divergent legacy rotating tokens without verified ordering fail closed.
   Explicit `auth --reset` replaces credentials; it is not a read-only validation step.
-- `MCP_POOL_DEBUG=1` enables diagnostic logging to the state dir.
+- `MCP_CLI_DEBUG=1` enables diagnostic logging to the state dir.
 
 ## Coding conventions (mandatory)
 - Rust edition **2024**. No `mod.rs`, no `lib.rs` — modules declared from `src/main.rs`.
@@ -235,6 +238,6 @@ upstream process/connection instead of launching N copies.
 
 ## Build / test
 - `cargo build` / `cargo test`.
-- Smoke: `mcp-pool add echo -- npx -y @modelcontextprotocol/server-everything stdio`,
+- Smoke: `mcp-cli add echo -- npx -y @modelcontextprotocol/server-everything stdio`,
   then `start` / `status` / `proxy echo` (feed a JSON-RPC `initialize` on stdin).
 - Two concurrent `proxy` clients must share one upstream without cross-wiring.

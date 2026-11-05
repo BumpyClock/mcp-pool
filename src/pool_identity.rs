@@ -60,7 +60,7 @@ fn bounded_name(label: &str, digest: &str, budget: usize) -> Result<String> {
     let minimum = "mcp-".len() + digest.len();
     if budget < minimum {
         bail!(
-            "The MCP pool socket directory leaves insufficient space for a safe server identity. Set MCP_POOL_HOME to a shorter directory."
+            "The MCP pool socket directory leaves insufficient space for a safe server identity. Set MCP_CLI_HOME to a shorter directory."
         );
     }
     let label_budget = budget.saturating_sub(minimum + 1);

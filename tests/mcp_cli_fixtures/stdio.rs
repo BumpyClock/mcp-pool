@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-pub const MARKER: &str = "MCP_POOL_TEST_STDIO";
-pub const COUNTER: &str = "MCP_POOL_TEST_COUNTER";
-pub const LIST_GATE: &str = "MCP_POOL_TEST_LIST_GATE";
-pub const LIST_SIGNAL: &str = "MCP_POOL_TEST_LIST_SIGNAL";
+pub const MARKER: &str = "MCP_CLI_TEST_STDIO";
+pub const COUNTER: &str = "MCP_CLI_TEST_COUNTER";
+pub const LIST_GATE: &str = "MCP_CLI_TEST_LIST_GATE";
+pub const LIST_SIGNAL: &str = "MCP_CLI_TEST_LIST_SIGNAL";
 
 fn await_list_gate() -> io::Result<bool> {
     let Some(gate) = std::env::var_os(LIST_GATE) else {
@@ -45,7 +45,7 @@ fn record(event: &str) -> io::Result<()> {
 }
 
 fn tool(name: &str) -> Value {
-    if std::env::var_os("MCP_POOL_TEST_REFERENCED_SCHEMA").is_some() {
+    if std::env::var_os("MCP_CLI_TEST_REFERENCED_SCHEMA").is_some() {
         return json!({"name":name,"inputSchema":{
             "$defs":{
                 "count":{"type":"integer","enum":[2,3]},
@@ -88,7 +88,7 @@ pub fn response(request: &Value) -> io::Result<Value> {
                 return Ok(json!({"jsonrpc":"2.0", "id":request.get("id"),
                     "error":{"code":-32000,"message":"fixture list gate never opened"}}));
             } else {
-                let echo = if std::env::var_os("MCP_POOL_TEST_DOTTED_TOOL").is_some() {
+                let echo = if std::env::var_os("MCP_CLI_TEST_DOTTED_TOOL").is_some() {
                     "echo.v2"
                 } else {
                     "echo"
@@ -119,13 +119,13 @@ pub fn response(request: &Value) -> io::Result<Value> {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 std::thread::sleep(Duration::from_millis(milliseconds));
-                if let Ok(result) = std::env::var("MCP_POOL_TEST_RESULT") {
+                if let Ok(result) = std::env::var("MCP_CLI_TEST_RESULT") {
                     let result: Value = serde_json::from_str(&result).map_err(io::Error::other)?;
                     return Ok(json!({"jsonrpc":"2.0","id":request.get("id"),"result":result}));
                 }
                 let payload = json!({"arguments":arguments,
                     "cwd":std::env::current_dir()?.canonicalize()?.to_string_lossy(),
-                    "environment":std::env::var("MCP_POOL_TEST_VALUE").unwrap_or_default()});
+                    "environment":std::env::var("MCP_CLI_TEST_VALUE").unwrap_or_default()});
                 json!({"content":[{"type":"text","text":payload.to_string()}],
                     "structuredContent":payload})
             }
@@ -140,7 +140,7 @@ pub fn response(request: &Value) -> io::Result<Value> {
         }
         "resources/read" => json!({"contents":[{
             "uri":parameters.get("uri"), "mimeType":"text/plain",
-            "text":std::env::var_os("MCP_POOL_TEST_RESOURCE_FILE")
+            "text":std::env::var_os("MCP_CLI_TEST_RESOURCE_FILE")
                 .map(std::fs::read_to_string).transpose()?
                 .unwrap_or_else(|| "fixture resource body".to_owned())
         }]}),

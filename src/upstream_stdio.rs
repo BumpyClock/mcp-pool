@@ -193,7 +193,7 @@ async fn read_responses(stdout: ChildStdout, responses: mpsc::Sender<String>) ->
 
 /// A closed stderr pipe alone does not establish that the upstream process exited.
 async fn read_stderr(stderr: ChildStderr) -> io::Result<()> {
-    let raw = std::env::var("MCP_POOL_RAW_UPSTREAM_STDERR")
+    let raw = crate::environment::string("MCP_CLI_RAW_UPSTREAM_STDERR")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))
         .unwrap_or(false);
     let mut reader = BufReader::new(stderr);
@@ -314,7 +314,7 @@ mod options_tests {
             vec![
                 "-NoProfile".into(),
                 "-Command".into(),
-                "[Console]::WriteLine((Get-Location).Path); [Console]::WriteLine($env:MCP_POOL_TRANSPORT_TEST_VALUE); [Console]::WriteLine($env:SystemRoot)".into(),
+                "[Console]::WriteLine((Get-Location).Path); [Console]::WriteLine($env:MCP_CLI_TRANSPORT_TEST_VALUE); [Console]::WriteLine($env:SystemRoot)".into(),
             ],
             std::env::var("SystemRoot").map_err(io::Error::other)?,
         );
@@ -323,12 +323,12 @@ mod options_tests {
             "sh".to_string(),
             vec![
                 "-c".into(),
-                "pwd; printf '%s\\n' \"$MCP_POOL_TRANSPORT_TEST_VALUE\" \"$HOME\"".into(),
+                "pwd; printf '%s\\n' \"$MCP_CLI_TRANSPORT_TEST_VALUE\" \"$HOME\"".into(),
             ],
             std::env::var("HOME").map_err(io::Error::other)?,
         );
         let environment = BTreeMap::from([(
-            "MCP_POOL_TRANSPORT_TEST_VALUE".into(),
+            "MCP_CLI_TRANSPORT_TEST_VALUE".into(),
             "synthetic-env-value".into(),
         )]);
         let (responses, mut receiver) = mpsc::channel(8);
@@ -371,7 +371,7 @@ mod options_tests {
                 vec![
                     "/d".into(),
                     "/c".into(),
-                    "echo %MCP_POOL_TRANSPORT_TEST_VALUE%&echo %USERPROFILE%".into(),
+                    "echo %MCP_CLI_TRANSPORT_TEST_VALUE%&echo %USERPROFILE%".into(),
                 ],
                 "%USERPROFILE%",
             )
@@ -383,14 +383,14 @@ mod options_tests {
                 "/bin/sh".into(),
                 vec![
                     "-c".into(),
-                    "printf '%s\\n' \"$MCP_POOL_TRANSPORT_TEST_VALUE\" \"${HOME-unset}\"".into(),
+                    "printf '%s\\n' \"$MCP_CLI_TRANSPORT_TEST_VALUE\" \"${HOME-unset}\"".into(),
                 ],
                 "unset",
             )
         };
         let (responses, mut receiver) = mpsc::channel(4);
         let environment = BTreeMap::from([(
-            "MCP_POOL_TRANSPORT_TEST_VALUE".into(),
+            "MCP_CLI_TRANSPORT_TEST_VALUE".into(),
             "synthetic-captured-value".into(),
         )]);
         let mut handle =

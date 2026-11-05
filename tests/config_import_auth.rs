@@ -46,7 +46,7 @@ async fn auth_copy_is_opt_in_private_redacted_and_idempotent() -> Result<()> {
     let config = preservation::Snapshot::decorate(&fixture.home_config())?;
     let denied = fixture
         .command(&fixture.project)
-        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .env("MCP_CLI_CREDENTIALS_READ_ONLY", "1")
         .args(&with_auth)
         .output()
         .await?;
@@ -90,7 +90,7 @@ async fn auth_copy_is_opt_in_private_redacted_and_idempotent() -> Result<()> {
     assert_eq!(std::fs::read(destination(&fixture)?)?, saved);
     let readonly = fixture
         .command(&fixture.project)
-        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .env("MCP_CLI_CREDENTIALS_READ_ONLY", "1")
         .args(&with_auth)
         .output()
         .await?;
@@ -170,7 +170,7 @@ async fn explicit_directory_auth_is_copied_not_shared_and_used_by_pooled_calls()
     fixture.success(&preview).await?;
     let denied = fixture
         .command(&fixture.project)
-        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .env("MCP_CLI_CREDENTIALS_READ_ONLY", "1")
         .args(arguments)
         .output()
         .await?;
@@ -279,7 +279,7 @@ async fn auth_import_respects_selection_scope_and_read_only_policy() -> Result<(
     )?;
     let denied = fixture
         .command(&fixture.project)
-        .env("MCP_POOL_CREDENTIALS_READ_ONLY", "1")
+        .env("MCP_CLI_CREDENTIALS_READ_ONLY", "1")
         .args(["import", "mcporter", "remote", "--include-auth"])
         .output()
         .await?;

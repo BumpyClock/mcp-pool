@@ -158,7 +158,7 @@ async fn definitive_legacy_disconnect_allows_same_proxy_restart_without_replay()
     });
     #[cfg(windows)]
     let path = std::path::PathBuf::from(format!(
-        r"\\.\pipe\mcp-pool-http-retirement-{}-{port}",
+        r"\\.\pipe\mcp-cli-http-retirement-{}-{port}",
         std::process::id(),
     ));
     #[cfg(unix)]

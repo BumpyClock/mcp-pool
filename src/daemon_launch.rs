@@ -2,6 +2,10 @@ use anyhow::{Context, Result};
 use std::ffi::OsString;
 
 #[cfg(unix)]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "The detached daemon must outlive the caller's Tokio runtime."
+)]
 pub(crate) fn spawn_detached(arguments: &[OsString]) -> Result<()> {
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(std::env::current_exe()?);
@@ -13,7 +17,7 @@ pub(crate) fn spawn_detached(arguments: &[OsString]) -> Result<()> {
         .stderr(std::process::Stdio::null());
     command
         .spawn()
-        .context("Starting the existing mcp-pool broker")?;
+        .context("Starting the existing mcp-cli broker")?;
     Ok(())
 }
 
@@ -61,7 +65,7 @@ pub(crate) fn spawn_detached(arguments: &[OsString]) -> Result<()> {
         )
     };
     if created == 0 {
-        return Err(std::io::Error::last_os_error()).context("Starting detached mcp-pool broker");
+        return Err(std::io::Error::last_os_error()).context("Starting detached mcp-cli broker");
     }
     let mut error = None;
     for handle in [process.hThread, process.hProcess] {

@@ -15,9 +15,9 @@ mod support;
 
 use support::{Fixture, RpcProcess, initialize, parse_json};
 
-const MARKER: &str = "MCP_POOL_PROTOCOL_FIXTURE";
-const MODE: &str = "MCP_POOL_PROTOCOL_MODE";
-const COUNTER: &str = "MCP_POOL_PROTOCOL_COUNTER";
+const MARKER: &str = "MCP_CLI_PROTOCOL_FIXTURE";
+const MODE: &str = "MCP_CLI_PROTOCOL_MODE";
+const COUNTER: &str = "MCP_CLI_PROTOCOL_COUNTER";
 
 async fn configure(fixture: &Fixture, mode: &str, preference: &str) -> io::Result<()> {
     let configuration = json!({"mcpServers":{"protocol":{

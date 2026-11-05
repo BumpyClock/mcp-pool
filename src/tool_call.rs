@@ -104,7 +104,7 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
     if let Ok(result) = &outcome
         && let Err(error) = artifacts::save_images(result, parsed.save_images.as_deref()).await
     {
-        eprintln!("[mcp-pool] Tool result completed; image export failed: {error:#}");
+        eprintln!("[mcp-cli] Tool result completed; image export failed: {error:#}");
         rendered?;
         return Err(error).context("Image export failed after the completed tool result was rendered; do not retry the tool call");
     }

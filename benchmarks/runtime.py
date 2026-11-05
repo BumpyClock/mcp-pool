@@ -97,8 +97,8 @@ class Runtime:
             "XDG_CONFIG_HOME": str(self.root / "x"), "XDG_DATA_HOME": str(self.root / "d"),
             "XDG_CACHE_HOME": str(self.root / "k"), "XDG_STATE_HOME": str(self.root / "s"),
             "XDG_RUNTIME_DIR": str(self.root / "r"), "TMPDIR": str(self.root / "t"),
-            "MCP_POOL_HOME": str(self.root), "MCPORTER_DAEMON_DIR": str(self.root / "m"),
-            "MCP_POOL_CREDENTIALS_READ_ONLY": "1", "NO_PROXY": "127.0.0.1,localhost",
+            "MCP_CLI_HOME": str(self.root), "MCPORTER_DAEMON_DIR": str(self.root / "m"),
+            "MCP_CLI_CREDENTIALS_READ_ONLY": "1", "NO_PROXY": "127.0.0.1,localhost",
         })
 
     def __enter__(self):
@@ -160,7 +160,7 @@ class Runtime:
         return stdout, row
 
     def start_daemon(self):
-        command = ["pool", "serve"] if self.product == "mcp-pool" else ["daemon", "start", "--foreground"]
+        command = ["pool", "serve"] if self.product == "mcp-cli" else ["daemon", "start", "--foreground"]
         self.daemon = self.spawn(self.base + command, "daemon", pipes=False)
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -171,7 +171,7 @@ class Runtime:
                 status = json.loads(stdout)
                 ready = isinstance(status, dict) and (
                     status.get("running") is True
-                    if self.product == "mcp-pool" else isinstance(status.get("pid"), int))
+                    if self.product == "mcp-cli" else isinstance(status.get("pid"), int))
                 if ready:
                     return
             except (RuntimeError, json.JSONDecodeError):

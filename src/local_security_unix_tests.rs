@@ -27,10 +27,10 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.0) {
-            if error.kind() != io::ErrorKind::NotFound {
-                eprintln!("could not remove isolated socket test directory: {error}");
-            }
+        if let Err(error) = fs::remove_dir_all(&self.0)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("could not remove isolated socket test directory: {error}");
         }
     }
 }
@@ -61,13 +61,13 @@ fn concurrent_fixtures_use_distinct_private_directories_and_clean_up() -> io::Re
     Ok(())
 }
 
-#[test]
-fn long_checkout_paths_do_not_extend_socket_fixtures() -> io::Result<()> {
+#[tokio::test]
+async fn long_checkout_paths_do_not_extend_socket_fixtures() -> io::Result<()> {
     let directory = TestDirectory::create()?;
     let checkout = directory.0.join("checkout".repeat(20));
     fs::create_dir(&checkout)?;
     assert!(checkout.as_os_str().as_encoded_bytes().len() > 104);
-    let output = std::process::Command::new(std::env::current_exe()?)
+    let output = tokio::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
             "local_security::unix::tests::hardens_only_the_application_socket_directories",
@@ -75,7 +75,8 @@ fn long_checkout_paths_do_not_extend_socket_fixtures() -> io::Result<()> {
             "--test-threads=1",
         ])
         .current_dir(&checkout)
-        .output()?;
+        .output()
+        .await?;
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -155,17 +156,18 @@ async fn missing_endpoint_allows_bind_repair_but_existing_endpoint_requires_priv
     Ok(())
 }
 
-#[test]
-fn private_directory_binding_does_not_change_concurrent_file_permissions() -> io::Result<()> {
-    let output = std::process::Command::new(std::env::current_exe()?)
+#[tokio::test]
+async fn private_directory_binding_does_not_change_concurrent_file_permissions() -> io::Result<()> {
+    let output = tokio::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
             "local_security::unix::tests::private_directory_umask_fixture",
             "--nocapture",
             "--test-threads=1",
         ])
-        .env("MCP_POOL_UMASK_FIXTURE", "1")
-        .output()?;
+        .env("MCP_CLI_UMASK_FIXTURE", "1")
+        .output()
+        .await?;
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -177,7 +179,7 @@ fn private_directory_binding_does_not_change_concurrent_file_permissions() -> io
 
 #[tokio::test]
 async fn private_directory_umask_fixture() -> io::Result<()> {
-    if std::env::var_os("MCP_POOL_UMASK_FIXTURE").is_none() {
+    if std::env::var_os("MCP_CLI_UMASK_FIXTURE").is_none() {
         return Ok(());
     }
     let original = unsafe { libc::umask(0o022) };
@@ -233,7 +235,7 @@ async fn refuses_to_change_shared_or_unsafe_parent_directories() -> io::Result<(
 async fn hardens_only_the_application_socket_directories() -> io::Result<()> {
     let directory = TestDirectory::create()?;
     let state = directory.0.join("state");
-    let application = state.join("mcp-pool");
+    let application = state.join("mcp-cli");
     let run = application.join("run");
     fs::create_dir_all(&run)?;
     fs::set_permissions(&application, fs::Permissions::from_mode(0o755))?;
@@ -253,12 +255,12 @@ async fn hardens_only_the_application_socket_directories() -> io::Result<()> {
     Ok(())
 }
 
-#[test]
-fn socket_binding_works_from_a_long_working_directory() -> io::Result<()> {
+#[tokio::test]
+async fn socket_binding_works_from_a_long_working_directory() -> io::Result<()> {
     let directory = TestDirectory::create()?;
     let checkout = directory.0.join("checkout".repeat(20));
     fs::create_dir(&checkout)?;
-    let output = std::process::Command::new(std::env::current_exe()?)
+    let output = tokio::process::Command::new(std::env::current_exe()?)
         .args([
             "--exact",
             "local_security::unix::tests::hardens_only_the_application_socket_directories",
@@ -266,7 +268,8 @@ fn socket_binding_works_from_a_long_working_directory() -> io::Result<()> {
             "--test-threads=1",
         ])
         .current_dir(&checkout)
-        .output()?;
+        .output()
+        .await?;
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -299,7 +302,7 @@ async fn refuses_symlink_and_non_socket_endpoints_without_removing_them() -> io:
     assert_eq!(fs::read(&regular)?, b"not a socket");
 
     let state = directory.0.join("state");
-    for name in ["mcp-pool", ".mcp"] {
+    for name in ["mcp-cli", ".mcp"] {
         let real_application = state.join(format!("real-{name}"));
         let linked_application = state.join(name);
         fs::create_dir_all(&real_application)?;

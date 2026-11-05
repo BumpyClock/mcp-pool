@@ -141,7 +141,7 @@ async fn imported_unavailable_server_reports_failure_with_opt_in_health_exit_cod
     fixture.write(
         &source,
         &json!({"mcpServers":{"offline":{
-            "command":"mcp-pool-intentionally-absent-import-fixture"
+            "command":"mcp-cli-intentionally-absent-import-fixture"
         }}}),
     )?;
     fixture

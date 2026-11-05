@@ -4,10 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-const ENV_HOME: &str = "MCP_POOL_HOME";
-
 pub fn state_dir() -> io::Result<PathBuf> {
-    if let Ok(custom) = std::env::var(ENV_HOME) {
+    if let Some(custom) = crate::environment::value("MCP_CLI_HOME") {
         return Ok(PathBuf::from(custom).join("state"));
     }
     let home = dirs::home_dir()
@@ -23,8 +21,7 @@ pub fn run_dir() -> io::Result<PathBuf> {
 /// Windows named pipes use a stable per-home hash because their namespace is global.
 #[cfg(windows)]
 fn home_scope_hash() -> String {
-    let seed = std::env::var(ENV_HOME)
-        .ok()
+    let seed = crate::environment::string("MCP_CLI_HOME")
         .or_else(|| dirs::home_dir().map(|path| path.to_string_lossy().into_owned()))
         .unwrap_or_default();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -45,12 +42,12 @@ fn unix_socket_path(resolved: io::Result<PathBuf>, file_name: &str) -> PathBuf {
 pub fn control_socket_path() -> PathBuf {
     #[cfg(unix)]
     {
-        unix_socket_path(state_dir(), "mcp-pool-control.sock")
+        unix_socket_path(state_dir(), "mcp-cli-control.sock")
     }
     #[cfg(windows)]
     {
         let scope = home_scope_hash();
-        PathBuf::from(format!(r"\\.\pipe\mcp-pool-{scope}-control"))
+        PathBuf::from(format!(r"\\.\pipe\mcp-cli-{scope}-control"))
     }
 }
 
@@ -58,12 +55,12 @@ pub fn server_socket_path(name: &str) -> PathBuf {
     let safe = sanitize_socket_name(name);
     #[cfg(unix)]
     {
-        unix_socket_path(run_dir(), &format!("mcp-pool-{safe}.sock"))
+        unix_socket_path(run_dir(), &format!("mcp-cli-{safe}.sock"))
     }
     #[cfg(windows)]
     {
         let scope = home_scope_hash();
-        PathBuf::from(format!(r"\\.\pipe\mcp-pool-{scope}-{safe}"))
+        PathBuf::from(format!(r"\\.\pipe\mcp-cli-{scope}-{safe}"))
     }
 }
 
@@ -174,8 +171,8 @@ impl ServerDef {
 mod tests {
     use super::*;
 
-    #[test]
-    fn state_directory_defaults_to_mcp_home_and_preserves_overrides() -> io::Result<()> {
+    #[tokio::test]
+    async fn state_directory_defaults_to_mcp_home_and_preserves_overrides() -> io::Result<()> {
         let home = dirs::home_dir()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
         for (custom, expected) in [
@@ -185,19 +182,20 @@ mod tests {
                 PathBuf::from("custom-pool-home/state"),
             ),
         ] {
-            let mut command = std::process::Command::new(std::env::current_exe()?);
+            let mut command = tokio::process::Command::new(std::env::current_exe()?);
             command
                 .args([
                     "--exact",
                     "config::tests::state_directory_fixture",
                     "--nocapture",
                 ])
-                .env("MCP_POOL_EXPECTED_STATE", expected)
-                .env_remove(ENV_HOME);
+                .env("MCP_CLI_EXPECTED_STATE", expected)
+                .env_remove("MCP_CLI_HOME")
+                .env_remove("MCP_POOL_HOME");
             if let Some(custom) = custom {
-                command.env(ENV_HOME, custom);
+                command.env("MCP_CLI_HOME", custom);
             }
-            let output = command.output()?;
+            let output = command.output().await?;
             assert!(output.status.success(), "{output:?}");
         }
         Ok(())
@@ -205,7 +203,7 @@ mod tests {
 
     #[test]
     fn state_directory_fixture() -> io::Result<()> {
-        let Some(expected) = std::env::var_os("MCP_POOL_EXPECTED_STATE") else {
+        let Some(expected) = std::env::var_os("MCP_CLI_EXPECTED_STATE") else {
             return Ok(());
         };
         let expected = PathBuf::from(expected);
@@ -213,13 +211,10 @@ mod tests {
         #[cfg(unix)]
         {
             assert_eq!(run_dir()?, expected.join("run"));
-            assert_eq!(
-                control_socket_path(),
-                expected.join("mcp-pool-control.sock")
-            );
+            assert_eq!(control_socket_path(), expected.join("mcp-cli-control.sock"));
             assert_eq!(
                 server_socket_path("fixture"),
-                expected.join("run/mcp-pool-fixture.sock")
+                expected.join("run/mcp-cli-fixture.sock")
             );
         }
         Ok(())

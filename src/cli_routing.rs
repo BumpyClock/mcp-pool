@@ -14,7 +14,7 @@ pub(super) fn parser(native: bool) -> clap::Command {
     let mut parser = super::Cli::command();
     if native {
         parser = parser
-            .bin_name("mcp-pool pool")
+            .bin_name("mcp-cli pool")
             .about("Manage native MCP pools")
             .after_help(
                 "MCP discovery and tool commands are available outside the pool namespace.",

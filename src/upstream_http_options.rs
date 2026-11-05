@@ -77,9 +77,9 @@ impl Options {
                 .await
                 .map_err(|_| {
                     if auth.read_only {
-                        "HTTP authorization unavailable: read-only policy blocks refresh; remove MCP_POOL_CREDENTIALS_READ_ONLY only for explicitly authorized `mcp-pool auth SERVER`"
+                        "HTTP authorization unavailable: read-only policy blocks refresh; remove MCP_CLI_CREDENTIALS_READ_ONLY and MCP_POOL_CREDENTIALS_READ_ONLY only for explicitly authorized `mcp-cli auth SERVER`"
                     } else if auth.cached_only {
-                        "HTTP authorization unavailable: --no-oauth permits valid cached credentials only; run `mcp-pool auth SERVER` explicitly before retrying"
+                        "HTTP authorization unavailable: --no-oauth permits valid cached credentials only; run `mcp-cli auth SERVER` explicitly before retrying"
                     } else {
                         "HTTP authorization could not be refreshed"
                     }

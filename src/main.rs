@@ -12,6 +12,7 @@ mod daemon;
 mod daemon_client;
 mod daemon_commands;
 mod diagnostics;
+mod environment;
 mod jsonrpc;
 mod local_security;
 mod mcp_bridge;

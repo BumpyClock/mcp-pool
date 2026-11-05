@@ -250,13 +250,13 @@ fn environment_expands_in_supported_fields() -> Result<()> {
 fn missing_environment_variables_are_explicit_errors() -> Result<()> {
     for field in ["env", "headers"] {
         let contents = format!(
-            "{{\"mcpServers\":{{\"test\":{{\"command\":\"node\",\"{field}\":{{\"value\":\"${{MCP_POOL_SYNTHETIC_MISSING}}\"}}}}}}}}"
+            "{{\"mcpServers\":{{\"test\":{{\"command\":\"node\",\"{field}\":{{\"value\":\"${{MCP_CLI_SYNTHETIC_MISSING}}\"}}}}}}}}"
         );
         let error = parse(&contents)
             .err()
             .ok_or_else(|| anyhow!("missing variable was accepted"))?;
         let message = format!("{error:#}");
-        assert!(message.contains("MCP_POOL_SYNTHETIC_MISSING"));
+        assert!(message.contains("MCP_CLI_SYNTHETIC_MISSING"));
         assert!(message.contains("missing"));
         assert!(message.contains(field));
     }
@@ -447,7 +447,7 @@ fn legacy_imports_require_explicit_copy_with_source_diagnostics() -> Result<()> 
         .first()
         .ok_or_else(|| anyhow!("warning missing"))?;
     assert!(warning.contains("2 legacy import(s)"));
-    assert!(warning.contains("mcp-pool import SOURCE"));
+    assert!(warning.contains("mcp-cli import SOURCE"));
     assert!(warning.contains(&configuration.source.to_string_lossy().to_string()));
     assert!(parse(r#"{"mcpServers":{}}"#)?.warnings.is_empty());
     assert!(

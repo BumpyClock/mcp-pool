@@ -116,7 +116,7 @@ impl Drop for WindowsSecurity {
             && !unsafe { windows_sys::Win32::Foundation::LocalFree(self.descriptor.cast()) }
                 .is_null()
         {
-            eprintln!("[mcp-pool] Could not free config security descriptor");
+            eprintln!("[mcp-cli] Could not free config security descriptor");
         }
     }
 }

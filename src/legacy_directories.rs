@@ -102,7 +102,7 @@ pub(super) fn upgrade(directory: &Path) -> Result<()> {
 fn verify_windows_directory(directory: &Path) -> Result<()> {
     let script = r#"
 $ErrorActionPreference='Stop'
-$path=$env:MCP_POOL_MIGRATION_DIRECTORY
+$path=$env:MCP_CLI_MIGRATION_DIRECTORY
 $owner=[Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl=Get-Acl -LiteralPath $path
 if($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $owner.Value){throw 'Foreign directory owner'}
@@ -120,7 +120,7 @@ foreach($rule in $acl.Access){
         .join("v1.0")
         .join("powershell.exe");
     let output = std::process::Command::new(executable)
-        .env("MCP_POOL_MIGRATION_DIRECTORY", directory)
+        .env("MCP_CLI_MIGRATION_DIRECTORY", directory)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()?;
     if !output.status.success() {

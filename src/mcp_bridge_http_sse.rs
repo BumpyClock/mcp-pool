@@ -163,7 +163,7 @@ async fn run_subscription(
                 match completed {
                     Some(Ok(Ok(()))) | None => {}
                     Some(Ok(Err(()))) | Some(Err(_)) => {
-                        eprintln!("mcp-pool bridge notification listener task failed.");
+                        eprintln!("mcp-cli bridge notification listener task failed.");
                         break;
                     }
                 }
@@ -203,14 +203,14 @@ async fn forward_notifications(
                         }
                     } else {
                         eprintln!(
-                            "mcp-pool bridge notification from '{server}' exceeded the SSE message limit."
+                            "mcp-cli bridge notification from '{server}' exceeded the SSE message limit."
                         );
                         return Err(());
                     }
                 }
             }
             Ok(None) | Err(_) => {
-                eprintln!("mcp-pool bridge notification listener for '{server}' disconnected.");
+                eprintln!("mcp-cli bridge notification listener for '{server}' disconnected.");
                 loop {
                     tokio::select! {
                         _ = sender.closed() => return Ok(()),

@@ -162,8 +162,8 @@ async fn copy_dry_run_and_write_preserve_absent_environment_references() -> Resu
         &source,
         &json!({"mcpServers":{"remote":{
             "url":"https://example.invalid/mcp",
-            "headers":{"X-Reference":"$env:MCP_POOL_COPY_DEFINITELY_ABSENT_9F2A"},
-            "env":{"REFERENCE":"${MCP_POOL_COPY_DEFINITELY_ABSENT_9F2A}"}
+            "headers":{"X-Reference":"$env:MCP_CLI_COPY_DEFINITELY_ABSENT_9F2A"},
+            "env":{"REFERENCE":"${MCP_CLI_COPY_DEFINITELY_ABSENT_9F2A}"}
         }}}),
     )?;
     let path = source.to_str().context("source path")?;
@@ -181,17 +181,17 @@ async fn copy_dry_run_and_write_preserve_absent_environment_references() -> Resu
     let preview = fixture.success(&dry_run).await?;
     assert!(!fixture.home_config().exists());
     assert!(
-        !String::from_utf8_lossy(&preview.stdout).contains("MCP_POOL_COPY_DEFINITELY_ABSENT_9F2A")
+        !String::from_utf8_lossy(&preview.stdout).contains("MCP_CLI_COPY_DEFINITELY_ABSENT_9F2A")
     );
     fixture.success(&args).await?;
     let document: Value = serde_json::from_slice(&std::fs::read(fixture.home_config())?)?;
     assert_eq!(
         document.pointer("/mcpServers/alias/headers/X-Reference"),
-        Some(&json!("$env:MCP_POOL_COPY_DEFINITELY_ABSENT_9F2A"))
+        Some(&json!("$env:MCP_CLI_COPY_DEFINITELY_ABSENT_9F2A"))
     );
     assert_eq!(
         document.pointer("/mcpServers/alias/env/REFERENCE"),
-        Some(&json!("${MCP_POOL_COPY_DEFINITELY_ABSENT_9F2A}"))
+        Some(&json!("${MCP_CLI_COPY_DEFINITELY_ABSENT_9F2A}"))
     );
     fixture.finish().await
 }

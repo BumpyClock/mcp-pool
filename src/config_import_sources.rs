@@ -190,7 +190,7 @@ fn source_paths(source: ImportKind, project: &Path, home: &Path) -> Vec<PathBuf>
             xdg.join("Cursor").join("User").join("mcp.json"),
         ],
         ImportKind::Windsurf => {
-            let mut paths = vec![
+            let paths = vec![
                 home.join(".codeium")
                     .join("windsurf")
                     .join("mcp_config.json"),
@@ -204,12 +204,13 @@ fn source_paths(source: ImportKind, project: &Path, home: &Path) -> Vec<PathBuf>
                     .join("mcp_config.json"),
             ];
             #[cfg(windows)]
-            paths.push(
-                app_data
+            let paths = paths
+                .into_iter()
+                .chain([app_data
                     .join("Codeium")
                     .join("windsurf")
-                    .join("mcp_config.json"),
-            );
+                    .join("mcp_config.json")])
+                .collect();
             paths
         }
         ImportKind::VsCode => {

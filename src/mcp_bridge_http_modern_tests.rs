@@ -84,9 +84,9 @@ async fn modern_http_negotiation_and_requests_follow_discovery_envelope() -> Res
         Some(&json!({
             "supportedVersions":[MODERN_VERSION],
             "capabilities":{"tools":{"listChanged":true}},
-            "instructions":"mcp-pool bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool.",
+            "instructions":"mcp-cli bridge exposing configured keep-alive servers. Tool names are namespaced as server__tool.",
             "_meta":{"io.modelcontextprotocol/serverInfo":{
-                "name":"mcp-pool",
+                "name":"mcp-cli",
                 "version":env!("CARGO_PKG_VERSION")
             }}
         }))
@@ -313,7 +313,7 @@ async fn modern_listener_completes_before_graceful_http_shutdown() -> Result<()>
         completion
             .pointer("/result/_meta/io.modelcontextprotocol~1serverInfo/name")
             .and_then(Value::as_str),
-        Some("mcp-pool")
+        Some("mcp-cli")
     );
     assert!(
         timeout(Duration::from_millis(750), response.chunk())

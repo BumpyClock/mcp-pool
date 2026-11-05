@@ -13,10 +13,10 @@ pub(super) fn proxy() -> Arc<SocketProxy> {
         NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
     );
     #[cfg(windows)]
-    let socket = PathBuf::from(format!(r"\\.\pipe\mcp-pool-lifecycle-{identity}"));
+    let socket = PathBuf::from(format!(r"\\.\pipe\mcp-cli-lifecycle-{identity}"));
     #[cfg(unix)]
     let socket = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!(".mcp-pool-lifecycle-{identity}.sock"));
+        .join(format!(".mcp-cli-lifecycle-{identity}.sock"));
     Arc::new(SocketProxy::new(
         identity,
         socket,

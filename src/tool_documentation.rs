@@ -260,7 +260,7 @@ impl Style {
             })
             .collect::<serde_json::Map<_, _>>();
         format!(
-            "mcp-pool call {}.{} --args '{}'",
+            "mcp-cli call {}.{} --args '{}'",
             server,
             tool.get("name").and_then(Value::as_str).unwrap_or("tool"),
             Value::Object(arguments)

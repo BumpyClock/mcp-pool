@@ -29,7 +29,7 @@ async fn nested_help_is_specific_and_never_loads_configuration() -> io::Result<(
         ("vault", "set", "--tokens-file"),
         ("vault", "clear", "Remove the active OAuth vault entry"),
     ] {
-        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcp-pool"))
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcp-cli"))
             .args([
                 "--config",
                 "missing-cli-presentation-config.json",
@@ -43,7 +43,7 @@ async fn nested_help_is_specific_and_never_loads_configuration() -> io::Result<(
         assert!(output.stderr.is_empty(), "{output:?}");
         let help = String::from_utf8_lossy(&output.stdout);
         assert!(
-            help.starts_with(&format!("Usage: mcp-pool {command} {subcommand}")),
+            help.starts_with(&format!("Usage: mcp-cli {command} {subcommand}")),
             "{help}"
         );
         assert!(help.contains(detail), "missing {detail} in {help}");
@@ -217,10 +217,10 @@ async fn doctor_keeps_untrusted_config_aliases_out_of_command_suggestions() -> i
     let output = fixture.success(&["config", "doctor"]).await?;
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
-        text.contains("Run mcp-pool auth --help for explicit authorization options."),
+        text.contains("Run mcp-cli auth --help for explicit authorization options."),
         "{text}"
     );
-    assert!(!text.contains("Run mcp-pool auth alpha$("), "{text}");
+    assert!(!text.contains("Run mcp-cli auth alpha$("), "{text}");
     let report = parse_json(&fixture.success(&["config", "doctor", "--json"]).await?)?;
     assert_eq!(report.pointer("/servers/0/name"), Some(&json!(name)));
     assert!(!fixture.counter.exists());
@@ -282,7 +282,7 @@ async fn doctor_multiple_stores_preserves_output_and_never_mutates() -> io::Resu
             "  alpha: cached OAuth credentials valid",
             "  array: OAuth not configured (no usable cached credentials)",
             "  beta: no usable cached OAuth credentials",
-            "    Run mcp-pool auth beta to authorize explicitly.",
+            "    Run mcp-cli auth beta to authorize explicitly.",
             "  fixture: OAuth not configured (no usable cached credentials)",
             "  gamma: cached OAuth credentials expired (refresh available on use)",
         ]

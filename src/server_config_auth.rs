@@ -42,11 +42,14 @@ pub(crate) fn authentication_server(
             json!(environment.expand(directory)?),
         );
     }
-    if let Some(read_only) = environment.get("MCP_POOL_CREDENTIALS_READ_ONLY")? {
-        projection.insert(
-            "env".to_owned(),
-            json!({"MCP_POOL_CREDENTIALS_READ_ONLY":read_only}),
-        );
+    let mut auth_environment = Map::new();
+    for name in crate::environment::READ_ONLY_NAMES {
+        if let Some(read_only) = environment.get(name)? {
+            auth_environment.insert(name.to_owned(), json!(read_only));
+        }
+    }
+    if !auth_environment.is_empty() {
+        projection.insert("env".to_owned(), Value::Object(auth_environment));
     }
     let mut configuration = normalize_document(
         absolute_source(source)?,
@@ -62,4 +65,39 @@ pub(crate) fn authentication_server(
         .servers
         .remove(name)
         .context("Missing authentication server")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authentication_projection_preserves_both_read_only_names() -> Result<()> {
+        let entry = json!({
+            "baseUrl": "https://synthetic.invalid/mcp",
+            "env": {
+                "MCP_CLI_CREDENTIALS_READ_ONLY": "0",
+                "MCP_POOL_CREDENTIALS_READ_ONLY": "1"
+            }
+        });
+        let source = std::env::current_dir()?.join("synthetic-config.json");
+        let server = authentication_server(&source, "synthetic", &entry)?;
+        assert_eq!(
+            server
+                .definition
+                .env
+                .get("MCP_CLI_CREDENTIALS_READ_ONLY")
+                .map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            server
+                .definition
+                .env
+                .get("MCP_POOL_CREDENTIALS_READ_ONLY")
+                .map(String::as_str),
+            Some("1")
+        );
+        Ok(())
+    }
 }

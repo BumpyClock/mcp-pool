@@ -290,9 +290,9 @@ async fn serialized_auth_policy_errors_are_actionable_after_tokens_expire() -> T
                 .await?;
             let response = message(&mut receiver).await?;
             let expected = if cached_only {
-                "HTTP authorization unavailable: --no-oauth permits valid cached credentials only; run `mcp-pool auth SERVER` explicitly before retrying"
+                "HTTP authorization unavailable: --no-oauth permits valid cached credentials only; run `mcp-cli auth SERVER` explicitly before retrying"
             } else {
-                "HTTP authorization unavailable: read-only policy blocks refresh; remove MCP_POOL_CREDENTIALS_READ_ONLY only for explicitly authorized `mcp-pool auth SERVER`"
+                "HTTP authorization unavailable: read-only policy blocks refresh; remove MCP_CLI_CREDENTIALS_READ_ONLY and MCP_POOL_CREDENTIALS_READ_ONLY only for explicitly authorized `mcp-cli auth SERVER`"
             };
             assert_eq!(
                 response.pointer("/error/message").and_then(Value::as_str),
@@ -337,7 +337,7 @@ async fn legacy_discovery_preserves_safe_auth_policy_guidance() -> TestResult {
             "read-only policy blocks refresh"
         };
         assert!(message.contains(expected), "{message}");
-        assert!(message.contains("mcp-pool auth SERVER"));
+        assert!(message.contains("mcp-cli auth SERVER"));
         assert!(!message.contains("synthetic"));
         assert!(
             timeout(Duration::from_millis(50), listener.accept())

@@ -284,7 +284,7 @@ pub fn socket_alive(path: &Path) -> bool {
 pub fn socket_name_from_path(path: &Path) -> Option<String> {
     let file_name = path.file_name()?.to_string_lossy();
     file_name
-        .strip_prefix("mcp-pool-")?
+        .strip_prefix("mcp-cli-")?
         .strip_suffix(".sock")
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
@@ -297,13 +297,13 @@ mod options_tests {
     #[test]
     fn socket_names_require_the_complete_nonempty_endpoint_pattern() {
         for (filename, expected) in [
-            ("mcp-pool-echo.sock", Some("echo")),
-            ("mcp-pool-name.sock.sock", Some("name.sock")),
-            ("mcp-pool-écho.sock", Some("écho")),
-            ("mcp-pool-.sock", None),
-            ("mcp-pool-echo", None),
+            ("mcp-cli-echo.sock", Some("echo")),
+            ("mcp-cli-name.sock.sock", Some("name.sock")),
+            ("mcp-cli-écho.sock", Some("écho")),
+            ("mcp-cli-.sock", None),
+            ("mcp-cli-echo", None),
             ("other-echo.sock", None),
-            ("mcp-pool-echo.sock.backup", None),
+            ("mcp-cli-echo.sock.backup", None),
         ] {
             assert_eq!(
                 socket_name_from_path(Path::new(filename)).as_deref(),

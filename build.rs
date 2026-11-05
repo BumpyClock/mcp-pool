@@ -35,14 +35,14 @@ fn main() {
 
     if !source_fingerprint.errors.is_empty() {
         println!(
-            "cargo:warning=mcp-pool build identity: {} source fingerprint inputs could not be read",
+            "cargo:warning=mcp-cli build identity: {} source fingerprint inputs could not be read",
             source_fingerprint.errors.len()
         );
     }
     if let Some(warning) = git_identity.warning {
         println!("cargo:warning={warning}");
     }
-    println!("cargo:rustc-env=MCP_POOL_BUILD_VERSION={build_version}");
+    println!("cargo:rustc-env=MCP_CLI_BUILD_VERSION={build_version}");
 }
 
 struct GitIdentity {
@@ -75,14 +75,14 @@ fn git_identity(manifest_dir: &Path) -> GitIdentity {
         (Some(commit), Err(())) => GitIdentity {
             value: format!("git.{}.unknown", sanitize_component(&commit)),
             warning: Some(
-                "mcp-pool build identity: git status was unavailable; source fingerprint remains authoritative"
+                "mcp-cli build identity: git status was unavailable; source fingerprint remains authoritative"
                     .to_owned(),
             ),
         },
         (None, _) => GitIdentity {
             value: "nogit".to_owned(),
             warning: Some(
-                "mcp-pool build identity: git metadata unavailable; using source fingerprint"
+                "mcp-cli build identity: git metadata unavailable; using source fingerprint"
                     .to_owned(),
             ),
         },

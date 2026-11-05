@@ -35,8 +35,8 @@ async fn installer_atomically_replaces_an_executable_and_preserves_it_on_build_f
         .join("target")
         .join("fixture-host")
         .join("release")
-        .join("mcp-pool");
-    let destination = fixture.0.join("bin").join("mcp-pool");
+        .join("mcp-cli");
+    let destination = fixture.0.join("bin").join("mcp-cli");
     let tools = fixture.0.join("mock-tools");
     let other_directory = fixture.0.join("other working directory");
     for directory in [
@@ -49,7 +49,7 @@ async fn installer_atomically_replaces_an_executable_and_preserves_it_on_build_f
             directory.ok_or_else(|| io::Error::other("fixture directory has no parent"))?,
         )?;
     }
-    std::fs::copy(env!("CARGO_BIN_EXE_mcp-pool"), &source)?;
+    std::fs::copy(env!("CARGO_BIN_EXE_mcp-cli"), &source)?;
     std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o751))?;
     std::fs::write(&destination, b"previous executable")?;
     std::fs::copy(repository.join("install.sh"), fixture.0.join("install.sh"))?;
@@ -116,6 +116,6 @@ set -eu
     }
     let installed = Command::new(&destination).arg("--version").output().await?;
     assert!(installed.status.success());
-    assert!(String::from_utf8_lossy(&installed.stdout).contains(env!("MCP_POOL_BUILD_VERSION")));
+    assert!(String::from_utf8_lossy(&installed.stdout).contains(env!("MCP_CLI_BUILD_VERSION")));
     Ok(())
 }

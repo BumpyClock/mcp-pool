@@ -65,7 +65,7 @@ async fn dotted_tool_selectors_and_filter_aliases_apply_in_real_cli_commands() -
         .get_mut("env")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| io::Error::other("missing fixture environment"))?
-        .insert("MCP_POOL_TEST_DOTTED_TOOL".to_owned(), json!("1"));
+        .insert("MCP_CLI_TEST_DOTTED_TOOL".to_owned(), json!("1"));
     server.insert("allowed_tools".to_owned(), json!(["echo.v2"]));
     tokio::fs::write(
         &fixture.config,
@@ -453,7 +453,7 @@ async fn config_administration_is_local_and_invalid_input_does_not_launch_upstre
     assert_eq!(server.get("transport"), Some(&json!("stdio")));
     assert_eq!(server.get("cwd"), Some(&json!(fixture.working_directory)));
     assert_eq!(
-        server.pointer("/env/MCP_POOL_TEST_VALUE"),
+        server.pointer("/env/MCP_CLI_TEST_VALUE"),
         Some(&json!("[redacted]"))
     );
     assert!(!server.to_string().contains("synthetic environment"));

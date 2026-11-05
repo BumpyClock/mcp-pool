@@ -126,7 +126,7 @@ impl McpClient {
                 json!({
                     "protocolVersion": mcp_protocol::LEGACY_VERSION,
                     "capabilities": {},
-                    "clientInfo": {"name": "mcp-pool", "version": env!("CARGO_PKG_VERSION")}
+                    "clientInfo": {"name": "mcp-cli", "version": env!("CARGO_PKG_VERSION")}
                 }),
             )
             .await?;

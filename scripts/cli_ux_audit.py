@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run CLI UX scenarios against isolated mcp-pool and mcporter; retain transcripts.
+"""Run CLI UX scenarios against isolated mcp-cli and mcporter; retain transcripts.
 
 Only synthetic credentials, disposable config, and loopback servers are used.
 No browser consent, external tool calls, legacy retirement, or user daemon access.
@@ -68,7 +68,7 @@ class Audit:
             "HOME": str(self.root / "home"), "USERPROFILE": str(self.root / "home"),
             "XDG_DATA_HOME": str(self.root / "data"), "XDG_CACHE_HOME": str(self.root / "cache"),
             "XDG_CONFIG_HOME": str(self.root / "config"), "XDG_STATE_HOME": str(self.root / "state"),
-            "XDG_RUNTIME_DIR": str(self.root / "runtime"), "MCP_POOL_HOME": str(self.root / "pool"),
+            "XDG_RUNTIME_DIR": str(self.root / "runtime"), "MCP_CLI_HOME": str(self.root / "pool"),
             "MCPORTER_DAEMON_DIR": str(self.root / "legacy"), "NO_COLOR": "1", "TERM": "dumb",
             "NO_PROXY": "127.0.0.1,localhost",
         })
@@ -182,7 +182,7 @@ class Audit:
             self.processes.retire(process)
 
     def foreground(self):
-        arguments = ["pool", "serve"] if self.product == "mcp-pool" else ["daemon", "start", "--foreground"]
+        arguments = ["pool", "serve"] if self.product == "mcp-cli" else ["daemon", "start", "--foreground"]
         process = self.processes.spawn(self.base + arguments, env=self.environment, cwd=self.root,
                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -280,8 +280,8 @@ class Audit:
             self.processes.retire(process)
 
     def exercise(self):
-        for command in HELP + (NATIVE if self.product == "mcp-pool" else []):
-            expected = (f"Usage: mcp-pool {' '.join(command)}",) if self.product == "mcp-pool" and len(command) == 2 else ()
+        for command in HELP + (NATIVE if self.product == "mcp-cli" else []):
+            expected = (f"Usage: mcp-cli {' '.join(command)}",) if self.product == "mcp-cli" and len(command) == 2 else ()
             self.run("help-" + ("-".join(command) or "root"), command + ["--help"], contains=expected)
         self.run("help-command", ["help", "call"], contains=("Usage",))
         for command in ("config", "daemon"):
@@ -315,7 +315,7 @@ class Audit:
                  machine=True, expected_json={"message": "hello", "count": 2, "verbose": True})
         for mode in ("auto", "text", "markdown", "json", "raw"):
             self.run("call-" + mode, ["call", "fixture.echo", "message=hello", "--output", mode], contains=("hello",),
-                     machine=mode == "json" or (mode == "raw" and self.product == "mcp-pool"))
+                     machine=mode == "json" or (mode == "raw" and self.product == "mcp-cli"))
         self.run("call-plain-text", ["call", "fixture.plain_text"], contains=("Hello from local fixture.",))
         self.run("call-stdin", ["call", "fixture.echo", "--args", "-", "--output", "json"],
                  stdin='{"message":"stdin-check"}', contains=("stdin-check",), machine=True)
@@ -338,7 +338,7 @@ class Audit:
         self.run("auth-cached", ["auth", "protected", "--no-browser"])
         self.run("login-cached", ["config", "login", "protected", "--no-browser"])
         self.run("doctor-cached", ["config", "doctor"],
-                 contains=("protected: cached OAuth credentials valid",) if self.product == "mcp-pool" else ())
+                 contains=("protected: cached OAuth credentials valid",) if self.product == "mcp-cli" else ())
         self.run("logout", ["config", "logout", "protected"])
         self.run("vault-stdin", ["vault", "set", "protected", "--stdin"], stdin=self.tokens.read_text())
         self.run("vault-clear", ["vault", "clear", "protected"])
@@ -346,7 +346,7 @@ class Audit:
         self.run("config-added", ["config", "get", "added", "--json"], machine=True, contains=("added",))
         self.run("config-remove", ["config", "remove", "added"])
         self.run("config-removed", ["config", "get", "added"], expected=1)
-        if self.product == "mcp-pool":
+        if self.product == "mcp-cli":
             self.run("import-dry", ["import", "mcporter", "--from", str(self.source), "--dry-run"], contains=("imported",))
             self.run("config-import", ["config", "import", "mcporter", "--from", str(self.source)], contains=("imported",))
             self.run("config-import-repeat", ["config", "import", "mcporter", "--from", str(self.source)], contains=("imported",))
@@ -372,7 +372,7 @@ class Audit:
         self.run("daemon-stop", ["daemon", "stop"])
         self.run("daemon-stopped", ["daemon", "status", "--json"], machine=True)
         self.foreground()
-        if self.product == "mcp-pool":
+        if self.product == "mcp-cli":
             original = self.config.read_text()
             try:
                 self.config.write_text(self.source.read_text())
@@ -384,13 +384,13 @@ class Audit:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mcp-pool", default="target/debug/mcp-pool")
+    parser.add_argument("--mcp-cli", default="target/debug/mcp-cli")
     parser.add_argument("--mcporter", default="mcporter")
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args()
     arguments.output.mkdir(parents=True, exist_ok=False)
     reports = {}
-    for product, executable in (("mcp-pool", arguments.mcp_pool), ("mcporter", arguments.mcporter)):
+    for product, executable in (("mcp-cli", arguments.mcp_cli), ("mcporter", arguments.mcporter)):
         binary = shutil.which(executable)
         if binary is None:
             parser.error(f"Executable not found: {executable}")
@@ -404,11 +404,11 @@ def main():
             finally:
                 audit.close()
         failures = [row for row in audit.rows if row["problems"]]
-        kind = "need review" if product == "mcp-pool" else "reference differences"
+        kind = "need review" if product == "mcp-cli" else "reference differences"
         print(f"{product}: {len(audit.rows)} scenarios; {len(failures)} {kind}")
         for row in failures:
             print(f"  {row['label']}: {'; '.join(row['problems'])}")
-    return int(any(row["problems"] for row in reports["mcp-pool"]))
+    return int(any(row["problems"] for row in reports["mcp-cli"]))
 
 
 if __name__ == "__main__":

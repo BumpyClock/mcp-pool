@@ -187,7 +187,7 @@ const LIST_JSON: &str = r#"{
         "rawMessage": "MCP protocol discovery failed; no upstream or operation was replayed. For a legacy server that cannot handle discovery, set protocolVersion to legacy: JSON-RPC error -32000: HTTP upstream returned status 401; request was not replayed",
         "statusCode": 401
       },
-      "authCommand": "mcp-pool auth beta-auth"
+      "authCommand": "mcp-cli auth beta-auth"
     },
     {
       "name": "gamma-error",
@@ -310,7 +310,7 @@ const SERVER_TEXT: &str = r#"alpha
   function echo(label: string, count?: number, enabled?: boolean, delay_ms?: number);
 
   Examples:
-    mcp-pool call alpha.echo --args '{"label":"value"}'
+    mcp-cli call alpha.echo --args '{"label":"value"}'
 
   1 tools · Nms · STDIO <fixture>
 "#;

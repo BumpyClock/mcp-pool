@@ -19,8 +19,8 @@ use output::print_response_data;
 
 #[derive(Parser)]
 #[command(
-    name = "mcp-pool",
-    version = env!("MCP_POOL_BUILD_VERSION"),
+    name = "mcp-cli",
+    version = env!("MCP_CLI_BUILD_VERSION"),
     about = "Pool MCP servers — one upstream, many clients",
     after_help = "MCP commands:\n  list, describe, list-tools  Discover tools\n  resource, resources        Read or discover resources\n  auth                       Authorize a configured server\n  vault                      Manage cached credentials\n  config                     Manage merged MCP configuration\n  import                     Copy external MCP definitions\n  daemon                     Manage the MCP pool daemon\n  serve                      Expose pooled tools over stdio or HTTP\n\nNative commands:\n  pool list|serve             Inspect or run the native pool daemon\n  start|stop|restart|status   Control pooled servers\n  add|remove|proxy|shutdown   Manage native pool entries"
 )]
@@ -32,7 +32,7 @@ pub struct Cli {
     /// Project directory for project config and credential selection.
     #[arg(long, global = true)]
     pub root: Option<std::path::PathBuf>,
-    /// Enable diagnostic logging (also via MCP_POOL_DEBUG=1).
+    /// Enable diagnostic logging (also via MCP_CLI_DEBUG=1).
     #[arg(long, global = true)]
     pub debug: bool,
 
@@ -179,7 +179,7 @@ pub async fn run(mut arguments: Vec<String>) -> anyhow::Result<()> {
             .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
     {
         println!(
-            "Usage: mcp-pool pool list [--json|--plain]\nList configured native pool entries without connecting to MCP servers."
+            "Usage: mcp-cli pool list [--json|--plain]\nList configured native pool entries without connecting to MCP servers."
         );
         return Ok(());
     }
@@ -427,7 +427,7 @@ async fn control_round_trip(
         let message = response
             .error
             .unwrap_or_else(|| "unknown error".to_string());
-        eprintln!("mcp-pool: {message}");
+        eprintln!("mcp-cli: {message}");
         std::process::exit(1);
     }
 

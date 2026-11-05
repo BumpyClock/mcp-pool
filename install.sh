@@ -12,7 +12,7 @@ usage() {
         "Default BIN_DIR: \$HOME/.local/bin"
 }
 
-bin_dir=${MCP_POOL_BIN_DIR:-"$HOME/.local/bin"}
+bin_dir=${MCP_CLI_BIN_DIR-${MCP_POOL_BIN_DIR-"$HOME/.local/bin"}}
 case "$#" in
     0) ;;
     1)
@@ -46,8 +46,8 @@ bin_dir=$(CDPATH= cd -- "$bin_dir" && pwd -P) ||
 host_target=$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')
 [ -n "$host_target" ] ||
     die "could not determine the Rust host target; the existing executable was not changed"
-source_path=$target_dir/$host_target/release/mcp-pool
-destination_path=$bin_dir/mcp-pool
+source_path=$target_dir/$host_target/release/mcp-cli
+destination_path=$bin_dir/mcp-cli
 
 if ! (
     cd "$repo_root" &&
@@ -78,7 +78,7 @@ if [ -e "$destination_path" ]; then
         die "install destination is unwritable; the existing executable was retained: $destination_path"
 fi
 
-temporary_path=$(mktemp "$bin_dir/.mcp-pool.install.XXXXXX") ||
+temporary_path=$(mktemp "$bin_dir/.mcp-cli.install.XXXXXX") ||
     die "could not create a temporary install file in $bin_dir"
 cleanup() {
     if [ -n "${temporary_path:-}" ] && [ -e "$temporary_path" ]; then
@@ -134,9 +134,9 @@ installed_version=$("$destination_path" --version) ||
 printf 'Installed executable: %s\nInstalled version: %s\n' \
     "$destination_path" "$installed_version"
 
-selected_command=$(command -v mcp-pool 2>/dev/null || true)
+selected_command=$(command -v mcp-cli 2>/dev/null || true)
 if [ -z "$selected_command" ]; then
-    printf '%s\n' "install.sh: warning: mcp-pool is not currently on PATH; no PATH changes were made." >&2
+    printf '%s\n' "install.sh: warning: mcp-cli is not currently on PATH; no PATH changes were made." >&2
 elif [ "$selected_command" != "$destination_path" ]; then
     printf '%s\n' \
         "install.sh: warning: PATH mismatch: selected '$selected_command', installed '$destination_path'." >&2

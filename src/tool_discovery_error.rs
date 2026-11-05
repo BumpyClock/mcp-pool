@@ -13,7 +13,7 @@ pub(super) fn attach_error(entry: &mut Value, name: &str, error: &str) {
         if status == "auth" {
             object.insert(
                 "authCommand".to_owned(),
-                json!(format!("mcp-pool auth {name}")),
+                json!(format!("mcp-cli auth {name}")),
             );
         }
     }

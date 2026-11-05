@@ -239,7 +239,7 @@ pub(super) fn entry(
         for field in ["startup_timeout_sec", "required"] {
             if entry.remove(field).is_some() {
                 warnings.push(format!(
-                    "Server '{name}' uses '{field}', which is not applied by mcp-pool."
+                    "Server '{name}' uses '{field}', which is not applied by mcp-cli."
                 ));
             }
         }
