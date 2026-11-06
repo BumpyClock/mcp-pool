@@ -1,100 +1,55 @@
 use super::*;
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn route_response(
     line: &str,
-    clients: &Mutex<HashMap<String, ClientSender>>,
-    request_map: &RequestMap,
-    handshake_cache: &Mutex<HandshakeCache>,
-    last_active_client: &Mutex<Option<String>>,
-    client_capabilities: &Mutex<HashMap<String, ClientCapabilities>>,
-    request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
+    generation: &Generation,
     recovery_tx: &mpsc::Sender<RecoveryReason>,
 ) {
+    let Generation {
+        clients,
+        routes,
+        diagnostics: log,
+        ..
+    } = generation;
     match serde_json::from_str::<Value>(line) {
         Ok(value) if value.is_object() => {
             let id = non_null_id(&value);
             match (message_has_method(&value), id) {
                 (true, Some(id)) => {
-                    route_server_request(
-                        line,
-                        &value,
-                        id,
-                        clients,
-                        last_active_client,
-                        client_capabilities,
-                        request_tx,
-                    )
-                    .await;
+                    route_server_request(line, &value, id, generation).await;
                 }
                 (false, Some(id)) => {
                     let key = jsonrpc::id_key(id);
-                    let responses = {
-                        let mut requests = request_map.lock();
-                        requests
-                            .remove(&key)
-                            .map(|pending| restore_response(&value, pending, handshake_cache))
-                    };
+                    let responses = routes.complete(id, &value);
                     if let Some(responses) = responses {
-                        for (client_id, payload) in sweep_recipients(responses, clients) {
-                            send_to_client(&client_id, payload, clients).await;
+                        for (client_id, payload) in sweep_recipients(responses, clients, log) {
+                            send_to_client(&client_id, payload, clients, log).await;
                         }
-                        request_recovery_if_session_not_found(&value, handshake_cache, recovery_tx);
+                        request_recovery_if_session_not_found(&value, routes, recovery_tx);
                     } else {
-                        diagnostics::log(format!(
+                        log.log(format!(
                             "pool_response_orphaned id={key} reason=no_pending_request"
                         ));
                     }
                 }
                 (false, None) => {
-                    diagnostics::log("pool_response_orphaned reason=uncorrelated_response");
+                    log.log("pool_response_orphaned reason=uncorrelated_response");
                 }
                 (true, None) => {
                     if value.get("method").and_then(Value::as_str)
                         == Some("notifications/tools/list_changed")
                     {
-                        handshake_cache.lock().invalidate_tools_list();
-                        diagnostics::log("pool_tools_cache_invalidated");
+                        routes.invalidate_tools_list();
+                        log.log("pool_tools_cache_invalidated");
                     }
-                    broadcast_to_all(line, clients).await;
+                    broadcast_to_all(line, clients, log).await;
                 }
             }
         }
-        Ok(_) => broadcast_to_all(line, clients).await,
+        Ok(_) => broadcast_to_all(line, clients, log).await,
         Err(_) => {
-            diagnostics::log(format!("pool_response_parse_failed bytes={}", line.len()));
-            broadcast_to_all(line, clients).await;
-        }
-    }
-}
-
-fn restore_response(
-    value: &Value,
-    pending: PendingRequestInfo,
-    cache: &Mutex<HandshakeCache>,
-) -> Vec<(String, String)> {
-    match pending.cache_key {
-        Some(method) => complete_cached_response(value, pending, &mut cache.lock(), method),
-        None => {
-            diagnostics::log(format!(
-                "pool_response_routed client_id={} method={}{} elapsed_ms={} outcome={}",
-                pending.client_id,
-                pending.method.as_deref().unwrap_or("?"),
-                pending
-                    .tool
-                    .as_deref()
-                    .map(|tool| format!(" tool={tool}"))
-                    .unwrap_or_default(),
-                pending.inserted_at.elapsed().as_millis(),
-                response_outcome(value),
-            ));
-            match value {
-                Value::Object(object) => vec![(
-                    pending.client_id,
-                    jsonrpc::with_id(object.clone(), pending.original_id),
-                )],
-                _ => Vec::new(),
-            }
+            log.log(format!("pool_response_parse_failed bytes={}", line.len()));
+            broadcast_to_all(line, clients, log).await;
         }
     }
 }

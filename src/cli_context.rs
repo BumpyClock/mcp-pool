@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
 
+pub(crate) use crate::cli_syntax::command_index;
+use crate::cli_syntax::{CommandSyntax, GlobalArgument};
+
 static WARNINGS: AtomicBool = AtomicBool::new(true);
 
 pub(super) struct ContextOptions {
@@ -12,36 +15,16 @@ pub(super) struct ContextOptions {
     pub arguments: Vec<String>,
     pub oauth_timeout: Option<u64>,
     pub plain: bool,
+    pub help: bool,
 }
 
-pub(crate) fn command_index(arguments: &[String]) -> Option<usize> {
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index) {
-        if matches!(
-            argument.as_str(),
-            "--config" | "--root" | "--log-level" | "--oauth-timeout"
-        ) {
-            index += 2;
-        } else if matches!(
-            argument.as_str(),
-            "--json" | "--debug" | "--no-color" | "--plain"
-        ) || ["--config=", "--root=", "--log-level=", "--oauth-timeout="]
-            .iter()
-            .any(|prefix| argument.starts_with(prefix))
-        {
-            index += 1;
-        } else {
-            return Some(index);
-        }
-    }
-    None
-}
-
-pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
-    let command_position = command_index(&arguments).context("Missing MCP command")?;
-    let command = arguments
-        .get(command_position)
-        .cloned()
+pub(super) fn parse(syntax: CommandSyntax<'_>) -> Result<ContextOptions> {
+    let command_position = syntax.command_position.context("Missing MCP command")?;
+    let command = syntax
+        .parts
+        .iter()
+        .find(|part| part.position == command_position)
+        .map(|part| part.argument)
         .context("Missing MCP command")?;
     let mut path = None;
     let mut root = None;
@@ -50,59 +33,33 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
     let mut leading_json = false;
     let mut plain = false;
     let mut retained = Vec::new();
-    let mut arguments = arguments.into_iter().enumerate();
-    let mut literal = false;
-    while let Some((index, argument)) = arguments.next() {
-        if index == command_position {
+    for part in syntax.parts {
+        if part.position == command_position {
             continue;
         }
-        if argument == "--" {
-            literal = true;
-        }
-        if !literal {
-            let (flag, inline) = argument
-                .split_once('=')
-                .map_or((argument.as_str(), None), |(flag, value)| {
-                    (flag, Some(value))
-                });
-            if matches!(
-                flag,
-                "--config" | "--root" | "--log-level" | "--oauth-timeout"
-            ) {
-                let value = inline
-                    .map(str::to_owned)
-                    .or_else(|| arguments.next().map(|(_, value)| value))
-                    .with_context(|| format!("Flag '{flag}' requires a value"))?;
-                match flag {
-                    "--config" => path = Some(PathBuf::from(value)),
-                    "--root" => root = Some(PathBuf::from(value)),
-                    "--log-level" => level = Some(value),
-                    _ => {
-                        oauth_timeout = Some(crate::tool_arguments::positive_milliseconds(&value)?)
+        if let Some(option) = part.global {
+            match option.id {
+                "config" => path = Some(PathBuf::from(option.value(part.next)?)),
+                "root" => root = Some(PathBuf::from(option.value(part.next)?)),
+                "log_level" => level = Some(option.value(part.next)?.to_owned()),
+                "oauth_timeout" => {
+                    oauth_timeout = Some(crate::tool_arguments::positive_milliseconds(
+                        option.value(part.next)?,
+                    )?)
+                }
+                "debug" => level = Some("debug".to_owned()),
+                "no_color" if part.position < command_position => {
+                    if matches!(command, "list" | "describe" | "list-tools") {
+                        retained.push(part.argument.to_owned());
                     }
                 }
-                continue;
+                "plain" => plain = true,
+                "json" => leading_json = true,
+                _ => retained.push(part.argument.to_owned()),
             }
-            if argument == "--debug" {
-                level = Some("debug".to_owned());
-                continue;
-            }
-            if argument == "--no-color" && index < command_position {
-                if matches!(command.as_str(), "list" | "describe" | "list-tools") {
-                    retained.push(argument);
-                }
-                continue;
-            }
-            if argument == "--plain" {
-                plain = true;
-                continue;
-            }
-            if argument == "--json" && index < command_position {
-                leading_json = true;
-                continue;
-            }
+        } else {
+            retained.push(part.argument.to_owned());
         }
-        retained.push(argument);
     }
     if let Some(level) = level {
         if !matches!(
@@ -117,21 +74,7 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
             Ordering::SeqCst,
         );
     }
-    if let Some(directory) = root.as_mut() {
-        *directory = if directory.is_absolute() {
-            directory.clone()
-        } else {
-            std::env::current_dir()?.join(&*directory)
-        };
-        if !directory.is_dir() {
-            bail!("--root must name an existing directory");
-        }
-        if let Some(selected) = path.as_mut()
-            && selected.is_relative()
-        {
-            *selected = directory.join(&*selected);
-        }
-    }
+    resolve_paths(&mut path, &mut root)?;
     if leading_json {
         if command == "call" {
             retained.splice(0..0, ["--output".to_owned(), "json".to_owned()]);
@@ -142,11 +85,50 @@ pub(super) fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
     Ok(ContextOptions {
         path,
         root,
-        command,
+        command: command.to_owned(),
         arguments: retained,
         oauth_timeout,
         plain,
+        help: syntax.help,
     })
+}
+
+pub(crate) fn global_paths(arguments: &[String]) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+    let mut path = None;
+    let mut root = None;
+    for part in CommandSyntax::parse(arguments).parts {
+        if let Some(
+            option @ GlobalArgument {
+                id: "config" | "root",
+                ..
+            },
+        ) = part.global
+        {
+            let value = PathBuf::from(option.value(part.next)?);
+            if option.id == "config" {
+                path = Some(value);
+            } else {
+                root = Some(value);
+            }
+        }
+    }
+    resolve_paths(&mut path, &mut root)?;
+    Ok((path, root))
+}
+
+fn resolve_paths(path: &mut Option<PathBuf>, root: &mut Option<PathBuf>) -> Result<()> {
+    if let Some(directory) = root.as_mut() {
+        *directory = crate::config_paths::absolute(directory)?;
+        if !directory.is_dir() {
+            bail!("--root must name an existing directory");
+        }
+        if let Some(selected) = path.as_mut()
+            && selected.is_relative()
+        {
+            *selected = directory.join(&*selected);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn warning(message: &str) {
@@ -181,6 +163,10 @@ pub(crate) fn timeout(
 mod tests {
     use super::*;
 
+    fn parse(arguments: Vec<String>) -> Result<ContextOptions> {
+        super::parse(CommandSyntax::parse(&arguments))
+    }
+
     #[test]
     fn leading_globals_do_not_become_commands_or_call_payloads() -> Result<()> {
         let no_color = parse(vec!["--no-color".into(), "list".into(), "fixture".into()])?;
@@ -203,6 +189,54 @@ mod tests {
             vec!["--output", "json", "docs.echo", "--json", r#"{"value":3}"#]
         );
         crate::diagnostics::set_enabled(false);
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_call_option_values_do_not_become_global_intent() -> Result<()> {
+        let parsed = parse(vec![
+            "call".into(),
+            "--server".into(),
+            "docs".into(),
+            "--tool".into(),
+            "--help".into(),
+            "--stdio-arg".into(),
+            "--plain".into(),
+        ])?;
+        assert!(!parsed.help);
+        assert!(!parsed.plain);
+        assert_eq!(
+            parsed.arguments,
+            [
+                "--server",
+                "docs",
+                "--tool",
+                "--help",
+                "--stdio-arg",
+                "--plain"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_extraction_skips_other_global_values_and_literal_arguments() -> Result<()> {
+        let arguments = [
+            "--log-level",
+            "--config",
+            "--config=selected.json",
+            "call",
+            "docs.echo",
+            "--",
+            "--config",
+            "literal.json",
+            "--root=missing",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            global_paths(&arguments)?,
+            (Some(PathBuf::from("selected.json")), None)
+        );
         Ok(())
     }
 

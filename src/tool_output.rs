@@ -2,6 +2,8 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use crate::tool_arguments::Output;
+pub(crate) use crate::tool_arguments::schema_view::kebab;
+use crate::tool_arguments::schema_view::{SchemaView, projection_type};
 
 #[derive(Default)]
 struct Content {
@@ -199,127 +201,130 @@ pub fn options(tool: &Value) -> Vec<Value> {
     let Some(schema) = tool.get("inputSchema") else {
         return Vec::new();
     };
-    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
-        return Vec::new();
-    };
-    let required = schema.get("required").and_then(Value::as_array);
-    properties.iter().map(|(property, descriptor)| {
-        let kind = schema_type(descriptor.get("type"));
-        let cli_name = kebab(property);
-        let enum_values: Vec<&str> = descriptor.get("enum")
-            .or_else(|| if kind == "array" { descriptor.get("items").and_then(|items| items.get("enum")) } else { None })
-            .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
-        let placeholder = if !enum_values.is_empty() {
-            format!("<{cli_name}:{}{}>", enum_values.join("|"), if kind == "array" { ",..." } else { "" })
-        } else { match kind {
-            "number" => format!("<{cli_name}:number>"),
-            "boolean" => format!("<{cli_name}:true|false>"),
-            "array" => format!("<{cli_name}:value1,value2>"),
-            "object" => format!("<{cli_name}:json>"),
-            _ => descriptor.get("format").and_then(Value::as_str)
-                .map_or_else(|| format!("<{cli_name}>"), |format| format!("<{cli_name}:{format}>")),
-        }};
-        let mut option = json!({
-            "property":property, "cliName":cli_name, "required":required.is_some_and(|values| values.iter().any(|value| value.as_str() == Some(property))),
-            "type":kind, "placeholder":placeholder,
-        });
-        if let Some(object) = option.as_object_mut() {
-            for (source, target) in [("description","description"),("default","defaultValue")] {
-                if let Some(value) = descriptor.get(source) { object.insert(target.to_owned(), value.clone()); }
-            }
-            if !enum_values.is_empty() {
-                object.insert("enumValues".to_owned(), json!(enum_values));
-            }
-            if let Some(format) = descriptor.get("format").and_then(Value::as_str) {
-                let display = match format {
-                    "date-time" | "iso-8601" => "ISO 8601".to_owned(),
-                    "uuid" => "UUID".to_owned(),
-                    _ => format.split(['_', '-']).map(|word| {
-                        let mut characters = word.chars();
-                        characters.next().map_or_else(String::new, |first| first.to_uppercase().collect::<String>() + characters.as_str())
-                    }).collect::<Vec<_>>().join(" "),
-                };
-                object.insert("formatHint".to_owned(), json!(display));
-            }
-            let item_kind = schema_type(descriptor.get("items").and_then(|items| items.get("type")));
-            if kind == "array" {
-                object.insert("arrayItemType".to_owned(), json!(item_kind));
-                let item_types = descriptor.get("items").and_then(|items| items.get("type"));
-                let strict = item_types.is_some_and(|types| types.as_str() == Some("boolean")
-                    || types.as_array().is_some_and(|types| !types.is_empty() && types.iter().all(|kind| kind.as_str() == Some("boolean"))));
-                object.insert("strictBooleanArray".to_owned(), json!(strict));
-            }
-            let example = enum_values.first().map(|value| (*value).to_owned())
-                .or_else(|| descriptor.get("default").map(|value| value.as_str().map_or_else(|| value.to_string(), str::to_owned)))
-                .or_else(|| match kind {
-                    "number" => Some("1".to_owned()), "boolean" => Some("true".to_owned()),
-                    "object" => Some(r#"{"key":"value"}"#.to_owned()),
-                    "array" => Some(match item_kind { "number" => "1,2", "boolean" => "true,false", "object" => r#"[{"key":"value"}]"#, _ => "value1,value2" }.to_owned()),
-                    _ if property.to_ascii_lowercase().contains("path") => Some("/path/to/file.md".to_owned()),
-                    _ if property.to_ascii_lowercase().contains("id") => Some("example-id".to_owned()),
-                    _ => None,
-                });
-            if let Some(example) = example {
-                object.insert("exampleValue".to_owned(), json!(example));
-            }
-        }
-        option
-    }).collect()
-}
-
-fn schema_type(value: Option<&Value>) -> &'static str {
-    let value = value.and_then(|value| {
-        value
-            .as_array()
-            .and_then(|values| {
-                values.iter().find(|value| {
-                    matches!(
-                        value.as_str(),
-                        Some("integer" | "number" | "string" | "boolean" | "array" | "object")
-                    )
+    let view = SchemaView::new(schema);
+    view.properties()
+        .map(|(property, descriptor)| {
+            let kind = projection_type(descriptor.get("type"));
+            let cli_name = kebab(property);
+            let enum_values: Vec<&str> = descriptor
+                .get("enum")
+                .or_else(|| {
+                    if kind == "array" {
+                        descriptor.get("items").and_then(|items| items.get("enum"))
+                    } else {
+                        None
+                    }
                 })
-            })
-            .or(Some(value))
-    });
-    match value.and_then(Value::as_str) {
-        Some("integer" | "number") => "number",
-        Some("string") => "string",
-        Some("boolean") => "boolean",
-        Some("array") => "array",
-        Some("object") => "object",
-        _ => "unknown",
-    }
-}
-
-pub fn kebab(property: &str) -> String {
-    let mut result = String::new();
-    let mut previous: Option<char> = None;
-    let mut characters = property.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character.is_uppercase() {
-            let boundary = previous
-                .is_some_and(|previous| previous.is_lowercase() || previous.is_ascii_digit())
-                || (previous.is_some_and(char::is_uppercase)
-                    && characters.peek().is_some_and(|next| next.is_lowercase()));
-            if boundary && !result.is_empty() && !result.ends_with('-') {
-                result.push('-');
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            let placeholder = if !enum_values.is_empty() {
+                format!(
+                    "<{cli_name}:{}{}>",
+                    enum_values.join("|"),
+                    if kind == "array" { ",..." } else { "" }
+                )
+            } else {
+                match kind {
+                    "number" => format!("<{cli_name}:number>"),
+                    "boolean" => format!("<{cli_name}:true|false>"),
+                    "array" => format!("<{cli_name}:value1,value2>"),
+                    "object" => format!("<{cli_name}:json>"),
+                    _ => descriptor
+                        .get("format")
+                        .and_then(Value::as_str)
+                        .map_or_else(
+                            || format!("<{cli_name}>"),
+                            |format| format!("<{cli_name}:{format}>"),
+                        ),
+                }
+            };
+            let mut option = json!({
+                "property":property, "cliName":cli_name, "required":view.required(property),
+                "type":kind, "placeholder":placeholder,
+            });
+            if let Some(object) = option.as_object_mut() {
+                for (source, target) in
+                    [("description", "description"), ("default", "defaultValue")]
+                {
+                    if let Some(value) = descriptor.get(source) {
+                        object.insert(target.to_owned(), value.clone());
+                    }
+                }
+                if !enum_values.is_empty() {
+                    object.insert("enumValues".to_owned(), json!(enum_values));
+                }
+                if let Some(format) = descriptor.get("format").and_then(Value::as_str) {
+                    let display = match format {
+                        "date-time" | "iso-8601" => "ISO 8601".to_owned(),
+                        "uuid" => "UUID".to_owned(),
+                        _ => format
+                            .split(['_', '-'])
+                            .map(|word| {
+                                let mut characters = word.chars();
+                                characters.next().map_or_else(String::new, |first| {
+                                    first.to_uppercase().collect::<String>() + characters.as_str()
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    };
+                    object.insert("formatHint".to_owned(), json!(display));
+                }
+                let item_kind =
+                    projection_type(descriptor.get("items").and_then(|items| items.get("type")));
+                if kind == "array" {
+                    object.insert("arrayItemType".to_owned(), json!(item_kind));
+                    let item_types = descriptor.get("items").and_then(|items| items.get("type"));
+                    let strict = item_types.is_some_and(|types| {
+                        types.as_str() == Some("boolean")
+                            || types.as_array().is_some_and(|types| {
+                                !types.is_empty()
+                                    && types.iter().all(|kind| kind.as_str() == Some("boolean"))
+                            })
+                    });
+                    object.insert("strictBooleanArray".to_owned(), json!(strict));
+                }
+                let example = enum_values
+                    .first()
+                    .map(|value| (*value).to_owned())
+                    .or_else(|| {
+                        descriptor.get("default").map(|value| {
+                            value
+                                .as_str()
+                                .map_or_else(|| value.to_string(), str::to_owned)
+                        })
+                    })
+                    .or_else(|| match kind {
+                        "number" => Some("1".to_owned()),
+                        "boolean" => Some("true".to_owned()),
+                        "object" => Some(r#"{"key":"value"}"#.to_owned()),
+                        "array" => Some(
+                            match item_kind {
+                                "number" => "1,2",
+                                "boolean" => "true,false",
+                                "object" => r#"[{"key":"value"}]"#,
+                                _ => "value1,value2",
+                            }
+                            .to_owned(),
+                        ),
+                        _ if property.to_ascii_lowercase().contains("path") => {
+                            Some("/path/to/file.md".to_owned())
+                        }
+                        _ if property.to_ascii_lowercase().contains("id") => {
+                            Some("example-id".to_owned())
+                        }
+                        _ => None,
+                    });
+                if let Some(example) = example {
+                    object.insert("exampleValue".to_owned(), json!(example));
+                }
             }
-            result.extend(character.to_lowercase());
-        } else if matches!(character, '_' | ' ' | '.' | '-') {
-            if !result.is_empty() && !result.ends_with('-') {
-                result.push('-');
-            }
-        } else {
-            result.push(character);
-        }
-        previous = Some(character);
-    }
-    let result = result.trim_matches('-').to_owned();
-    if result.is_empty() {
-        "option".to_owned()
-    } else {
-        result
-    }
+            option
+        })
+        .collect()
 }
 
 #[cfg(test)]

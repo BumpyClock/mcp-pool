@@ -15,7 +15,7 @@ pub(super) async fn handle_client(
     shared_timeout: Duration,
     mut rx: mpsc::Receiver<String>,
 ) {
-    diagnostics::log(format!(
+    generation.diagnostics.log(format!(
         "pool_handle_client_started client_id={}",
         client_id
     ));
@@ -39,7 +39,7 @@ pub(super) async fn handle_client(
             } => {
                 pending_forward = None;
                 if let Err(error) = result {
-                    diagnostics::log(format!(
+                    generation.diagnostics.log(format!(
                         "pool_request_forward_failed client_id={client_id} error={error}"
                     ));
                     break;
@@ -47,7 +47,7 @@ pub(super) async fn handle_client(
             },
             read_result = reader.read_line(&mut buffer), if pending_forward.is_none() => match read_result {
                 Ok(0) => {
-                    diagnostics::log(format!("pool_client_disconnected client_id={}", client_id));
+                    generation.diagnostics.log(format!("pool_client_disconnected client_id={}", client_id));
                     break;
                 }
                 Ok(_) => {
@@ -106,7 +106,7 @@ pub(super) async fn handle_client(
                                     } else {
                                         None
                                     };
-                                    diagnostics::log(format!(
+                                    generation.diagnostics.log(format!(
                                         "pool_request_received client_id={} method={}{} has_id=true bytes={}",
                                         client_id,
                                         method.as_deref().unwrap_or("?"),
@@ -121,60 +121,44 @@ pub(super) async fn handle_client(
                                             parse_client_capabilities(&value),
                                         );
                                     }
-                                    // Admission and route publication follow the same lock order
-                                    // as completion and expiration.
-                                    let mut requests = generation.request_map.lock();
-                                    let discovery = cache_key.map_or(DiscoveryAction::Leader, |method| {
-                                        generation.handshake_cache.lock().prepare(
-                                            method,
-                                            PendingWaiter {
-                                                client_id: client_id.clone(),
-                                                original_id: original_id.clone(),
-                                                inserted_at: Instant::now(),
-                                                expires_after,
-                                            },
-                                            transport_deadline,
-                                        )
-                                    });
+                                    let discovery = generation.routes.admit(
+                                        PendingRequestInfo {
+                                            client_id: client_id.clone(),
+                                            original_id,
+                                            method: method.clone(),
+                                            cache_key,
+                                            tool: tool.clone(),
+                                            inserted_at: Instant::now(),
+                                            expires_after,
+                                        },
+                                        transport_deadline,
+                                    );
                                     match discovery {
-                                        DiscoveryAction::Cached(response) => {
-                                            diagnostics::log(format!(
+                                        RouteAdmission::Cached(response) => {
+                                            generation.diagnostics.log(format!(
                                                 "pool_cache_hit method={} client_id={}",
                                                 method.as_deref().unwrap_or("?"), client_id
                                             ));
                                             ClientAction::Cached(response)
                                         }
-                                        DiscoveryAction::Coalesced => {
+                                        RouteAdmission::Coalesced => {
                                             let coalesced_event = match cache_key {
                                                 Some(CacheableMethod::Initialize) => "pool_initialize_coalesced",
                                                 Some(CacheableMethod::ServerDiscover) => "pool_server_discover_coalesced",
                                                 _ => "pool_tools_list_coalesced",
                                             };
-                                            diagnostics::log(format!(
+                                            generation.diagnostics.log(format!(
                                                 "{coalesced_event} client_id={client_id}"
                                             ));
                                             ClientAction::Drop
                                         }
-                                        DiscoveryAction::Leader => {
+                                        RouteAdmission::Leader(pool_id) => {
                                             if cache_key.is_some() {
-                                                diagnostics::log(format!(
+                                                generation.diagnostics.log(format!(
                                                     "pool_cache_miss method={} client_id={}",
                                                     method.as_deref().unwrap_or("?"), client_id
                                                 ));
                                             }
-                                            let pool_id = generation.id_allocator.allocate();
-                                            requests.insert(
-                                                jsonrpc::id_key(&Value::from(pool_id)),
-                                                PendingRequestInfo {
-                                                    client_id: client_id.clone(),
-                                                    original_id,
-                                                    method: method.clone(),
-                                                    cache_key,
-                                                    tool: tool.clone(),
-                                                    inserted_at: Instant::now(),
-                                                    expires_after,
-                                                },
-                                            );
                                             *generation.last_active_client.lock() = Some(client_id.clone());
                                             match value {
                                                 Value::Object(object) => ClientAction::Forward {
@@ -194,8 +178,8 @@ pub(super) async fn handle_client(
                                     }
                                 }
                                 _ => {
-                                    if generation.handshake_cache.lock().swallow_initialized(&value) {
-                                        diagnostics::log(format!(
+                                    if generation.routes.swallow_initialized(&value) {
+                                        generation.diagnostics.log(format!(
                                             "pool_cached_initialized_swallowed client_id={}",
                                             client_id
                                         ));
@@ -210,7 +194,7 @@ pub(super) async fn handle_client(
                                             .get("method")
                                             .and_then(Value::as_str)
                                             .map(str::to_string);
-                                        diagnostics::log(format!(
+                                        generation.diagnostics.log(format!(
                                             "pool_request_received client_id={} method={} has_id=false bytes={}",
                                             client_id,
                                             method.as_deref().unwrap_or("?"),
@@ -235,7 +219,7 @@ pub(super) async fn handle_client(
                         Err(_) => {
                             if parse_failures < 3 {
                                 parse_failures += 1;
-                                diagnostics::log(format!(
+                                generation.diagnostics.log(format!(
                                     "pool_request_parse_failed client_id={} bytes={}",
                                     client_id, line.len()
                                 ));
@@ -255,14 +239,14 @@ pub(super) async fn handle_client(
                             let mut bytes = response.into_bytes();
                             bytes.push(b'\n');
                             if let Err(err) = write_half.write_all(&bytes).await {
-                                diagnostics::log(format!(
+                                generation.diagnostics.log(format!(
                                     "pool_client_write_failed client_id={} error={}",
                                     client_id, err
                                 ));
                                 break;
                             }
                             if let Err(err) = write_half.flush().await {
-                                diagnostics::log(format!(
+                                generation.diagnostics.log(format!(
                                     "pool_client_flush_failed client_id={} error={}",
                                     client_id, err
                                 ));
@@ -279,34 +263,20 @@ pub(super) async fn handle_client(
                         } => (line, method, tool, pool_id),
                     };
 
-                    let forward_deadline = forward_pool_id.and_then(|pool_id| {
-                        generation.request_map.lock().get(&jsonrpc::id_key(&Value::from(pool_id)))
-                            .and_then(|pending| pending.cache_key)
-                    }).and_then(|method| generation.handshake_cache.lock().deadline(method));
                     let forwarding_generation = generation.clone();
                     let client_id = client_id.clone();
                     pending_forward = Some((forward_pool_id, Box::pin(async move {
                         let generation = forwarding_generation;
-                        let Some(sender) = acquire_request_sender(
-                            &generation.request_tx, &generation.upstream_ready,
-                            &generation.shutdown, &client_id,
-                        ).await else { return Ok(()) };
+                        let Some(sender) = acquire_request_sender(&generation, &client_id)
+                            .await else { return Ok(()) };
                         let permit = sender.reserve_owned().await.map_err(io::Error::other)?;
-                        let pending = generation.request_map.lock();
-                        if generation.shutdown.load(Ordering::SeqCst)
-                            || forward_pool_id.is_some_and(|pool_id| {
-                                !pending.contains_key(&jsonrpc::id_key(&Value::from(pool_id)))
-                            })
-                        {
+                        let bytes = forward_line.len();
+                        if !generation.routes.publish(
+                            forward_pool_id, &generation.shutdown, permit, forward_line,
+                        ) {
                             return Ok(());
                         }
-                        let bytes = forward_line.len();
-                        permit.send(crate::upstream::UpstreamRequest {
-                            line: forward_line,
-                            deadline: forward_deadline,
-                        });
-                        drop(pending);
-                        diagnostics::log(format!(
+                        generation.diagnostics.log(format!(
                             "pool_request_forwarded client_id={} method={}{} pool_id={} bytes={}",
                             client_id,
                             forward_method.as_deref().unwrap_or("?"),
@@ -323,7 +293,7 @@ pub(super) async fn handle_client(
                     })));
                 }
                 Err(err) => {
-                    diagnostics::log(format!(
+                    generation.diagnostics.log(format!(
                         "pool_client_read_error client_id={} error={}",
                         client_id, err
                     ));
@@ -335,14 +305,14 @@ pub(super) async fn handle_client(
                     let mut bytes = message.into_bytes();
                     bytes.push(b'\n');
                     if let Err(err) = write_half.write_all(&bytes).await {
-                        diagnostics::log(format!(
+                        generation.diagnostics.log(format!(
                             "pool_client_write_failed client_id={} error={}",
                             client_id, err
                         ));
                         break;
                     }
                     if let Err(err) = write_half.flush().await {
-                        diagnostics::log(format!(
+                        generation.diagnostics.log(format!(
                             "pool_client_flush_failed client_id={} error={}",
                             client_id, err
                         ));
@@ -350,7 +320,7 @@ pub(super) async fn handle_client(
                     }
                     if pending_forward.as_ref().is_some_and(|(pool_id, _)| {
                         pool_id.is_some_and(|pool_id| {
-                            !generation.request_map.lock().contains_key(&jsonrpc::id_key(&Value::from(pool_id)))
+                            !generation.routes.contains(pool_id)
                         })
                     }) {
                         pending_forward = None;
@@ -367,24 +337,20 @@ pub(super) async fn handle_client(
             let mut bytes = message.into_bytes();
             bytes.push(b'\n');
             if let Err(error) = write_half.write_all(&bytes).await {
-                diagnostics::log(format!(
+                generation.diagnostics.log(format!(
                     "pool_client_drain_failed client_id={client_id} error={error}"
                 ));
                 break;
             }
         }
         if let Err(error) = write_half.flush().await {
-            diagnostics::log(format!(
+            generation.diagnostics.log(format!(
                 "pool_client_drain_failed client_id={client_id} error={error}"
             ));
         }
     }
 
-    {
-        let mut requests = generation.request_map.lock();
-        let mut cache = generation.handshake_cache.lock();
-        cache.disconnect(&mut requests, &client_id);
-    }
+    generation.routes.disconnect(&client_id);
     generation.clients.lock().remove(&client_id);
     generation.client_capabilities.lock().remove(&client_id);
     generation.expiration_changed.notify_one();

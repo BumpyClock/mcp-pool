@@ -377,6 +377,7 @@ async fn cached_reads_reject_resource_binding_before_reuse_or_refresh() -> Resul
     let expected = "protected resource does not match configured MCP endpoint";
     let errors = [
         super::prepare(&fixture.server, false).await.err(),
+        super::credential_status(&fixture.server).err(),
         authorization_header(&authentication).await.err(),
         super::authorize_with_timeout(
             &fixture.server,

@@ -5,6 +5,7 @@ import json
 import math
 import resource
 import statistics
+import subprocess
 import threading
 import time
 
@@ -24,10 +25,16 @@ class Bridge:
         self.runtime, self.mode, self.explicit_mode = runtime, mode, explicit_mode
         self.direct = direct
         self.pending, self.lock, self.sequence = {}, threading.Lock(), 0
-        self.process = None
+        self._process: subprocess.Popen[str] | None = None
         self.reader = None
         self.failure = None
         self.closing = False
+
+    @property
+    def process(self) -> subprocess.Popen[str]:
+        if self._process is None:
+            raise RuntimeError("Bridge is not open")
+        return self._process
 
     def __enter__(self):
         try:
@@ -40,7 +47,7 @@ class Bridge:
                 command = self.runtime.base + ["serve", "--stdio", "--servers", "fixture"]
                 if self.runtime.product == "mcp-cli" and (self.mode != 1 or self.explicit_mode):
                     command += ["--concurrency", str(self.mode)]
-            self.process = self.runtime.spawn(command, "bridge")
+            self._process = self.runtime.spawn(command, "bridge")
             self.reader = threading.Thread(target=self.read, daemon=True)
             self.reader.start()
             if self.runtime.protocol == "modern":
@@ -62,19 +69,25 @@ class Bridge:
             self.close()
             raise
 
-    def __exit__(self, *_):
+    def __exit__(self, exception_type, exception, traceback):
         self.close()
 
     def send(self, message):
         with self.lock:
             if self.failure is not None:
                 raise self.failure
-            self.process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
-            self.process.stdin.flush()
+            stream = self.process.stdin
+            if stream is None:
+                raise RuntimeError("Bridge stdin pipe was not established")
+            stream.write(json.dumps(message, separators=(",", ":")) + "\n")
+            stream.flush()
 
     def read(self):
         try:
-            for line in self.process.stdout:
+            stream = self.process.stdout
+            if stream is None:
+                raise RuntimeError("Bridge stdout pipe was not established")
+            for line in stream:
                 response = json.loads(line)
                 with self.lock:
                     future = self.pending.pop(response.get("id"), None)
@@ -116,7 +129,7 @@ class Bridge:
         return {"token": token, "wall_ns": time.perf_counter_ns() - started}
 
     def close(self):
-        if self.process is None:
+        if self._process is None:
             return
         self.closing = True
         if self.process.stdin is not None and not self.process.stdin.closed:
@@ -136,10 +149,17 @@ class Bridge:
 
 
 def sustained(bridge, clients, duration, delay=0, size=64):
-    barrier = threading.Barrier(clients + 1)
-    started = time.perf_counter_ns()
+    started = 0
     deadline = 0
-    before_cpu = resource.getrusage(resource.RUSAGE_SELF)
+    before_cpu = None
+
+    def release():
+        nonlocal started, deadline, before_cpu
+        before_cpu = resource.getrusage(resource.RUSAGE_SELF)
+        started = time.perf_counter_ns()
+        deadline = started + int(duration * 1e9)
+
+    barrier = threading.Barrier(clients + 1, action=release)
 
     def worker():
         rows = []
@@ -150,12 +170,11 @@ def sustained(bridge, clients, duration, delay=0, size=64):
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=clients) as executor:
         jobs = [executor.submit(worker) for _ in range(clients)]
-        started = time.perf_counter_ns()
-        deadline = started + int(duration * 1e9)
         barrier.wait(timeout=10)
         rows = [row for job in jobs for row in job.result()]
     elapsed = time.perf_counter_ns() - started
     after_cpu = resource.getrusage(resource.RUSAGE_SELF)
+    assert before_cpu is not None, "Barrier completed without starting measurement"
     return {"clients": clients, "requested_duration_s": duration, "elapsed_ns": elapsed,
             "drain_ns": max(0, elapsed - int(duration * 1e9)), "completed_calls": len(rows),
             "latency_ns": summary([row["wall_ns"] for row in rows]),

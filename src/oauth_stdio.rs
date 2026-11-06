@@ -53,7 +53,15 @@ pub(super) async fn authorize(
     if options.no_browser {
         command.env("MCPORTER_OAUTH_NO_BROWSER", "1");
     }
-    let mut process = OwnedProcess::spawn(command)
+    let log = crate::diagnostics::ServerLog::new(&server.name).with_redactions(
+        server
+            .definition
+            .env
+            .values()
+            .cloned()
+            .chain(authentication.execution.client_secret.iter().cloned()),
+    );
+    let mut process = OwnedProcess::spawn(command, log)
         .await
         .map_err(|_| anyhow::anyhow!("stdio OAuth helper failed to start"))?;
     let result = tokio::select! {

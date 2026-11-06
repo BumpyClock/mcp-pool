@@ -243,7 +243,7 @@ fn configured_server_timeout_is_not_capped() {
         ..ServerDef::default()
     };
     assert_eq!(
-        super::super::request_timeout(&definition),
+        super::super::request_timeout(definition.timeout_ms),
         Duration::from_millis(300_000)
     );
 }

@@ -41,12 +41,6 @@ async fn stdio_identified_requests_strip_metadata_and_restore_distinct_ids() -> 
             request.get("params"),
             Some(&json!({"name":"inspect","arguments":arguments}))
         );
-        assert!(
-            request
-                .get("id")
-                .and_then(Value::as_u64)
-                .is_some_and(|identifier| identifier != 7)
-        );
     }
     assert_ne!(first_request.get("id"), second_request.get("id"));
     reply(

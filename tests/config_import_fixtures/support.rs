@@ -7,13 +7,12 @@ use tokio::process::Command;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_mcp-cli");
 
-#[path = "../common/fixture_home.rs"]
-mod fixture_home;
+use crate::fixture_lifecycle::{FixtureLifecycle, fixture_home};
 
 pub struct Fixture {
     pub directory: PathBuf,
     pub project: PathBuf,
-    finished: bool,
+    lifecycle: FixtureLifecycle,
 }
 
 impl Fixture {
@@ -29,24 +28,26 @@ impl Fixture {
                 .context("Windows fixture path")?,
         );
         let project = directory.join("project");
+        let lifecycle = FixtureLifecycle::new(
+            Path::new(BINARY),
+            &directory,
+            &directory.join("pool"),
+            &project,
+            None,
+        );
         Ok(Self {
             directory,
             project,
-            finished: false,
+            lifecycle,
         })
     }
 
     pub fn command(&self, project: &Path) -> Command {
-        let mut command = Command::new(BINARY);
+        let mut command = Command::from(self.lifecycle.command());
         command
             .current_dir(project)
-            .env("MCP_CLI_HOME", self.directory.join("pool"))
-            .env("HOME", &self.directory)
-            .env("USERPROFILE", &self.directory)
             .env("APPDATA", &self.directory)
             .env_remove("XDG_DATA_HOME")
-            .env_remove("MCP_CLI_CONFIG")
-            .env_remove("MCP_CLI_CREDENTIALS_READ_ONLY")
             .env("CLAUDE_CONFIG_DIR", &self.directory)
             .env_remove("CODEX_HOME")
             .env("MCPORTER_CONFIG", self.directory.join("must-not-read.json"))
@@ -54,10 +55,18 @@ impl Fixture {
         command
     }
 
+    #[allow(
+        dead_code,
+        reason = "Some import suites supply their own command assertions"
+    )]
     pub async fn run(&self, arguments: &[&str]) -> Result<Output> {
         Ok(self.command(&self.project).args(arguments).output().await?)
     }
 
+    #[allow(
+        dead_code,
+        reason = "Some import suites supply their own command assertions"
+    )]
     pub async fn success(&self, arguments: &[&str]) -> Result<Output> {
         let output = self.run(arguments).await?;
         anyhow::ensure!(
@@ -81,34 +90,8 @@ impl Fixture {
         Ok(())
     }
 
-    pub async fn finish(mut self) -> Result<()> {
-        self.success(&["daemon", "stop"]).await?;
-        std::fs::remove_dir_all(&self.directory)?;
-        self.finished = true;
+    pub async fn finish(self) -> Result<()> {
+        self.lifecycle.finish().await?;
         Ok(())
-    }
-}
-
-impl Drop for Fixture {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "Synchronous emergency cleanup after a failed assertion"
-    )]
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        match std::process::Command::new(BINARY)
-            .args(["daemon", "stop"])
-            .current_dir(&self.project)
-            .env("MCP_CLI_HOME", self.directory.join("pool"))
-            .output()
-        {
-            Ok(output) if output.status.success() => {}
-            Ok(_) | Err(_) => eprintln!("Could not stop import fixture daemon"),
-        }
-        if let Err(error) = std::fs::remove_dir_all(&self.directory) {
-            eprintln!("Could not remove import fixture: {error}");
-        }
     }
 }

@@ -2,15 +2,73 @@ use super::*;
 use crate::request_deadline::SharedDeadline;
 use crate::request_deadline::{TIMEOUT_FIELD, timeout_ms};
 
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExchangeKind {
+    Initialize(crate::mcp_protocol::Era),
+    Discovery(crate::mcp_protocol::Era),
+    Initialized(crate::mcp_protocol::Era),
+    Operation(crate::mcp_protocol::Era),
+}
+
+impl ExchangeKind {
+    pub(super) fn is_modern(self) -> bool {
+        let (Self::Initialize(era)
+        | Self::Discovery(era)
+        | Self::Initialized(era)
+        | Self::Operation(era)) = self;
+        era == crate::mcp_protocol::Era::Modern
+    }
+
+    pub(super) fn is_initialize(self) -> bool {
+        matches!(self, Self::Initialize(_))
+    }
+
+    pub(super) fn is_discovery(self) -> bool {
+        matches!(self, Self::Discovery(_))
+    }
+    pub(super) fn is_handshake(self) -> bool {
+        matches!(self, Self::Initialize(_) | Self::Discovery(_))
+    }
+    pub(super) fn is_barrier(self) -> bool {
+        self.is_handshake() || matches!(self, Self::Initialized(_))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ExchangeMode {
+    InitialLegacy,
+    Standard,
+}
+
+#[derive(Default)]
+pub(super) enum Negotiation {
+    #[default]
+    Probing,
+    Active,
+}
+
+impl Negotiation {
+    pub(super) fn admit(&mut self, kind: ExchangeKind, quiescent: bool) -> ExchangeMode {
+        let mode = if matches!(self, Self::Probing) && quiescent && kind.is_initialize() {
+            ExchangeMode::InitialLegacy
+        } else {
+            ExchangeMode::Standard
+        };
+        if !kind.is_discovery() {
+            *self = Self::Active;
+        }
+        mode
+    }
+}
+
 pub(super) struct Request {
     pub(super) line: String,
     pub(super) identifier: Option<Value>,
-    pub(super) initialize: bool,
-    pub(super) discover: bool,
-    pub(super) modern: bool,
+    pub(super) kind: ExchangeKind,
     pub(super) method: Option<String>,
     pub(super) name: Option<String>,
-    pub(super) initialization_barrier: bool,
     timeout_ms: Option<u64>,
     shared: bool,
     pub(super) budget: SharedDeadline,
@@ -20,10 +78,10 @@ impl Request {
     pub(super) fn parse(
         mut envelope: crate::upstream::UpstreamRequest,
         options: &Options,
-    ) -> Result<Self, (crate::upstream::UpstreamRequest, String)> {
+    ) -> Result<Self, (crate::upstream::UpstreamRequest, HttpFailure)> {
         let parsed = (|| {
             let line = &envelope.line;
-            if line.len() > sse_parser::FRAME_LIMIT {
+            if line.len() > MAX_REQUEST_BYTES {
                 return Err("HTTP request exceeds size limit".into());
             }
             let mut value: Value =
@@ -44,13 +102,20 @@ impl Request {
                     .filter(|identifier| !identifier.is_null())
                     .cloned()
             });
-            let initialize = method == Some("initialize");
-            let discover = method == Some("server/discover");
-            let modern = value
+            let era = if value
                 .get("params")
-                .is_some_and(crate::mcp_protocol::is_modern);
-            let initialization_barrier =
-                initialize || discover || method == Some("notifications/initialized");
+                .is_some_and(crate::mcp_protocol::is_modern)
+            {
+                crate::mcp_protocol::Era::Modern
+            } else {
+                crate::mcp_protocol::Era::Legacy
+            };
+            let kind = match method {
+                Some("initialize") => ExchangeKind::Initialize(era),
+                Some("server/discover") => ExchangeKind::Discovery(era),
+                Some("notifications/initialized") => ExchangeKind::Initialized(era),
+                _ => ExchangeKind::Operation(era),
+            };
             let method = method.map(str::to_owned);
             let name = value
                 .pointer("/params/name")
@@ -73,12 +138,9 @@ impl Request {
             Ok(Self {
                 line,
                 identifier,
-                initialize,
-                discover,
-                modern,
+                kind,
                 method,
                 name,
-                initialization_barrier,
                 timeout_ms,
                 shared,
                 budget,
@@ -113,26 +175,11 @@ impl Request {
         &self,
         response: &mut reqwest::Response,
         options: &Options,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<Vec<u8>>, HttpFailure> {
         if self.shared {
             read_chunk_with_deadline(response, &self.budget).await
         } else {
             read_chunk_with_timeout(response, self.read_deadline(options)).await
         }
-    }
-
-    pub(super) fn forwarded(&self) -> Result<crate::upstream::UpstreamRequest, String> {
-        let mut value: Value =
-            serde_json::from_str(&self.line).map_err(|_| "Pool fallback request is invalid")?;
-        if let Some(milliseconds) = self.timeout_ms {
-            value
-                .as_object_mut()
-                .ok_or("Pool fallback request must be an object")?
-                .insert(TIMEOUT_FIELD.into(), Value::from(milliseconds));
-        }
-        Ok(crate::upstream::UpstreamRequest {
-            line: value.to_string(),
-            deadline: Some(self.budget.clone()),
-        })
     }
 }

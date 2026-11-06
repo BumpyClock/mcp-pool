@@ -256,28 +256,6 @@ pub(super) struct Lock {
     contents: String,
 }
 
-/// Releases locks on a blocking thread when cancellation cannot await cleanup.
-pub(super) struct AsyncLocks(Option<Vec<Lock>>);
-
-impl AsyncLocks {
-    pub(super) fn new(locks: Vec<Lock>) -> Self {
-        Self(Some(locks))
-    }
-    pub(super) async fn release(mut self) -> Result<()> {
-        let locks = self.0.take();
-        tokio::task::spawn_blocking(move || drop(locks)).await?;
-        Ok(())
-    }
-}
-
-impl Drop for AsyncLocks {
-    fn drop(&mut self) {
-        if let Some(locks) = self.0.take() {
-            tokio::task::spawn_blocking(move || drop(locks));
-        }
-    }
-}
-
 impl Lock {
     pub(super) fn acquire(target: &Path) -> Result<Self> {
         let target = canonical(target)?;

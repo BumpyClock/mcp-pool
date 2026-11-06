@@ -2,11 +2,16 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+const SOURCE_INPUTS: &[&str] = &["Cargo.toml", "Cargo.lock", "build.rs", "src"];
+
+#[cfg(test)]
+#[path = "tests/common/build_fingerprint.rs"]
+mod fingerprint_tests;
+
 fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=Cargo.toml");
-    println!("cargo:rerun-if-changed=Cargo.lock");
-    println!("cargo:rerun-if-changed=src");
+    for input in SOURCE_INPUTS {
+        println!("cargo:rerun-if-changed={input}");
+    }
 
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     for location in ["--git-dir", "--git-common-dir"] {
@@ -127,7 +132,7 @@ fn sanitize_component(value: &str) -> String {
 fn source_fingerprint(manifest_dir: &Path) -> SourceFingerprint {
     let mut files = Vec::new();
     let mut errors = Vec::new();
-    for relative_path in ["Cargo.toml", "Cargo.lock", "build.rs"] {
+    for relative_path in SOURCE_INPUTS {
         collect_files(
             &manifest_dir.join(relative_path),
             Path::new(relative_path),
@@ -135,13 +140,6 @@ fn source_fingerprint(manifest_dir: &Path) -> SourceFingerprint {
             &mut errors,
         );
     }
-    collect_files(
-        &manifest_dir.join("src"),
-        Path::new("src"),
-        &mut files,
-        &mut errors,
-    );
-
     files.sort_by(|left, right| left.0.cmp(&right.0));
     errors.sort();
 

@@ -14,6 +14,12 @@ use crate::server_config::{ConfiguredServer, OAuthSettings};
 mod authorization_tests;
 #[path = "oauth_browser.rs"]
 mod browser;
+#[cfg(test)]
+#[path = "oauth_callback_tests.rs"]
+mod callback_tests;
+#[cfg(test)]
+#[path = "oauth_execution_tests.rs"]
+mod execution_tests;
 #[path = "oauth_files.rs"]
 pub(crate) mod files;
 #[path = "oauth_flow.rs"]
@@ -41,7 +47,6 @@ mod test_support;
 #[path = "oauth_tests.rs"]
 mod tests;
 
-/// Carries authentication and storage context, not token or client-secret values.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct HttpAuth {
     pub server_name: String,
@@ -62,6 +67,13 @@ pub struct HttpAuth {
     pub read_only: bool,
     #[serde(default)]
     pub cached_only: bool,
+    #[serde(default)]
+    execution: ExecutionInputs,
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct ExecutionInputs {
+    client_secret: Option<String>,
 }
 
 impl fmt::Debug for HttpAuth {
@@ -71,6 +83,16 @@ impl fmt::Debug for HttpAuth {
 }
 
 impl HttpAuth {
+    fn client_secret<'a>(&'a self, info: &'a Value) -> Result<Option<&'a str>> {
+        if let Some(secret) = string(info, "client_secret") {
+            return Ok(Some(secret));
+        }
+        if self.client_secret_env.is_some() && self.execution.client_secret.is_none() {
+            bail!("configured OAuth client-secret environment variable missing");
+        }
+        Ok(self.execution.client_secret.as_deref())
+    }
+
     pub(crate) fn storage_identity(&self) -> Result<PathBuf> {
         let path = if self.directory_primary {
             self.directory_stores
@@ -123,7 +145,7 @@ pub(crate) fn identity_definition(server: &ConfiguredServer) -> Result<ServerDef
     definition.auth = None;
     if definition.is_remote() {
         let settings = server.oauth_settings();
-        let authentication = read_context(server, &settings)?;
+        let authentication = context_with_settings(server, &settings)?;
         let snapshot = store::read(&authentication)?;
         let configured = settings
             .auth
@@ -199,31 +221,28 @@ pub fn vault_set(server: &ConfiguredServer, payload: &Value) -> Result<()> {
             json!(oauth2::CsrfToken::new_random().secret()),
         );
     }
-    let _transaction = store::transaction(&authentication)?;
     store::save(&authentication, &payload, None)
 }
 
 pub fn vault_clear(server: &ConfiguredServer) -> Result<()> {
     let authentication = context(server)?;
     ensure_writable(&authentication)?;
-    let _transaction = store::transaction(&authentication)?;
     store::clear(&authentication)
 }
 
 pub fn credential_status(server: &ConfiguredServer) -> Result<Value> {
-    let authentication = read_context(server, &server.oauth_settings())?;
+    let authentication = context(server)?;
     let snapshot = store::read(&authentication)?;
-    let binding_valid = store::validate_binding(&authentication, &snapshot).is_ok();
     let tokens = snapshot.get("tokens");
     let valid = tokens.is_some_and(|value| store::validate_tokens(value).is_ok());
     Ok(json!({
         "server": server.name,
-        "authenticated": binding_valid && valid && tokens.is_some_and(|value| !store::expired(value)),
+        "authenticated": valid && tokens.is_some_and(|value| !store::expired(value)),
         "hasTokens": valid,
         "hasClientRegistration": snapshot.get("clientInfo").and_then(|client| string(client, "client_id")).is_some(),
         "refreshable": valid && tokens.and_then(|value| string(value, "refresh_token")).is_some(),
         "expired": tokens.map(store::expired),
-        "bindingValid": binding_valid,
+        "bindingValid": true,
     }))
 }
 
@@ -282,6 +301,24 @@ fn context_with_settings(
                 .ok_or_else(|| anyhow::anyhow!("config path has no parent"))?,
         )?);
     }
+    let client_secret_env = resolve(settings.client_secret_env)?;
+    let client_secret = if let Some(variable) = &client_secret_env {
+        let captured = definition.env.iter().find(|(name, _)| {
+            if cfg!(windows) {
+                name.eq_ignore_ascii_case(variable)
+            } else {
+                *name == variable
+            }
+        });
+        let value = match captured {
+            Some((_, value)) => Some(value.clone()),
+            // Missing or unusable secrets are reported only if an exchange needs them.
+            None => environment.get(variable).unwrap_or_default(),
+        };
+        value.filter(|value| !value.trim().is_empty())
+    } else {
+        settings.client_secret.map(str::to_owned)
+    };
     Ok(HttpAuth {
         server_name: server.name.clone(),
         server_url,
@@ -291,7 +328,8 @@ fn context_with_settings(
         directory_primary: token_cache_directory.is_some(),
         client_name: resolve(settings.client_name)?.unwrap_or_else(|| "mcp-cli".to_owned()),
         client_id: resolve(settings.client_id)?,
-        client_secret_env: resolve(settings.client_secret_env)?,
+        client_secret_env,
+        execution: ExecutionInputs { client_secret },
         token_auth_method: resolve(settings.token_auth_method)?,
         redirect_url: resolve(settings.redirect_url)?,
         client_metadata_url: resolve(settings.client_metadata_url)?,
@@ -306,24 +344,6 @@ fn context_with_settings(
             || crate::environment::credentials_read_only(),
         cached_only: false,
     })
-}
-
-fn read_context(server: &ConfiguredServer, settings: &OAuthSettings<'_>) -> Result<HttpAuth> {
-    let primary = context_with_settings(server, settings)?;
-    if server.definition.credential_scope.is_none()
-        || primary.directory_primary
-        || store::present(&primary)?
-    {
-        return Ok(primary);
-    }
-    let home = crate::config_paths::absolute(&crate::config_paths::home_directory()?)?;
-    if primary.vault_path.parent() == Some(home.as_path()) {
-        return Ok(primary);
-    }
-    let mut fallback = primary;
-    fallback.vault_path = home.join("credentials.json");
-    fallback.directory_stores.clear();
-    Ok(fallback)
 }
 
 pub(crate) fn string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {

@@ -2,8 +2,14 @@ use super::*;
 use std::time::Duration;
 
 impl HandshakeCache {
-    // Socket fixtures use the real expiration loop without waiting five minutes.
-    // Keep clock manipulation here so they cannot construct inconsistent cache states.
+    pub fn elapse_results(&mut self, elapsed: Duration) {
+        for request in [&mut self.server_discovery.requests, &mut self.tools_list] {
+            request.cached_until = request
+                .cached_until
+                .map(|deadline| deadline.checked_sub(elapsed).unwrap_or_else(Instant::now));
+        }
+    }
+
     pub fn elapse_shared_wait(&mut self, method: CacheableMethod, elapsed: Duration) {
         match method {
             CacheableMethod::Initialize => {

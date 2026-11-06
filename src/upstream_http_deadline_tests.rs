@@ -66,8 +66,16 @@ async fn caller_deadline_extends_existing_http_session_without_reinitialization(
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, false, BTreeMap::new(), Some(100), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        Some(100),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle.request_tx.send(initialize(1)).await?;
     assert!(message(&mut receiver).await?.get("result").is_some());
     handle
@@ -124,8 +132,16 @@ async fn caller_deadline_extends_legacy_response_wait_on_the_existing_stream() -
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, true, BTreeMap::new(), Some(100), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        true,
+        BTreeMap::new(),
+        Some(100),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(packet(1, "initialize", Value::from(600)).into())
@@ -172,8 +188,16 @@ async fn shorter_caller_deadline_does_not_cancel_shared_initialize_or_discovery(
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, false, BTreeMap::new(), Some(250), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        Some(250),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     for (identifier, method) in [(1, "initialize"), (2, "tools/list")] {
         handle
             .request_tx
@@ -183,12 +207,14 @@ async fn shorter_caller_deadline_does_not_cancel_shared_initialize_or_discovery(
     }
     let paginated = serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"cursor":"second"},"_mcp_pool_timeout_ms":5});
     handle.request_tx.send(paginated.to_string().into()).await?;
+    let failure = message(&mut receiver).await?;
     assert_eq!(
-        message(&mut receiver)
-            .await?
-            .pointer("/error/message")
-            .and_then(Value::as_str),
+        failure.pointer("/error/message").and_then(Value::as_str),
         Some("HTTP request deadline exceeded; request was not replayed")
+    );
+    assert_eq!(
+        failure.pointer("/error/data/mcpCliFailure"),
+        Some(&serde_json::json!({"kind":"timeout"}))
     );
     stop(&mut handle).await?;
     server.await??;
@@ -199,7 +225,16 @@ async fn shorter_caller_deadline_does_not_cancel_shared_initialize_or_discovery(
 async fn invalid_private_deadlines_are_correlated_and_never_sent_upstream() -> TestResult {
     let (listener, url) = fixture().await?;
     let (responses, mut receiver) = mpsc::channel(8);
-    let mut handle = spawn_configured(url, false, BTreeMap::new(), None, None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        None,
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     for invalid in [
         Value::Null,
         Value::from(0),
@@ -252,8 +287,16 @@ async fn fallback_keeps_caller_deadline_private_through_discovery_and_post() -> 
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, false, BTreeMap::new(), Some(100), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        Some(100),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(packet(1, "initialize", Value::from(600)).into())
@@ -330,17 +373,8 @@ async fn two_socket_clients_reuse_one_pool_with_different_request_deadlines() ->
         );
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
-    #[cfg(windows)]
-    let path = std::path::PathBuf::from(format!(
-        r"\\.\pipe\mcp-cli-deadline-{}-{port}",
-        std::process::id()
-    ));
-    #[cfg(unix)]
-    let path =
-        std::env::current_dir()?.join(format!(".deadline-pool-{}-{port}.sock", std::process::id()));
-    let proxy = Arc::new(crate::socket_proxy::SocketProxy::new(
+    let proxy = crate::socket_proxy::SocketProxy::fixture(
         format!("deadline-{port}"),
-        path.clone(),
         crate::upstream::UpstreamSpec::Http {
             url,
             sse: false,
@@ -348,9 +382,8 @@ async fn two_socket_clients_reuse_one_pool_with_different_request_deadlines() ->
             timeout_ms: Some(100),
             auth: None,
         },
-        true,
-        None,
-    ));
+    )?;
+    let path = proxy.socket_path();
     proxy.start().await?;
     let mut first = BufReader::new(crate::transport::connect(&path).await?);
     first
@@ -439,8 +472,16 @@ async fn legacy_idle_stream_survives_request_expiration_and_shutdown() -> TestRe
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, true, BTreeMap::new(), Some(50), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        true,
+        BTreeMap::new(),
+        Some(50),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     tokio::time::sleep(Duration::from_millis(200)).await;
     handle.request_tx.send(initialize(1)).await?;
     assert_eq!(

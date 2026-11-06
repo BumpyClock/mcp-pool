@@ -1,3 +1,6 @@
+#[path = "common/fixture_lifecycle.rs"]
+mod fixture_lifecycle;
+
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

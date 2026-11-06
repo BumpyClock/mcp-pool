@@ -34,6 +34,7 @@ class Fixture:
         self.events = Path(events)
         self.protocol = protocol
         self.lock = threading.Lock()
+        self.gates = {}
         self.record("spawn", parent=os.getppid(), protocol=protocol)
 
     def record(self, event, **details):
@@ -64,7 +65,19 @@ class Fixture:
                         raise ValueError("Incorrect modern HTTP method header")
                     if method == "tools/call" and headers.get("mcp-name") != parameters.get("name"):
                         raise ValueError("Incorrect modern HTTP name header")
-            if method == "server/discover":
+            if method in {"benchmark/hold", "benchmark/release"}:
+                token = parameters["token"]
+                if not isinstance(token, str) or not token:
+                    raise ValueError("Expected nonempty token")
+                with self.lock:
+                    if method == "benchmark/hold":
+                        if token in self.gates:
+                            raise ValueError("Token already held")
+                        self.gates[token] = threading.Event()
+                    else:
+                        self.gates.pop(token).set()
+                result = {}
+            elif method == "server/discover":
                 if self.protocol != "modern":
                     raise LookupError("Legacy fixture does not discover")
                 result = {"supportedVersions": [MODERN], "capabilities": {"tools": {}},
@@ -89,7 +102,11 @@ class Fixture:
                     raise ValueError("Invalid payloadBytes")
                 started = time.monotonic_ns()
                 cpu = time.thread_time_ns()
+                with self.lock:
+                    gate = self.gates.get(token)
                 self.record("call_started", token=token, delay_ms=delay, payload_bytes=size)
+                if gate is not None and not gate.wait(timeout=10):
+                    raise ValueError("Fixture release gate timed out")
                 if delay:
                     time.sleep(delay / 1000)
                 result = {"content": [{"type": "text", "text": json.dumps({

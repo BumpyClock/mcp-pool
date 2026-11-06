@@ -12,6 +12,8 @@ mod schema;
 pub use schema::hydrate;
 #[path = "tool_inputs.rs"]
 mod inputs;
+#[path = "tool_schema_view.rs"]
+pub(crate) mod schema_view;
 pub use inputs::{Inputs, merge_stdin};
 #[path = "tool_options.rs"]
 pub(crate) mod options;
@@ -126,11 +128,8 @@ pub struct Call {
     pub server: Option<String>,
     pub tool: Option<String>,
     pub arguments: Map<String, Value>,
-    pub argument_order: Vec<String>,
     pub positionals: Vec<Value>,
-    pub raw_values: BTreeMap<String, String>,
     pub generic_flags: BTreeSet<String>,
-    pub literal_values: BTreeSet<String>,
     pub inputs: Inputs,
     pub output: Output,
     pub timeout: Option<u64>,
@@ -225,11 +224,13 @@ fn unquote(content: &str) -> String {
 
 pub fn call(arguments: Vec<String>) -> Result<Call> {
     let mut result = Call::default();
+    let token_count = arguments.len();
     let mut tokens = std::collections::VecDeque::from(arguments);
     let mut positional = Vec::new();
     let mut literal = Vec::new();
     let mut named = Vec::new();
     while let Some(token) = tokens.pop_front() {
+        let order = token_count - tokens.len();
         if token == "--" {
             literal.extend(tokens);
             break;
@@ -260,32 +261,34 @@ pub fn call(arguments: Vec<String>) -> Result<Call> {
             }
             Some(CallOption::Json) => {
                 let content = value(&mut tokens, &token)?;
-                result.inputs.json(&content)?;
+                result.inputs.json(order, &content)?;
             }
             None if token.starts_with("--") => {
                 let flag = token.trim_start_matches("--");
                 if let Some((key, content)) = flag.split_once('=') {
                     result.generic_flags.insert(key.to_owned());
-                    result.inputs.named(key.to_owned(), content.to_owned());
+                    result
+                        .inputs
+                        .named(order, key.to_owned(), content.to_owned());
                 } else {
                     result.generic_flags.insert(flag.to_owned());
                     let content = match tokens.front() {
                         Some(next) if !next.starts_with("--") => value(&mut tokens, &token)?,
                         _ => "true".to_owned(),
                     };
-                    result.inputs.named(flag.to_owned(), content);
+                    result.inputs.named(order, flag.to_owned(), content);
                 }
             }
-            None => positional.push(token),
+            None => positional.push((order, token)),
         }
     }
     let mut positional = std::collections::VecDeque::from(positional);
-    if positional.front().is_some_and(|token| {
+    if positional.front().is_some_and(|(_, token)| {
         token.find('(').is_some_and(|opening| {
             !token.starts_with("http") || token.find('?').is_none_or(|query| opening < query)
         })
     }) {
-        let expression = value(&mut positional, "call expression")?;
+        let (order, expression) = positional.pop_front().context("Missing call expression")?;
         let opening = expression.find('(').context("Invalid call expression")?;
         if !expression.ends_with(')') {
             bail!("Unclosed call expression");
@@ -311,46 +314,49 @@ pub fn call(arguments: Vec<String>) -> Result<Call> {
             .context("Invalid call expression")?;
         for part in split_expression(contents)? {
             if let Some((key, content)) = named_token(&part) {
-                named.push((key, content));
+                named.push((order, key, content));
             } else {
                 result.positionals.push(call_value(part.trim(), &result));
             }
         }
-    } else if positional.front().is_some_and(|token| {
+    } else if positional.front().is_some_and(|(_, token)| {
         token.contains('.')
             && !token.contains('=')
             && (!token.contains(':') || token.starts_with("http"))
     }) && (result.server.is_none() || result.tool.is_none())
         && !result.ephemeral.present()
     {
-        if let Some(selector) = positional.pop_front() {
+        if let Some((_, selector)) = positional.pop_front() {
             set_selector(&mut result, &selector)?;
         }
     } else if result.server.is_none()
         && !result.ephemeral.present()
-        && let Some(selector) = positional.pop_front()
+        && let Some((_, selector)) = positional.pop_front()
     {
         set_selector(&mut result, &selector)?;
     }
     if result.tool.is_none()
         && positional
             .front()
-            .is_some_and(|token| named_token(token).is_none())
+            .is_some_and(|(_, token)| named_token(token).is_none())
     {
-        result.tool = positional.pop_front();
+        result.tool = positional.pop_front().map(|(_, token)| token);
     }
-    while let Some(token) = positional.pop_front() {
+    while let Some((order, token)) = positional.pop_front() {
         if let Some((key, mut content)) = named_token(&token) {
             if content.is_empty() && token.ends_with(':') {
-                content = value(&mut positional, &token)?;
+                content = positional
+                    .pop_front()
+                    .map(|(_, token)| token)
+                    .with_context(|| format!("Argument '{token}' requires a value"))?;
             }
-            named.push((key, content));
+            named.push((order, key, content));
         } else {
             result.positionals.push(call_value(&token, &result));
         }
     }
-    for (key, content) in named {
-        result.inputs.named(key, content);
+    for (order, key, content) in named {
+        result.inputs.named(order, key, content);
     }
     let mut inputs = std::mem::take(&mut result.inputs);
     inputs.prepare(&result)?;

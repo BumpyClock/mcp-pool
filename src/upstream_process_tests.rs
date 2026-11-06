@@ -291,7 +291,13 @@ async fn natural_exit_retires_remaining_descendants() -> io::Result<()> {
 async fn backpressure_does_not_block_retirement() -> io::Result<()> {
     let (mut handle, mut responses) = fixture("flood", 1).await?;
     let identifiers = tree(&mut responses).await?;
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while responses.len() != responses.max_capacity() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(io::Error::other)?;
     tokio::time::timeout(Duration::from_secs(15), handle.shutdown())
         .await
         .map_err(io::Error::other)??;

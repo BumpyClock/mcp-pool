@@ -25,10 +25,14 @@ pub(super) async fn save_images(result: &Value, directory: Option<&Path>) -> Res
 }
 
 fn save(directory: &Path, content: &[Value]) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis();
+    save_at(directory, content, timestamp)
+}
+
+fn save_at(directory: &Path, content: &[Value], timestamp: u128) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
     for (index, image) in content
         .iter()
         .enumerate()
@@ -144,45 +148,5 @@ fn read_tail(path: &Path) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn image_and_log_artifacts_are_bounded_and_do_not_overwrite() -> Result<()> {
-        let directory = std::env::current_dir()?
-            .join("target")
-            .join(format!("artifact-fixture-{}", std::process::id()));
-        std::fs::create_dir_all(&directory)?;
-        let result = (|| {
-            let images =
-                vec![serde_json::json!({"type":"image","data":"aGVsbG8=","mimeType":"image/png"})];
-            let first = save(&directory, &images)?;
-            let second = save(&directory, &images)?;
-            assert_ne!(first, second);
-            assert_eq!(
-                std::fs::read(first.first().context("image path")?)?,
-                b"hello"
-            );
-            let log = directory.join("fixture.log");
-            std::fs::write(
-                &log,
-                (0..30)
-                    .map(|index| index.to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )?;
-            let tail = read_tail(&log)?;
-            assert_eq!(tail.lines().count(), 20);
-            assert!(tail.starts_with("10\n"));
-            for contents in ["", "one", "one\ntwo\n"] {
-                std::fs::write(&log, contents)?;
-                assert_eq!(read_tail(&log)?, contents.trim_end_matches('\n'));
-            }
-            std::fs::write(&log, format!("{}partial\nlast\n", "x".repeat(1024 * 1024)))?;
-            assert_eq!(read_tail(&log)?, "last");
-            assert!(read_tail(Path::new("relative.log")).is_err());
-            Ok(())
-        })();
-        std::fs::remove_dir_all(directory)?;
-        result
-    }
-}
+#[path = "tool_artifact_tests.rs"]
+mod tests;

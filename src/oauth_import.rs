@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
-use serde_json::{Map, Value};
+use anyhow::{Result, bail};
+use serde_json::Value;
 
-use super::{HttpAuth, ensure_writable, files, protocol, store, string};
+use super::{HttpAuth, protocol, store};
 
 #[cfg(test)]
 #[path = "oauth_import_tests.rs"]
@@ -39,41 +39,8 @@ pub(crate) enum Decision {
 }
 
 pub(crate) struct PendingImport {
-    authentication: HttpAuth,
+    destination: store::ImportDestination,
     payload: Value,
-    expected: DestinationSlot,
-}
-
-#[derive(PartialEq)]
-struct DestinationSlot {
-    entries: Map<String, Value>,
-    server_url: Option<Value>,
-}
-
-impl DestinationSlot {
-    fn inspect(authentication: &HttpAuth, vault: &Value) -> Result<Self> {
-        let alias = format!("{}-oauth", authentication.server_name);
-        let entries = vault
-            .get("entries")
-            .and_then(Value::as_object)
-            .context("Invalid vault entries")?
-            .iter()
-            .filter(|(key, entry)| {
-                *key == &authentication.identity_key
-                    || string(entry, "serverName") == Some(authentication.server_name.as_str())
-                    || (string(entry, "serverName") == Some(alias.as_str())
-                        && string(entry, "serverUrl") == Some(authentication.server_url.as_str()))
-            })
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        Ok(Self {
-            entries,
-            server_url: vault
-                .get("serverUrls")
-                .and_then(|urls| urls.get(&authentication.server_name))
-                .cloned(),
-        })
-    }
 }
 
 impl PendingImport {
@@ -101,18 +68,12 @@ impl PendingImport {
         {
             protocol::validate_discovery(authentication, discovery)?;
         }
-        let mut incoming = content(&source.snapshot);
+        let mut incoming = store::import_content(&source.snapshot);
         incoming.insert("state".to_owned(), Value::Null);
         incoming.insert("codeVerifier".to_owned(), Value::Null);
-        let vault = store::vault(authentication)?;
-        let expected = DestinationSlot::inspect(authentication, &vault)?;
-        if !expected.entries.is_empty() {
-            let reachable = store::matching(authentication, &vault);
-            if reachable.len() == expected.entries.len()
-                && reachable.iter().all(|(_, entry)| {
-                    content(entry) == incoming && super::reconcile::validate_client(entry).is_ok()
-                })
-            {
+        let destination = store::ImportDestination::inspect(authentication)?;
+        if !destination.is_empty() {
+            if destination.equivalent(&incoming) {
                 return Ok(Decision::Unchanged);
             }
             if !replace {
@@ -123,64 +84,16 @@ impl PendingImport {
             }
         }
         Ok(Decision::Import(Box::new(Self {
-            authentication: authentication.clone(),
+            destination,
             payload: Value::Object(incoming),
-            expected,
         })))
     }
 
     pub(crate) fn ensure_writable(&self) -> Result<()> {
-        ensure_writable(&self.authentication)
+        self.destination.ensure_writable()
     }
 
     pub(crate) fn commit(&self) -> Result<()> {
-        self.ensure_writable()?;
-        let _transaction = store::transaction(&self.authentication)?;
-        let _vault_lock = files::Lock::acquire(&self.authentication.vault_path)?;
-        let mut vault = store::vault(&self.authentication)?;
-        let current = DestinationSlot::inspect(&self.authentication, &vault)?;
-        if current != self.expected {
-            bail!(
-                "Destination authentication state changed during import; rerun without overwriting newer credentials"
-            );
-        }
-        let candidates: Vec<Value> = current.entries.values().cloned().collect();
-        let previous = current
-            .entries
-            .get(&self.authentication.identity_key)
-            .or_else(|| current.entries.values().next())
-            .cloned()
-            .unwrap_or_default();
-        // Replacement may retire old bindings, but never makes them usable under the incoming client.
-        let entries = vault
-            .get_mut("entries")
-            .and_then(Value::as_object_mut)
-            .context("Invalid vault entries")?;
-        for key in current.entries.keys() {
-            entries.remove(key);
-        }
-        store::save_entry(
-            &self.authentication,
-            &mut vault,
-            &self.payload,
-            &previous,
-            &candidates,
-        )
+        self.destination.commit(&self.payload)
     }
-}
-
-fn content(snapshot: &Value) -> Map<String, Value> {
-    let mut fields: Map<String, Value> = store::DIRECTORY_FIELDS
-        .iter()
-        .map(|(field, _, _)| {
-            (
-                (*field).to_owned(),
-                snapshot.get(*field).cloned().unwrap_or(Value::Null),
-            )
-        })
-        .collect();
-    if let Some(tokens) = fields.get_mut("tokens").and_then(Value::as_object_mut) {
-        tokens.remove("__mcp_pool_commit");
-    }
-    fields
 }

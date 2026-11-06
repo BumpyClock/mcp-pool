@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::request::ExchangeKind;
 use super::*;
 
 struct Pending {
     identifier: Value,
-    initialize: bool,
+    kind: ExchangeKind,
     answered: Arc<AtomicBool>,
-    done: oneshot::Sender<Result<(), String>>,
+    done: oneshot::Sender<Result<(), HttpFailure>>,
 }
 
 type Requests = Arc<Mutex<HashMap<String, Pending>>>;
@@ -18,8 +19,11 @@ pub(super) async fn spawn(
     url: reqwest::Url,
     response_tx: mpsc::Sender<String>,
     options: Options,
-    startup_budget: Option<crate::request_deadline::SharedDeadline>,
+    initial_request: Option<Request>,
 ) -> io::Result<UpstreamHandle> {
+    let startup_budget = initial_request
+        .as_ref()
+        .map(|request| request.budget.clone());
     let discovery_budget = match &startup_budget {
         Some(budget) => budget.clone(),
         None => crate::request_deadline::SharedDeadline::new(
@@ -83,7 +87,7 @@ pub(super) async fn spawn(
                     return Err("Legacy SSE endpoint discovery frame is invalid".into());
                 }
                 if let Some(endpoint) = endpoint {
-                    return Ok::<_, String>((response, decoder, endpoint));
+                    return Ok::<_, HttpFailure>((response, decoder, endpoint));
                 }
             }
         })
@@ -94,6 +98,7 @@ pub(super) async fn spawn(
     let (request_tx, request_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (completion_tx, completion) = watch::channel(None);
+    let log = options.log.clone();
     tokio::spawn(async move {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let session = Arc::new(Mutex::new(Session::Fresh));
@@ -105,10 +110,12 @@ pub(super) async fn spawn(
                 &pending,
                 &session,
                 &response_tx,
+                &options.log,
             );
             let requests = run_requests(
                 &client,
                 &endpoint,
+                initial_request,
                 request_rx,
                 &pending,
                 &session,
@@ -130,11 +137,11 @@ pub(super) async fn spawn(
         drop(response);
         drop(client);
         if result.is_err() {
-            crate::diagnostics::log("upstream_http_legacy_transport_stopped");
+            options.log.log("upstream_http_legacy_transport_stopped");
         }
         completion_tx.send_replace(Some(Ok(())));
     });
-    Ok(UpstreamHandle::new(request_tx, shutdown_tx, completion))
+    Ok(UpstreamHandle::new(request_tx, shutdown_tx, completion).with_log(log))
 }
 
 async fn receive(
@@ -143,8 +150,9 @@ async fn receive(
     pending: &Requests,
     session: &Arc<Mutex<Session>>,
     response_tx: &mpsc::Sender<String>,
-) -> Result<(), String> {
-    let result = receive_events(response, decoder, pending, session, response_tx).await;
+    log: &ServerLog,
+) -> Result<(), HttpFailure> {
+    let result = receive_events(response, decoder, pending, session, response_tx, log).await;
     if result.is_err() {
         let requests: Vec<Pending> = pending
             .lock()
@@ -153,10 +161,14 @@ async fn receive(
             .map(|(_, request)| request)
             .collect();
         for request in requests {
-            send_error(
+            send_failure(
                 response_tx,
                 Some(&request.identifier),
-                "Legacy SSE connection failed; request was not replayed",
+                &HttpFailure::new(
+                    FailureKind::Offline,
+                    "Legacy SSE connection failed; request was not replayed",
+                ),
+                log,
             )
             .await;
             request.answered.store(true, Ordering::Release);
@@ -172,7 +184,8 @@ async fn receive_events(
     pending: &Requests,
     session: &Arc<Mutex<Session>>,
     response_tx: &mpsc::Sender<String>,
-) -> Result<(), String> {
+    log: &ServerLog,
+) -> Result<(), HttpFailure> {
     loop {
         let chunk = response
             .chunk()
@@ -194,7 +207,7 @@ async fn receive_events(
                 None => None,
             };
             if let Some(request) = request {
-                let result = if request.initialize && value.get("result").is_some() {
+                let result = if request.kind.is_initialize() && value.get("result").is_some() {
                     match value
                         .pointer("/result/protocolVersion")
                         .and_then(Value::as_str)
@@ -226,7 +239,7 @@ async fn receive_events(
                     request.answered.store(true, Ordering::Release);
                 }
                 if request.done.send(result).is_err() {
-                    crate::diagnostics::log("upstream_http_legacy_request_waiter_closed");
+                    log.log("upstream_http_legacy_request_waiter_closed");
                 }
             } else {
                 response_tx
@@ -236,7 +249,7 @@ async fn receive_events(
             }
         }
         if let Some(error) = feed.error {
-            return Err(error);
+            return Err(error.into());
         }
     }
 }
@@ -245,13 +258,26 @@ async fn receive_events(
 async fn run_requests(
     client: &reqwest::Client,
     endpoint: &reqwest::Url,
+    initial_request: Option<Request>,
     mut request_rx: mpsc::Receiver<crate::upstream::UpstreamRequest>,
     pending: &Requests,
     session: &Arc<Mutex<Session>>,
     response_tx: &mpsc::Sender<String>,
     workers: &mut JoinSet<()>,
     options: &Options,
-) -> Result<(), String> {
+) -> Result<(), HttpFailure> {
+    if let Some(request) = initial_request {
+        execute(
+            client,
+            endpoint,
+            request,
+            pending,
+            session,
+            response_tx,
+            options,
+        )
+        .await;
+    }
     loop {
         tokio::select! {
             biased;
@@ -268,14 +294,14 @@ async fn run_requests(
                 };
                 let request = match Request::parse(line, options) {
                     Ok(request) => request,
-                    Err((line, error)) => {
+                    Err((line, failure)) => {
                         let value = serde_json::from_str::<Value>(&line).ok();
                         let identifier = value.as_ref().and_then(|value| value.get("id"));
-                        send_error(response_tx, identifier, &error).await;
+                        send_failure(response_tx, identifier, &failure, &options.log).await;
                         continue;
                     }
                 };
-                if request.initialization_barrier {
+                if request.kind.is_barrier() {
                     while workers.join_next().await.is_some() {}
                     execute(client, endpoint, request, pending, session, response_tx, options).await;
                 } else {
@@ -315,7 +341,7 @@ async fn execute(
                         .into(),
                 );
             }
-            if matches!(state, Session::Ready { .. }) && request.initialize {
+            if matches!(state, Session::Ready { .. }) && request.kind.is_initialize() {
                 return Err("Legacy SSE upstream is already initialized".into());
             }
             let (done, completed) = oneshot::channel();
@@ -324,7 +350,7 @@ async fn execute(
                     key.clone(),
                     Pending {
                         identifier: identifier.clone(),
-                        initialize: request.initialize,
+                        kind: request.kind,
                         answered: answered.clone(),
                         done,
                     },
@@ -341,23 +367,28 @@ async fn execute(
                     ),
                 ]));
             if let Session::Ready { protocol, .. } = state {
-                builder = builder.header("MCP-Protocol-Version", protocol);
+                builder = builder.header(crate::mcp_protocol::PROTOCOL_VERSION_HEADER, protocol);
             }
-            let response = builder
-                .body(request.line)
-                .send()
-                .await
-                .map_err(|_| "Legacy SSE POST failed; request was not replayed")?;
+            let response = builder.body(request.line).send().await.map_err(|_| {
+                HttpFailure::new(
+                    FailureKind::Offline,
+                    "Legacy SSE POST failed; request was not replayed",
+                )
+            })?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
                 *session.lock().await = Session::Expired;
-                return Err(
-                    "Legacy SSE session expired (HTTP 404); request was not replayed".into(),
-                );
+                return Err(HttpFailure::status(
+                    404,
+                    "Legacy SSE session expired (HTTP 404); request was not replayed",
+                ));
             }
             if !response.status().is_success() {
-                return Err(format!(
-                    "Legacy SSE POST returned status {}; request was not replayed",
-                    response.status().as_u16()
+                return Err(HttpFailure::status(
+                    response.status().as_u16(),
+                    format!(
+                        "Legacy SSE POST returned status {}; request was not replayed",
+                        response.status().as_u16()
+                    ),
                 ));
             }
             if key.is_some() {
@@ -370,7 +401,10 @@ async fn execute(
         })
         .await
         .unwrap_or_else(|_| {
-            Err("Legacy SSE request deadline exceeded; request was not replayed".into())
+            Err(HttpFailure::new(
+                FailureKind::Timeout,
+                "Legacy SSE request deadline exceeded; request was not replayed",
+            ))
         });
     if let Some(key) = key {
         pending.lock().await.remove(&key);
@@ -378,6 +412,12 @@ async fn execute(
     if let Err(error) = result
         && !answered.load(Ordering::Acquire)
     {
-        send_error(response_tx, request.identifier.as_ref(), &error).await;
+        send_failure(
+            response_tx,
+            request.identifier.as_ref(),
+            &error,
+            &options.log,
+        )
+        .await;
     }
 }

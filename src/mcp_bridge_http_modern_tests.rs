@@ -15,6 +15,10 @@ use crate::mcp_bridge::{
     test_fixture::{self, Fixture},
 };
 
+#[path = "mcp_bridge_sse_test_reader.rs"]
+mod sse_reader;
+use sse_reader::SseReader;
+
 const MODERN_VERSION: &str = "2026-07-28";
 const ACCEPT: &str = "application/json, text/event-stream";
 
@@ -179,7 +183,7 @@ async fn modern_listener_acknowledges_filters_and_streams_pool_notifications() -
     let (state, fixture) = notification_state().await?;
     let (url, shutdown, server) = start_http(Arc::new(state)).await?;
     let client = reqwest::Client::new();
-    let mut response = client
+    let response = client
         .post(url.as_str())
         .header("accept", ACCEPT)
         .header("mcp-protocol-version", MODERN_VERSION)
@@ -195,7 +199,8 @@ async fn modern_listener_acknowledges_filters_and_streams_pool_notifications() -
             .and_then(|value| value.to_str().ok()),
         Some("text/event-stream; charset=utf-8")
     );
-    let acknowledgement = read_sse_message(&mut response).await?;
+    let mut stream = SseReader::new(response);
+    let acknowledgement = stream.message().await?;
     assert_eq!(
         acknowledgement.get("method").and_then(Value::as_str),
         Some("notifications/subscriptions/acknowledged")
@@ -213,11 +218,11 @@ async fn modern_listener_acknowledges_filters_and_streams_pool_notifications() -
         Some("listen-one")
     );
 
-    let keepalive = timeout(Duration::from_millis(500), response.chunk())
+    let keepalive = timeout(Duration::from_millis(500), stream.frame())
         .await
         .context("SSE keepalive was not sent")??
         .context("SSE stream ended before its keepalive")?;
-    assert!(String::from_utf8_lossy(&keepalive).contains(": keepalive"));
+    assert!(std::str::from_utf8(&keepalive)?.contains(": keepalive"));
     sleep(Duration::from_millis(350)).await;
     assert_eq!(fixture.connections(), 2);
     fixture.notify(json!({
@@ -230,7 +235,7 @@ async fn modern_listener_acknowledges_filters_and_streams_pool_notifications() -
         "method":"notifications/tools/list_changed",
         "params":{}
     }))?;
-    let changed = read_sse_message(&mut response).await?;
+    let changed = stream.message().await?;
     assert_eq!(
         changed.get("method").and_then(Value::as_str),
         Some("notifications/tools/list_changed")
@@ -255,14 +260,14 @@ async fn modern_listener_acknowledges_filters_and_streams_pool_notifications() -
         "method":"notifications/tools/list_changed",
         "params":{"generation":2}
     }))?;
-    let after_reconnect = read_sse_message(&mut response).await?;
+    let after_reconnect = stream.message().await?;
     assert_eq!(
         after_reconnect.pointer("/params/generation"),
         Some(&json!(2))
     );
     assert_eq!(fixture.connections(), 3);
 
-    drop(response);
+    drop(stream);
     fixture.wait_for(3, 1, 0).await?;
     shutdown.send_replace(true);
     server.await??;
@@ -274,7 +279,7 @@ async fn modern_listener_completes_before_graceful_http_shutdown() -> Result<()>
     let (state, fixture) = notification_state().await?;
     let (url, shutdown, server) = start_http(Arc::new(state)).await?;
     let client = reqwest::Client::new();
-    let mut response = client
+    let response = client
         .post(url.as_str())
         .header("accept", ACCEPT)
         .header("mcp-protocol-version", MODERN_VERSION)
@@ -282,7 +287,8 @@ async fn modern_listener_completes_before_graceful_http_shutdown() -> Result<()>
         .json(&listen_request("listen-close"))
         .send()
         .await?;
-    let acknowledgement = read_sse_message(&mut response).await?;
+    let mut stream = SseReader::new(response);
+    let acknowledgement = stream.message().await?;
     assert_eq!(
         acknowledgement.get("method").and_then(Value::as_str),
         Some("notifications/subscriptions/acknowledged")
@@ -290,7 +296,7 @@ async fn modern_listener_completes_before_graceful_http_shutdown() -> Result<()>
     assert_eq!(fixture.connections(), 2);
 
     shutdown.send_replace(true);
-    let completion = timeout(Duration::from_millis(750), read_sse_message(&mut response))
+    let completion = timeout(Duration::from_millis(750), stream.message())
         .await
         .context("SSE stream did not complete promptly during shutdown")??;
     assert_eq!(
@@ -316,7 +322,7 @@ async fn modern_listener_completes_before_graceful_http_shutdown() -> Result<()>
         Some("mcp-cli")
     );
     assert!(
-        timeout(Duration::from_millis(750), response.chunk())
+        timeout(Duration::from_millis(750), stream.frame())
             .await
             .context("SSE response did not close after completion")??
             .is_none()
@@ -418,22 +424,4 @@ fn listen_request(id: &str) -> Value {
             "notifications":{"toolsListChanged":true}
         }
     })
-}
-
-async fn read_sse_message(response: &mut reqwest::Response) -> Result<Value> {
-    let mut buffer = String::new();
-    loop {
-        let chunk = timeout(Duration::from_secs(2), response.chunk())
-            .await
-            .context("SSE message deadline exceeded")??
-            .context("SSE stream ended before its next message")?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(frame_end) = buffer.find("\n\n") {
-            let frame = buffer.drain(..frame_end + 2).collect::<String>();
-            let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data: ")) else {
-                continue;
-            };
-            return serde_json::from_str(data).context("SSE frame had invalid JSON");
-        }
-    }
 }

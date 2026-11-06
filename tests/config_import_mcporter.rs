@@ -1,3 +1,6 @@
+#[path = "common/fixture_lifecycle.rs"]
+mod fixture_lifecycle;
+
 use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};

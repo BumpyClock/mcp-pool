@@ -69,8 +69,8 @@ pub struct SocketProxy {
     name: String,
     socket_path: PathBuf,
     spec: UpstreamSpec,
-    owned: bool,
     configuration_entry: Option<crate::config::ConfigurationEntry>,
+    diagnostics: diagnostics::ServerLog,
     operation: tokio::sync::Mutex<()>,
     stop_requested: AtomicBool,
     status: Arc<Mutex<ServerStatus>>,
@@ -78,6 +78,8 @@ pub struct SocketProxy {
     started_at: Arc<Mutex<Option<Instant>>>,
     #[cfg(test)]
     test_setup: Mutex<Option<generation::TestSetup>>,
+    #[cfg(test)]
+    _test_endpoint: Option<test_endpoint::Endpoint>,
 }
 
 impl SocketProxy {
@@ -85,26 +87,28 @@ impl SocketProxy {
         name: String,
         socket_path: PathBuf,
         spec: UpstreamSpec,
-        owned: bool,
         configuration_entry: Option<crate::config::ConfigurationEntry>,
     ) -> Self {
+        let diagnostics = diagnostics::ServerLog::new(
+            configuration_entry
+                .as_ref()
+                .map_or(name.as_str(), |entry| entry.name.as_str()),
+        );
         Self {
+            diagnostics,
             name,
             socket_path,
             spec,
-            owned,
             configuration_entry,
             operation: tokio::sync::Mutex::new(()),
             stop_requested: AtomicBool::new(false),
-            status: Arc::new(Mutex::new(if owned {
-                ServerStatus::Stopped
-            } else {
-                ServerStatus::Running
-            })),
+            status: Arc::new(Mutex::new(ServerStatus::Stopped)),
             generation: Mutex::new(None),
             started_at: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             test_setup: Mutex::new(None),
+            #[cfg(test)]
+            _test_endpoint: None,
         }
     }
 
@@ -114,10 +118,6 @@ impl SocketProxy {
 
     pub fn socket_path(&self) -> PathBuf {
         self.socket_path.clone()
-    }
-
-    pub fn is_owned(&self) -> bool {
-        self.owned
     }
 
     pub fn configuration_entry(&self) -> Option<&crate::config::ConfigurationEntry> {
@@ -145,14 +145,10 @@ impl SocketProxy {
             .map_or(0, |generation| generation.clients.lock().len() as u32)
     }
 
-    /// Discovered endpoints confirm only that their local socket exists.
     pub fn readiness(&self) -> ServerReadiness {
         let generation = self.generation.lock().clone();
         let Some(generation) = generation else {
-            return ServerReadiness {
-                local_socket_bound: !self.owned && self.status() == ServerStatus::Running,
-                ..ServerReadiness::default()
-            };
+            return ServerReadiness::default();
         };
         let startup = generation.startup.borrow().clone();
         let completion = generation.completion.borrow().clone();
@@ -162,10 +158,7 @@ impl SocketProxy {
                 && completion.is_none()
                 && self.status() == ServerStatus::Running
                 && !generation.shutdown.load(Ordering::SeqCst),
-            mcp_initialize_result_received: generation
-                .handshake_cache
-                .lock()
-                .initialization_ready(),
+            mcp_initialize_result_received: generation.routes.initialization_ready(),
             startup_error: startup.and_then(Result::err),
             retirement_error: completion.and_then(Result::err),
         }
@@ -186,10 +179,6 @@ impl SocketProxy {
         if self.stop_requested.load(Ordering::SeqCst) {
             return Err(io::Error::other("pool stopped during upstream startup"));
         }
-        if !self.owned {
-            *self.status.lock() = ServerStatus::Running;
-            return Ok(());
-        }
         if let Some(previous) = previous {
             if !previous.shutdown.load(Ordering::SeqCst) && previous.completion.borrow().is_none() {
                 return generation::wait_completion(previous.startup.clone()).await;
@@ -198,7 +187,7 @@ impl SocketProxy {
         }
 
         *self.status.lock() = ServerStatus::Starting;
-        let generation = Arc::new(Generation::new());
+        let generation = Arc::new(Generation::new(self.diagnostics.clone()));
         *self.generation.lock() = Some(generation.clone());
         let listener = match crate::transport::bind(&self.socket_path) {
             Ok(listener) => Arc::new(listener),
@@ -212,7 +201,7 @@ impl SocketProxy {
         if self.stop_requested.load(Ordering::SeqCst) {
             generation.signal_shutdown();
         }
-        diagnostics::log(format!(
+        self.diagnostics.log(format!(
             "pool_proxy_starting name={} transport={}",
             self.name,
             self.transport()
@@ -248,9 +237,6 @@ impl SocketProxy {
     }
 
     pub async fn restart(self: &Arc<Self>) -> io::Result<()> {
-        if !self.owned {
-            return Ok(());
-        }
         let _operation = self.operation.lock().await;
         self.stop_locked().await?;
         self.start_locked().await
@@ -265,14 +251,14 @@ impl SocketProxy {
             return;
         }
         if let Err(error) = generation::wait_completion(previous.completion.clone()).await {
-            diagnostics::log(format!(
+            self.diagnostics.log(format!(
                 "pool_recovery_failed name={} error={error}",
                 self.name
             ));
             return;
         }
         if let Err(error) = self.start_locked().await {
-            diagnostics::log(format!(
+            self.diagnostics.log(format!(
                 "pool_recovery_failed name={} error={error}",
                 self.name
             ));
@@ -285,6 +271,10 @@ impl Drop for SocketProxy {
         self.request_stop();
     }
 }
+
+#[cfg(test)]
+#[path = "socket_proxy_test_endpoint.rs"]
+mod test_endpoint;
 
 #[cfg(test)]
 #[path = "socket_proxy_delivery_tests.rs"]

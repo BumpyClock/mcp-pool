@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::CommandFactory;
 
+use crate::cli_syntax;
+
 pub(super) fn top_level_only(command: &str) -> bool {
     matches!(
         command,
@@ -62,14 +64,13 @@ pub(crate) fn rewrite_help(arguments: Vec<String>, command_position: usize) -> V
         .filter(|argument| !argument.starts_with('-'));
     if let Some(target) = target {
         rewritten.push(target.clone());
-        rewritten.extend(
-            arguments
-                .get(command_position + 2..)
-                .unwrap_or_default()
-                .iter()
-                .cloned(),
-        );
+        let tail = arguments.get(command_position + 2..).unwrap_or_default();
+        let help_position = cli_syntax::CommandSyntax::parse(tail)
+            .literal_position
+            .unwrap_or(tail.len());
+        rewritten.extend_from_slice(tail.get(..help_position).unwrap_or_default());
         rewritten.push("--help".to_owned());
+        rewritten.extend_from_slice(tail.get(help_position..).unwrap_or_default());
     } else {
         rewritten.push("--help".to_owned());
     }
@@ -98,12 +99,13 @@ pub(crate) fn infer(
 
     if configuration.servers.contains_key(command) {
         let next_positional = first_positional(remaining);
-        if next_positional.is_some_and(|index| {
-            remaining
-                .get(index)
-                .is_some_and(|argument| argument == "list")
+        if next_positional.is_some_and(|(index, literal)| {
+            !literal
+                && remaining
+                    .get(index)
+                    .is_some_and(|argument| argument == "list")
         }) {
-            let marker = next_positional.context("missing inferred list selector")?;
+            let (marker, _) = next_positional.context("missing inferred list selector")?;
             let mut routed = arguments
                 .get(..command_position)
                 .context("missing inferred MCP command prefix")?
@@ -117,7 +119,7 @@ pub(crate) fn infer(
             }
             return Ok(routed);
         }
-        if let Some(index) = next_positional {
+        if let Some((index, _)) = next_positional {
             return route_server_call(arguments, command_position, index, command);
         }
         let mut routed = arguments
@@ -163,6 +165,8 @@ fn split_configured_selector(
     configuration: &crate::server_config::ServerConfiguration,
     selector: &str,
 ) -> Result<(String, String)> {
+    // Inference knows configured names and prefers the longest server prefix.
+    // Explicit `call SERVER.TOOL` instead splits at the first dot in tool_arguments.
     let mut prefix = String::new();
     let mut server = None;
     for segment in selector.split('.') {
@@ -201,7 +205,9 @@ fn route_server_call(
         let argument = arguments
             .get(index)
             .context("missing inferred MCP server argument")?;
-        let width = global_argument_width(argument, arguments.get(index + 1));
+        let width = cli_syntax::global(argument)
+            .filter(|option| option.id != "json")
+            .map_or(0, |option| option.width);
         if width > 0 {
             global.extend_from_slice(
                 arguments
@@ -221,12 +227,19 @@ fn route_server_call(
     routed.push("call".to_owned());
     routed.push("--server".to_owned());
     routed.push(server.to_owned());
+    let literal_tool = between.last().is_some_and(|argument| argument == "--");
+    if literal_tool {
+        between.pop();
+    }
     routed.extend(between);
     if tool.contains('(') {
         routed.push(tool.to_owned());
     } else {
         routed.push("--tool".to_owned());
         routed.push(tool.to_owned());
+    }
+    if literal_tool {
+        routed.push("--".to_owned());
     }
     routed.extend_from_slice(
         arguments
@@ -236,42 +249,18 @@ fn route_server_call(
     Ok(routed)
 }
 
-fn global_argument_width(argument: &str, next: Option<&String>) -> usize {
-    if argument.contains('=') {
-        return if matches!(
-            argument.split_once('=').map(|(flag, _)| flag),
-            Some("--config" | "--root" | "--log-level" | "--oauth-timeout")
-        ) {
-            1
-        } else {
-            0
-        };
-    }
-    if matches!(argument, "--debug" | "--no-color" | "--plain") {
-        return 1;
-    }
-    if matches!(
-        argument,
-        "--config" | "--root" | "--log-level" | "--oauth-timeout"
-    ) && next.is_some()
-    {
-        return 2;
-    }
-    0
-}
-
-fn first_positional(arguments: &[String]) -> Option<usize> {
+fn first_positional(arguments: &[String]) -> Option<(usize, bool)> {
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "--" {
-            return (index + 1 < arguments.len()).then_some(index + 1);
+            return (index + 1 < arguments.len()).then_some((index + 1, true));
         }
         if !argument.starts_with('-') {
-            return Some(index);
+            return Some((index, false));
         }
         if argument.split_once('=').is_none()
             && (crate::tool_arguments::options::takes_value(argument)
-                || global_argument_width(argument, arguments.get(index + 1)) == 2)
+                || cli_syntax::global(argument).is_some_and(|option| option.width == 2))
         {
             index += 2;
         } else {
@@ -282,49 +271,5 @@ fn first_positional(arguments: &[String]) -> Option<usize> {
 }
 
 pub(crate) fn global_paths(arguments: &[String]) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
-    let mut config_path = None;
-    let mut root = None;
-    let mut index = 0;
-    while let Some(argument) = arguments.get(index) {
-        if argument == "--" {
-            break;
-        }
-        let (flag, inline) = argument
-            .split_once('=')
-            .map_or((argument.as_str(), None), |(flag, value)| {
-                (flag, Some(value))
-            });
-        let value = match flag {
-            "--config" => inline
-                .map(str::to_owned)
-                .or_else(|| arguments.get(index + 1).cloned())
-                .context("--config requires a path")?,
-            "--root" => inline
-                .map(str::to_owned)
-                .or_else(|| arguments.get(index + 1).cloned())
-                .context("--root requires a path")?,
-            _ => {
-                index += 1;
-                continue;
-            }
-        };
-        if flag == "--config" {
-            config_path = Some(PathBuf::from(value));
-        } else {
-            root = Some(PathBuf::from(value));
-        }
-        index += usize::from(inline.is_none()) + 1;
-    }
-    if let Some(directory) = root.as_mut() {
-        *directory = crate::config_paths::absolute(directory)?;
-        if !directory.is_dir() {
-            bail!("--root must name an existing directory");
-        }
-        if let Some(path) = config_path.as_mut()
-            && path.is_relative()
-        {
-            *path = directory.join(&*path);
-        }
-    }
-    Ok((config_path, root))
+    crate::mcp_cli::context::global_paths(arguments)
 }

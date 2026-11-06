@@ -9,9 +9,9 @@ use crate::tool_arguments::{AdHoc, Output, positive_milliseconds, value};
 
 #[path = "tool_discovery_error.rs"]
 mod errors;
+pub(crate) use errors::Failure;
 #[cfg(test)]
-use errors::category;
-pub(crate) use errors::issue;
+use errors::{category, issue};
 
 #[path = "tool_discovery_report.rs"]
 mod report;
@@ -88,7 +88,6 @@ fn parse(arguments: Vec<String>) -> Result<Flags> {
     Ok(flags)
 }
 
-/// Reports servers in name order (the configuration map order) while discovering them concurrently.
 pub async fn run(configuration: ServerConfiguration, arguments: Vec<String>) -> Result<()> {
     let mut flags = parse(arguments)?;
     let progress = crate::cli_progress::Progress::new(!flags.json && !flags.quiet);
@@ -172,6 +171,12 @@ async fn execute(
     mut progress: crate::cli_progress::Progress,
 ) -> Result<()> {
     let total = selected.len();
+    if !flags.json && !flags.quiet && !detailed && total > 0 {
+        report::print_header(
+            total,
+            &crate::tool_documentation::Style::terminal(flags.no_color),
+        );
+    }
     let mut pending = VecDeque::from(selected);
     let mut tasks = tokio::task::JoinSet::new();
     let mut completed = Vec::new();
@@ -232,6 +237,8 @@ fn render(reports: Vec<ServerReport>, flags: &Flags, detailed: bool) -> Result<(
         }
         if reports.is_empty() {
             println!("No MCP servers configured.");
+        } else if !detailed {
+            report::print_summary(&reports, &style);
         }
     }
     let tool_selection_failed = reports.iter().any(ServerReport::is_tool_selection_failure);
@@ -270,10 +277,10 @@ async fn discover(
             prepare(&server, tools, &filter, connection, selected_tool)
         }
         Ok(Err(error)) => Outcome::DiscoveryFailed {
-            error: crate::mcp_cli::safe_error(&server, &error),
+            error: Failure::discovery(&error, crate::mcp_cli::safe_error(&server, &error)),
         },
         Err(_) => Outcome::DiscoveryFailed {
-            error: "Server discovery timed out".to_owned(),
+            error: Failure::timeout("Server discovery timed out".to_owned()),
         },
     };
     ServerReport {
@@ -283,7 +290,6 @@ async fn discover(
     }
 }
 
-/// Selection runs after timing so reported durations cover only server work.
 fn prepare(
     server: &ConfiguredServer,
     mut tools: Vec<Value>,
@@ -291,15 +297,15 @@ fn prepare(
     connection: Option<crate::mcp_protocol::ConnectionInfo>,
     selected_tool: Option<&str>,
 ) -> Outcome {
+    crate::tool_filter::normalize_catalog(&mut tools);
     tools.sort_by(|left, right| name(left).cmp(&name(right)));
-    tools.dedup_by(|left, right| left.get("name") == right.get("name"));
     match selected_tool {
         Some(tool) => match crate::mcp_cli::resolve_tool(server, &tools, Some(tool), filter) {
             Ok(resolved) => tools.retain(|tool| name(tool) == Some(resolved.as_str())),
             Err(error) => {
                 return Outcome::ToolSelectionFailed {
                     connection,
-                    error: crate::mcp_cli::safe_error(server, &error),
+                    error: Failure::selection(crate::mcp_cli::safe_error(server, &error)),
                 };
             }
         },
@@ -337,7 +343,7 @@ mod tests {
         let report = discover(server, None, None, false).await;
         assert!(matches!(
             report.outcome,
-            Outcome::DiscoveryFailed { error } if error.contains("invalid tool filters")
+            Outcome::DiscoveryFailed { error } if error.raw().contains("invalid tool filters")
         ));
         Ok(())
     }

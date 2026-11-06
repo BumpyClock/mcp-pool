@@ -6,22 +6,18 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
-use crate::mcp_client::McpClient;
+use crate::mcp_client::{McpClient, PreparedEndpoint};
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 use crate::tool_arguments::{AdHoc, Output};
 use crate::{config_commands, daemon_commands, tool_discovery, tool_output};
 
 #[path = "cli_context.rs"]
 pub(crate) mod context;
+pub(crate) use crate::mcp_client::pool_name;
 pub(crate) use context::command_index as command_position;
-#[path = "pool_identity.rs"]
-mod identity;
-pub(crate) use identity::pool_name;
 #[path = "server_selector.rs"]
 pub(crate) mod selector;
-#[path = "stdio_tokens.rs"]
-mod stdio;
-use stdio::command_tokens;
+use crate::stdio_tokens::command_tokens;
 #[path = "output_artifacts.rs"]
 mod artifacts;
 #[path = "adhoc_persistence.rs"]
@@ -60,26 +56,27 @@ pub fn handles(arguments: &[String]) -> bool {
 }
 
 pub async fn run(arguments: Vec<String>) -> Result<()> {
-    let quiet_discovery = context::command_index(&arguments).is_some_and(|index| {
-        arguments
-            .get(index)
-            .is_some_and(|command| matches!(command.as_str(), "list" | "describe" | "list-tools"))
-            && arguments
-                .iter()
-                .skip(index + 1)
-                .any(|argument| argument == "--quiet")
-    });
+    let syntax = crate::cli_syntax::CommandSyntax::parse(&arguments);
+    let quiet_discovery = syntax.quiet
+        && syntax.command_position.is_some_and(|index| {
+            arguments.get(index).is_some_and(|command| {
+                matches!(command.as_str(), "list" | "describe" | "list-tools")
+            })
+        });
     if !quiet_discovery {
-        return run_command(arguments, true).await;
+        return run_command(syntax, true).await;
     }
     // mcporter's quiet health check reports every failure only through its exit status.
-    run_command(arguments, false).await.map_err(|error| {
+    run_command(syntax, false).await.map_err(|error| {
         crate::diagnostics::log(format!("quiet_discovery_failed error={error:#}"));
         tool_discovery::QuietFailure.into()
     })
 }
 
-async fn run_command(arguments: Vec<String>, show_warnings: bool) -> Result<()> {
+async fn run_command(
+    syntax: crate::cli_syntax::CommandSyntax<'_>,
+    show_warnings: bool,
+) -> Result<()> {
     let context::ContextOptions {
         path,
         root,
@@ -87,7 +84,8 @@ async fn run_command(arguments: Vec<String>, show_warnings: bool) -> Result<()> 
         arguments,
         oauth_timeout,
         plain,
-    } = context::parse(arguments)?;
+        help,
+    } = context::parse(syntax)?;
     crate::cli_progress::set_plain_output(plain);
     if oauth_timeout.is_some()
         && command != "auth"
@@ -100,10 +98,7 @@ async fn run_command(arguments: Vec<String>, show_warnings: bool) -> Result<()> 
             "--oauth-timeout applies only to auth or config login. Call/list cached-token refresh uses its fixed OAuth deadline; use --timeout for the operation wait budget."
         );
     }
-    if arguments
-        .iter()
-        .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
-    {
+    if help {
         command_help(&command, &arguments);
         return Ok(());
     }
@@ -182,7 +177,10 @@ pub(crate) fn server(
             }
         }
         if let Some(command) = &ephemeral.command {
-            let mut tokens = command_tokens(command)?;
+            let mut tokens = command_tokens(command).context("Invalid --stdio command")?;
+            if tokens.first().is_none_or(String::is_empty) {
+                bail!("--stdio requires a nonempty command");
+            }
             tokens.extend(ephemeral.arguments.iter().cloned());
             object.insert("command".to_owned(), json!(tokens));
         }
@@ -228,16 +226,15 @@ pub(crate) async fn connect(
     timeout: Option<u64>,
     no_oauth: bool,
 ) -> Result<McpClient> {
-    let definition = crate::oauth::prepare(server, no_oauth).await?;
-    let name = pool_name(server, &definition)?;
+    let endpoint = PreparedEndpoint::prepare(server, no_oauth).await?;
     let environment = std::env::var("MCPORTER_CALL_TIMEOUT").ok();
     let timeout = context::timeout(
         timeout,
         environment.as_deref(),
-        definition.timeout_ms,
+        endpoint.timeout_ms(),
         60_000,
     );
-    McpClient::connect(&name, &definition, Duration::from_millis(timeout)).await
+    endpoint.connect(Duration::from_millis(timeout)).await
 }
 
 pub(crate) fn resolve_tool(
@@ -266,7 +263,8 @@ pub(crate) fn print_outcome(
         Err(error) => {
             let message = safe_error(server, error);
             if matches!(output, Output::Json | Output::Raw) {
-                let mut envelope = json!({"server":server.name,"error":message,"issue":tool_discovery::issue(&message)});
+                let issue = tool_discovery::Failure::discovery(error, message.clone()).issue();
+                let mut envelope = json!({"server":server.name,"error":message,"issue":issue});
                 if let Some(tool) = tool
                     && let Some(object) = envelope.as_object_mut()
                 {
@@ -329,7 +327,7 @@ pub(crate) fn display_url(address: &str) -> String {
 
 pub(crate) async fn stdin() -> Result<String> {
     let mut contents = String::new();
-    tokio::io::stdin()
+    crate::process_stdin::stdin()?
         .take(16 * 1024 * 1024 + 1)
         .read_to_string(&mut contents)
         .await?;

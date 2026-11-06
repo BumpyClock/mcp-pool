@@ -116,12 +116,7 @@ async fn cursor_result_does_not_complete_first_page_leader_or_followers() -> io:
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while state
-            .handshake_cache
-            .lock()
-            .waiter_count(CacheableMethod::ToolsList)
-            != 1
-        {
+        while state.routes.waiter_count(CacheableMethod::ToolsList) != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -136,19 +131,12 @@ async fn cursor_result_does_not_complete_first_page_leader_or_followers() -> io:
     );
     assert!(
         state
-            .handshake_cache
-            .lock()
-            .deadline(CacheableMethod::ToolsList)
+            .routes
+            .shared_deadline(CacheableMethod::ToolsList)
             .is_some()
     );
-    assert_eq!(
-        state
-            .handshake_cache
-            .lock()
-            .waiter_count(CacheableMethod::ToolsList),
-        1
-    );
-    assert!(state.handshake_cache.lock().get("tools/list").is_none());
+    assert_eq!(state.routes.waiter_count(CacheableMethod::ToolsList), 1);
+    assert!(state.routes.cached_result("tools/list").is_none());
     let first_page = json!({"tools":[{"name":"first-page"}],"nextCursor":"page-two"});
     respond(&fixture, &leader_request, first_page.clone()).await?;
     let mut leader_client = BufReader::new(leader_client);
@@ -163,10 +151,7 @@ async fn cursor_result_does_not_complete_first_page_leader_or_followers() -> io:
         follower_response?,
         json!({"jsonrpc":"2.0","id":3,"result":first_page})
     );
-    assert_eq!(
-        state.handshake_cache.lock().get("tools/list"),
-        Some(first_page)
-    );
+    assert_eq!(state.routes.cached_result("tools/list"), Some(first_page));
     assert!(fixture.requests.try_recv().is_err());
     fixture.stop().await
 }

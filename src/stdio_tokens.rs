@@ -1,6 +1,14 @@
 use anyhow::{Result, bail};
 
-pub(super) fn command_tokens(command: &str) -> Result<Vec<String>> {
+pub(crate) fn windows_absolute(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(
+        (characters.next(), characters.next(), characters.next()),
+        (Some(drive), Some(':'), Some('\\' | '/')) if drive.is_ascii_alphabetic()
+    ) || value.starts_with(r"\\")
+}
+
+pub(crate) fn command_tokens(command: &str) -> Result<Vec<String>> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     let mut quote = None;
@@ -13,7 +21,7 @@ pub(super) fn command_tokens(command: &str) -> Result<Vec<String>> {
                 quote = Some(character);
                 started = true;
             }
-            '\\' if current.get(1..3).is_none_or(|part| part != ":\\") => {
+            '\\' if !windows_absolute(&current) => {
                 match characters.peek().copied() {
                     Some(next) if matches!(next, '\'' | '"') || next.is_whitespace() => {
                         current.push(next);
@@ -36,13 +44,10 @@ pub(super) fn command_tokens(command: &str) -> Result<Vec<String>> {
         }
     }
     if quote.is_some() {
-        bail!("Unclosed quote in --stdio command");
+        bail!("unclosed quote in command string");
     }
     if started {
         tokens.push(current);
-    }
-    if tokens.first().is_none_or(String::is_empty) {
-        bail!("--stdio requires a nonempty command");
     }
     Ok(tokens)
 }
@@ -61,6 +66,19 @@ mod tests {
             command_tokens(r#""C:\Program Files\node.exe" server.js"#)?,
             vec![r"C:\Program Files\node.exe", "server.js"]
         );
+        assert_eq!(
+            command_tokens(r#"node '' "" escaped\ argument"#)?,
+            ["node", "", "", "escaped argument"]
+        );
+        assert_eq!(
+            command_tokens(r"\\host\share\server.exe")?,
+            [r"\\host\share\server.exe"]
+        );
+        assert_eq!(
+            command_tokens(r#""C:/Program Files/node.exe" ''"#)?,
+            ["C:/Program Files/node.exe", ""]
+        );
+        assert!(command_tokens("")?.is_empty());
         Ok(())
     }
 }

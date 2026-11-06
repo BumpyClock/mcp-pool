@@ -2,6 +2,8 @@ use std::io::{self, IsTerminal};
 
 use serde_json::Value;
 
+use crate::tool_arguments::schema_view::{SchemaView, example_descriptor, type_name};
+
 pub(crate) struct Style {
     color: bool,
     width: usize,
@@ -43,6 +45,18 @@ impl Style {
 
     pub(crate) fn heading(&self, text: &str) -> String {
         self.paint(1, text)
+    }
+
+    pub(crate) fn success(&self, text: &str) -> String {
+        self.paint(32, text)
+    }
+
+    pub(crate) fn warning(&self, text: &str) -> String {
+        self.paint(33, text)
+    }
+
+    pub(crate) fn error(&self, text: &str) -> String {
+        self.paint(31, text)
     }
 
     pub(crate) fn render(&self, tool: &Value, all_parameters: bool) -> Documentation {
@@ -163,14 +177,12 @@ impl Style {
 
     fn signature(&self, tool: &Value, options: &[&Value]) -> String {
         let schema = tool.get("inputSchema").unwrap_or(&Value::Null);
-        let properties = schema.get("properties").and_then(Value::as_object);
+        let view = SchemaView::new(schema);
         let parameters = options
             .iter()
             .filter_map(|option| {
                 let property = option.get("property").and_then(Value::as_str)?;
-                let descriptor = properties
-                    .and_then(|properties| properties.get(property))
-                    .unwrap_or(&Value::Null);
+                let descriptor = view.property(property).unwrap_or(&Value::Null);
                 Some(format!(
                     "{property}{}: {}",
                     if required(option) { "" } else { "?" },
@@ -191,11 +203,9 @@ impl Style {
 
     pub(crate) fn example(&self, server: &str, tool: &Value) -> String {
         let schema = tool.get("inputSchema").unwrap_or(&Value::Null);
-        let properties = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
+        let view = SchemaView::new(schema);
+        let properties = view
+            .properties()
             .map(|(property, descriptor)| {
                 (property.clone(), example_descriptor(descriptor, schema, 0))
             })
@@ -323,111 +333,6 @@ fn wrap(text: &str, width: usize, prefix: &str, continuation: &str) -> Vec<Strin
         lines.push(String::new());
     }
     lines
-}
-
-fn type_name(schema: &Value, root: &Value, depth: usize) -> String {
-    let Some((schema, depth)) = resolve_schema(schema, root, depth) else {
-        return "unknown".to_owned();
-    };
-    for key in ["enum", "oneOf", "anyOf"] {
-        if let Some(values) = schema.get(key).and_then(Value::as_array) {
-            let mut types = Vec::new();
-            for value in values {
-                let kind = if key == "enum" {
-                    if !(value.is_string()
-                        || value.is_number()
-                        || value.is_boolean()
-                        || value.is_null())
-                    {
-                        continue;
-                    }
-                    value.to_string()
-                } else {
-                    type_name(value, root, depth + 1)
-                };
-                if !types.contains(&kind) {
-                    types.push(kind);
-                }
-            }
-            if !types.is_empty() {
-                return types.join(" | ");
-            }
-        }
-    }
-    if let Some(kinds) = schema.get("type").and_then(Value::as_array) {
-        let types = kinds
-            .iter()
-            .filter_map(Value::as_str)
-            .map(|kind| primitive_type(kind, schema, root, depth))
-            .collect::<Vec<_>>();
-        return if types.is_empty() {
-            "unknown".to_owned()
-        } else {
-            types.join(" | ")
-        };
-    }
-    let kind = schema.get("type").and_then(Value::as_str).unwrap_or(
-        if schema.get("properties").is_some() {
-            "object"
-        } else {
-            "unknown"
-        },
-    );
-    primitive_type(kind, schema, root, depth)
-}
-
-fn resolve_schema<'a>(
-    mut schema: &'a Value,
-    root: &'a Value,
-    mut depth: usize,
-) -> Option<(&'a Value, usize)> {
-    while depth < 8 {
-        let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
-            return Some((schema, depth));
-        };
-        let Some(resolved) = reference
-            .strip_prefix('#')
-            .and_then(|reference| root.pointer(reference))
-        else {
-            return Some((schema, depth));
-        };
-        schema = resolved;
-        depth += 1;
-    }
-    None
-}
-
-fn example_descriptor(schema: &Value, root: &Value, depth: usize) -> Value {
-    let Some((schema, depth)) = resolve_schema(schema, root, depth) else {
-        return Value::Null;
-    };
-    let mut descriptor = schema.clone();
-    if let Some(items) = schema.get("items")
-        && let Some(object) = descriptor.as_object_mut()
-    {
-        object.insert(
-            "items".to_owned(),
-            example_descriptor(items, root, depth + 1),
-        );
-    }
-    descriptor
-}
-
-fn primitive_type(kind: &str, schema: &Value, root: &Value, depth: usize) -> String {
-    match kind {
-        "integer" | "number" => "number".to_owned(),
-        "string" | "boolean" | "null" => kind.to_owned(),
-        "object" => "Record<string, unknown>".to_owned(),
-        "array" => {
-            let item = type_name(schema.get("items").unwrap_or(&Value::Null), root, depth + 1);
-            if item.contains(" | ") {
-                format!("({item})[]")
-            } else {
-                format!("{item}[]")
-            }
-        }
-        _ => "unknown".to_owned(),
-    }
 }
 
 #[cfg(test)]

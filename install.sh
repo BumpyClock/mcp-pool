@@ -92,12 +92,18 @@ cp "$source_path" "$temporary_path" ||
     die "could not copy the release executable; the existing executable was retained"
 file_sha256() {
     if command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$1" | awk '{print $1}'
+        hash_output=$(sha256sum "$1") || return 1
     elif command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$1" | awk '{print $1}'
+        hash_output=$(shasum -a 256 "$1") || return 1
     else
         die "sha256sum or shasum is required to verify the staged executable"
     fi
+    digest=${hash_output%% *}
+    [ "${#digest}" -eq 64 ] || return 1
+    case "$digest" in
+        *[!0-9a-fA-F]*) return 1 ;;
+    esac
+    printf '%s\n' "$digest"
 }
 source_hash=$(file_sha256 "$source_path") ||
     die "could not hash the release executable; the existing executable was retained"

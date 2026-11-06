@@ -9,7 +9,7 @@ fn fixture() -> (
     mpsc::Receiver<String>,
     mpsc::Receiver<String>,
 ) {
-    let generation = Arc::new(Generation::new());
+    let generation = Arc::new(Generation::new(diagnostics::ServerLog::default()));
     let (leader_sender, leader) = mpsc::channel(1);
     let (follower_sender, follower) = mpsc::channel(1);
     generation
@@ -33,7 +33,7 @@ fn fill(generation: &Generation, client: &str) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
-fn seed(generation: &Generation, method: CacheableMethod) -> io::Result<()> {
+fn seed(generation: &Generation, method: CacheableMethod) -> io::Result<u64> {
     let inserted_at = Instant::now()
         .checked_sub(Duration::from_secs(1))
         .ok_or_else(|| io::Error::other("clock"))?;
@@ -42,42 +42,33 @@ fn seed(generation: &Generation, method: CacheableMethod) -> io::Result<()> {
         CacheableMethod::ServerDiscover => "server/discover",
         CacheableMethod::ToolsList => "tools/list",
     };
-    let mut requests = generation.request_map.lock();
-    let mut cache = generation.handshake_cache.lock();
+    let mut pool_id = None;
     for (client, id, leader) in [
         ("leader", "leader-id", true),
         ("follower", "follower-id", false),
     ] {
-        let original_id = json!(id);
-        let action = cache.prepare(
-            method,
-            PendingWaiter {
+        let action = generation.routes.admit(
+            PendingRequestInfo {
                 client_id: client.into(),
-                original_id: original_id.clone(),
+                original_id: json!(id),
+                method: Some(method_name.into()),
+                cache_key: Some(method),
+                tool: None,
                 inserted_at,
                 expires_after: Duration::ZERO,
             },
             inserted_at,
         );
         if leader {
-            assert!(matches!(action, DiscoveryAction::Leader));
-            requests.insert(
-                jsonrpc::id_key(&json!(1)),
-                PendingRequestInfo {
-                    client_id: client.into(),
-                    original_id,
-                    method: Some(method_name.into()),
-                    cache_key: Some(method),
-                    tool: None,
-                    inserted_at,
-                    expires_after: Duration::ZERO,
-                },
-            );
+            let RouteAdmission::Leader(identifier) = action else {
+                return Err(io::Error::other("expected shared leader"));
+            };
+            pool_id = Some(identifier);
         } else {
-            assert!(matches!(action, DiscoveryAction::Coalesced));
+            assert!(matches!(action, RouteAdmission::Coalesced));
         }
     }
-    Ok(())
+    pool_id.ok_or_else(|| io::Error::other("missing leader"))
 }
 
 async fn poll_pending<F: Future>(mut future: Pin<&mut F>) {
@@ -96,20 +87,11 @@ async fn shared_completion_reaches_ready_follower_before_leader_unblocks() -> io
         CacheableMethod::ToolsList,
     ] {
         let (generation, mut leader, mut follower) = fixture();
-        seed(&generation, method)?;
+        let pool_id = seed(&generation, method)?;
         fill(&generation, "leader")?;
         let (recovery, _receiver) = mpsc::channel(8);
-        let response = json!({"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28"],"capabilities":{},"tools":[]}}).to_string();
-        let routing = route_response(
-            &response,
-            &generation.clients,
-            &generation.request_map,
-            &generation.handshake_cache,
-            &generation.last_active_client,
-            &generation.client_capabilities,
-            &generation.request_tx,
-            &recovery,
-        );
+        let response = json!({"jsonrpc":"2.0","id":pool_id,"result":{"supportedVersions":["2026-07-28"],"capabilities":{},"tools":[]}}).to_string();
+        let routing = route_response(&response, &generation, &recovery);
         tokio::pin!(routing);
         poll_pending(routing.as_mut()).await;
         let value: Value = serde_json::from_str(&follower.try_recv().map_err(io::Error::other)?)?;
@@ -135,7 +117,8 @@ async fn broadcast_reaches_ready_recipient_before_blocked_recipient_unblocks() -
         .ok_or_else(|| io::Error::other("missing clients"))?;
     fill(&generation, &blocked)?;
     let notification = json!({"jsonrpc":"2.0","method":"notifications/progress"}).to_string();
-    let broadcasting = broadcast_to_all(&notification, &generation.clients);
+    let broadcasting =
+        broadcast_to_all(&notification, &generation.clients, &generation.diagnostics);
     tokio::pin!(broadcasting);
     poll_pending(broadcasting.as_mut()).await;
     let (ready, full) = if blocked == "leader" {
@@ -160,7 +143,7 @@ async fn expiration_reaches_ready_follower_before_leader_delivery_wait() -> io::
     tokio::pin!(expiring);
     poll_fn(|context| {
         assert!(expiring.as_mut().poll(context).is_pending());
-        if generation.request_map.lock().is_empty() {
+        if generation.routes.pending_count() == 0 {
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -178,37 +161,29 @@ async fn expiration_reaches_ready_follower_before_leader_delivery_wait() -> io::
 #[tokio::test]
 async fn same_client_order_and_next_message_barrier() -> io::Result<()> {
     let (generation, mut leader, mut follower) = fixture();
-    seed(&generation, CacheableMethod::Initialize)?;
+    let pool_id = seed(&generation, CacheableMethod::Initialize)?;
     let now = Instant::now();
-    let action = generation.handshake_cache.lock().prepare(
-        CacheableMethod::Initialize,
-        PendingWaiter {
+    let action = generation.routes.admit(
+        PendingRequestInfo {
             client_id: "leader".into(),
             original_id: json!("second"),
+            method: Some("initialize".into()),
+            cache_key: Some(CacheableMethod::Initialize),
+            tool: None,
             inserted_at: now,
             expires_after: Duration::from_secs(30),
         },
         now,
     );
-    assert!(matches!(action, DiscoveryAction::Coalesced));
+    assert!(matches!(action, RouteAdmission::Coalesced));
     fill(&generation, "leader")?;
     let (recovery, _receiver) = mpsc::channel(8);
-    let response =
-        json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"failed"}}).to_string();
+    let response = json!({"jsonrpc":"2.0","id":pool_id,"error":{"code":-32603,"message":"failed"}})
+        .to_string();
     let notification = json!({"jsonrpc":"2.0","method":"notifications/progress"}).to_string();
     let route = async {
-        route_response(
-            &response,
-            &generation.clients,
-            &generation.request_map,
-            &generation.handshake_cache,
-            &generation.last_active_client,
-            &generation.client_capabilities,
-            &generation.request_tx,
-            &recovery,
-        )
-        .await;
-        broadcast_to_all(&notification, &generation.clients).await;
+        route_response(&response, &generation, &recovery).await;
+        broadcast_to_all(&notification, &generation.clients, &generation.diagnostics).await;
     };
     tokio::pin!(route);
     poll_pending(route.as_mut()).await;
@@ -232,25 +207,16 @@ async fn same_client_order_and_next_message_barrier() -> io::Result<()> {
 async fn orphan_and_closed_recipients_do_not_redirect() -> io::Result<()> {
     for closed in [false, true] {
         let (generation, leader, mut follower) = fixture();
-        seed(&generation, CacheableMethod::Initialize)?;
+        let pool_id = seed(&generation, CacheableMethod::Initialize)?;
         drop(leader);
         if !closed {
             generation.clients.lock().remove("leader");
         }
         let (recovery, mut recovery_receiver) = mpsc::channel(8);
         let response =
-            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"failed"}}).to_string();
-        route_response(
-            &response,
-            &generation.clients,
-            &generation.request_map,
-            &generation.handshake_cache,
-            &generation.last_active_client,
-            &generation.client_capabilities,
-            &generation.request_tx,
-            &recovery,
-        )
-        .await;
+            json!({"jsonrpc":"2.0","id":pool_id,"error":{"code":-32603,"message":"failed"}})
+                .to_string();
+        route_response(&response, &generation, &recovery).await;
         let value: Value = serde_json::from_str(&follower.try_recv().map_err(io::Error::other)?)?;
         assert_eq!(value.get("id"), Some(&json!("follower-id")));
         assert_eq!(value.pointer("/error/message"), Some(&json!("failed")));

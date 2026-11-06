@@ -30,8 +30,7 @@ async fn concurrent_server_discovery_has_one_upstream_request_and_correlated_wai
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
         while generation
-            .handshake_cache
-            .lock()
+            .routes
             .waiter_count(CacheableMethod::ServerDiscover)
             != 1
         {
@@ -98,8 +97,7 @@ async fn discovery_error_reaches_all_waiters_and_allows_legacy_fallback() -> io:
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
         while generation
-            .handshake_cache
-            .lock()
+            .routes
             .waiter_count(CacheableMethod::ServerDiscover)
             != 1
         {
@@ -437,7 +435,7 @@ async fn explicit_tools_list_ttl_controls_shared_cache_expiration() -> io::Resul
         .responses
         .send(
             json!({"jsonrpc":"2.0","id":short.get("id"),"result":{
-                "tools":[],"ttlMs":20
+                "tools":[],"ttlMs":60_000
             }})
             .to_string(),
         )
@@ -454,7 +452,15 @@ async fn explicit_tools_list_ttl_controls_shared_cache_expiration() -> io::Resul
         Some(&json!("short-cached"))
     );
     assert!(fixture.requests.try_recv().is_err());
-    sleep(Duration::from_millis(25)).await;
+    let generation = fixture
+        .proxy
+        .generation
+        .lock()
+        .clone()
+        .ok_or_else(|| io::Error::other("missing generation"))?;
+    generation
+        .routes
+        .elapse_cached_results(Duration::from_secs(61));
     send(
         client.get_mut(),
         json!({"jsonrpc":"2.0","id":"short-expired","method":"tools/list","params":{}}),

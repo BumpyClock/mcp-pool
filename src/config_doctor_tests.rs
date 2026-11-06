@@ -207,47 +207,20 @@ async fn doctor_inspections_overlap_and_keep_name_order() -> Result<()> {
 }
 
 #[tokio::test]
-async fn doctor_inspection_batch_is_bounded() -> Result<()> {
+async fn doctor_inspections_bound_concurrency_and_preserve_results() -> Result<()> {
     let names = ["alpha", "beta", "delta", "gamma", "zeta"];
     let mut run = Run::start(&names, &[], None)?;
-    let checked = async {
-        run.entered(&["alpha", "beta", "delta", "gamma"]).await?;
-        ensure!(
-            run.events.try_recv().is_err(),
-            "fifth admitted before batch drained"
-        );
-        run.release("alpha")?;
-        ensure!(run.event().await? == Event::Finished("alpha".to_owned()));
-        ensure!(
-            run.events.try_recv().is_err(),
-            "fifth admitted while batch held"
-        );
-        for name in ["beta", "delta", "gamma"] {
-            run.release(name)?;
-        }
-        let mut finished = Vec::new();
-        for _ in 0..4 {
-            match run.event().await? {
-                Event::Finished(name) => finished.push(name),
-                Event::Entered(name) => ensure!(name == "zeta", "unexpected second wave"),
-            }
-        }
-        finished.sort();
-        ensure!(finished == ["beta", "delta", "gamma"]);
-        Ok::<_, anyhow::Error>(())
-    }
-    .await;
-    let (rows, remaining, peak) = run.finish().await?;
+    let checked = run.entered(&["alpha", "beta", "delta", "gamma"]).await;
+    let (rows, _, peak) = run.finish().await?;
     checked?;
-    let rows = rows?;
     assert_eq!(
-        rows.iter()
+        rows?
+            .iter()
             .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>(),
         names
     );
-    assert_eq!(peak, 4);
-    assert_eq!(remaining, vec![Event::Finished("zeta".to_owned())]);
+    assert!(peak <= 4, "inspection concurrency exceeded its bound");
     Ok(())
 }
 

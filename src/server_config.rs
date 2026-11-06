@@ -8,15 +8,10 @@ use serde_json::json;
 
 use crate::config::{ConfigurationEntry, ServerDef};
 
-pub(crate) const URL_FIELDS: &[&str] = &["baseUrl", "base_url", "url", "serverUrl", "server_url"];
-
-pub(crate) fn is_remote_entry(entry: &serde_json::Map<String, Value>) -> bool {
-    URL_FIELDS.iter().any(|field| entry.contains_key(*field))
-}
-
-pub(crate) fn is_server_entry(entry: &serde_json::Map<String, Value>) -> bool {
-    is_remote_entry(entry) || entry.contains_key("command") || entry.contains_key("executable")
-}
+#[path = "server_config_entry.rs"]
+mod entry;
+use entry::{Command, Entry, EntryPolicy};
+pub(crate) use entry::{URL_FIELDS, is_remote_entry, is_server_entry};
 
 #[path = "server_config_values.rs"]
 mod values;
@@ -50,44 +45,16 @@ pub struct ConfiguredServer {
     pub source: PathBuf,
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Command {
-    Text(String),
-    Tokens(Vec<String>),
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default)]
-struct Entry {
-    url: Option<String>,
-    #[serde(rename = "baseUrl")]
-    base_url: Option<String>,
-    #[serde(rename = "base_url")]
-    snake_base_url: Option<String>,
-    #[serde(rename = "serverUrl")]
-    server_url: Option<String>,
-    #[serde(rename = "server_url")]
-    snake_server_url: Option<String>,
-    command: Option<Command>,
-    executable: Option<String>,
-    args: Vec<String>,
-    env: BTreeMap<String, String>,
-    headers: BTreeMap<String, String>,
-    cwd: Option<String>,
-    transport: Option<String>,
-    description: Option<String>,
-    #[serde(rename = "timeoutMs", alias = "timeout_ms")]
-    timeout_ms: Option<u64>,
-    #[serde(rename = "protocolVersion", alias = "protocol_version")]
-    protocol_version: crate::mcp_protocol::ProtocolPreference,
-    #[serde(rename = "bearerToken", alias = "bearer_token")]
-    bearer_token: Option<String>,
-    #[serde(rename = "bearerTokenEnv", alias = "bearer_token_env")]
-    bearer_token_env: Option<String>,
-}
-
+/// Preserves readable compatibility entries and defers environment resolution until use.
 pub(crate) fn validate_document(document: &Value) -> Result<()> {
+    validate_entries(document, EntryPolicy::Preserve)
+}
+
+pub(crate) fn validate_new_entries(document: &Value) -> Result<()> {
+    validate_entries(document, EntryPolicy::New)
+}
+
+fn validate_entries(document: &Value, policy: EntryPolicy) -> Result<()> {
     legacy_imports(document)?;
     let servers = document
         .get("mcpServers")
@@ -97,46 +64,9 @@ pub(crate) fn validate_document(document: &Value) -> Result<()> {
         if name.trim().is_empty() {
             bail!("Server name cannot be empty");
         }
-        let entry: Entry = serde_json::from_value(raw.clone())
-            .map_err(|_| anyhow!("Invalid field types for server '{name}'"))?;
-        let remote = entry
-            .url
-            .as_ref()
-            .or(entry.base_url.as_ref())
-            .or(entry.snake_base_url.as_ref())
-            .or(entry.server_url.as_ref())
-            .or(entry.snake_server_url.as_ref());
-        let command = entry.command.is_some() || entry.executable.is_some();
-        if remote.is_some() == command {
-            bail!("Server '{name}' needs exactly one URL or command");
-        }
-        let executable = match &entry.command {
-            Some(Command::Text(command)) => Some(command.as_str()),
-            Some(Command::Tokens(tokens)) => tokens.first().map(String::as_str),
-            None => entry.executable.as_deref(),
-        };
-        if command && executable.is_none_or(|value| value.trim().is_empty()) {
-            bail!("Server '{name}' needs a nonempty executable");
-        }
-        let transport =
-            entry
-                .transport
-                .as_deref()
-                .unwrap_or(if remote.is_some() { "http" } else { "stdio" });
-        if !matches!(transport, "http" | "streamable-http" | "sse" | "stdio")
-            || (transport == "stdio") != command
-        {
-            bail!("Server '{name}' transport must agree with its URL or command");
-        }
-        if let Some(url) = remote
-            && !url.contains('$')
-        {
-            let url = reqwest::Url::parse(url)
-                .map_err(|_| anyhow!("Server '{name}' needs an absolute HTTP URL"))?;
-            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-                bail!("Server '{name}' needs an absolute HTTP URL");
-            }
-        }
+        Entry::decode(raw)
+            .and_then(|entry| entry.validate(policy))
+            .with_context(|| format!("Invalid definition for server '{name}'"))?;
         crate::tool_filter::ToolFilter::from_raw(raw)?;
     }
     Ok(())
@@ -152,12 +82,7 @@ fn legacy_imports(document: &Value) -> Result<&[Value]> {
 
 pub(crate) fn load_at(path: Option<PathBuf>, root: Option<&Path>) -> Result<ServerConfiguration> {
     if let Some(source) = crate::config_paths::explicit(path)? {
-        let mut configuration = parse_document(&source, &read_raw(&source, false)?)?;
-        set_credential_scope(
-            &mut configuration,
-            source.parent().context("Config has no parent")?,
-        );
-        return Ok(configuration);
+        return parse_document(&source, &read_raw(&source, false)?);
     }
     let home = crate::config_paths::absolute(&crate::config_paths::home_config()?)?;
     let project = crate::config_paths::absolute(&crate::config_paths::project_config(root)?)?;
@@ -187,24 +112,11 @@ pub(crate) fn load_at(path: Option<PathBuf>, root: Option<&Path>) -> Result<Serv
         configuration.servers.extend(local.servers);
         configuration.warnings.extend(local.warnings);
         if project.is_file() {
-            configuration.source = project.clone();
+            configuration.source = project;
+            configuration.credential_scope = local.credential_scope;
         }
     }
-    set_credential_scope(
-        &mut configuration,
-        project.parent().context("Config has no parent")?,
-    );
     Ok(configuration)
-}
-
-fn set_credential_scope(configuration: &mut ServerConfiguration, directory: &Path) {
-    configuration.credential_scope = Some(directory.to_path_buf());
-    for server in configuration.servers.values_mut() {
-        server.definition.credential_scope = Some(directory.to_path_buf());
-        if let Some(entry) = server.definition.configuration_entry.as_mut() {
-            entry.scope = Some(directory.to_path_buf());
-        }
-    }
 }
 
 fn read_raw(source: &Path, optional: bool) -> Result<Value> {
@@ -290,10 +202,11 @@ fn normalize_document(
     }
     let directory = source
         .parent()
-        .ok_or_else(|| anyhow!("MCP config has no parent directory"))?;
+        .ok_or_else(|| anyhow!("MCP config has no parent directory"))?
+        .to_path_buf();
     let mut servers = BTreeMap::new();
     for (name, raw) in entries {
-        let entry: Entry = serde_json::from_value(raw.clone()).map_err(|_| {
+        let entry = Entry::decode(raw).map_err(|_| {
             anyhow!(
                 "invalid server definition for '{name}' in {}: expected string fields, string arrays/maps, an unsigned timeoutMs, and protocolVersion auto, legacy, or 2026-07-28",
                 source.display()
@@ -303,7 +216,7 @@ fn normalize_document(
             name,
             &source,
             entry,
-            directory,
+            &directory,
             environment,
             caller_environment,
         )
@@ -321,7 +234,7 @@ fn normalize_document(
     Ok(ServerConfiguration {
         source,
         servers,
-        credential_scope: None,
+        credential_scope: Some(directory),
         warnings,
     })
 }
@@ -350,11 +263,17 @@ fn normalize(
     caller_environment: &impl Fn() -> Result<BTreeMap<String, String>>,
 ) -> Result<ServerDef> {
     let expand = |value: &str| values::expand_environment(value, environment);
+    let transport =
+        expand(entry.transport.as_deref().unwrap_or_default()).context("field 'transport'")?;
+    let transport = entry.transport(&transport)?;
+    let url = entry.remote_url().map(str::to_owned);
+
     let mut definition = ServerDef {
+        credential_scope: Some(directory.to_owned()),
         configuration_entry: Some(ConfigurationEntry {
             source: source.to_owned(),
             name: name.to_owned(),
-            scope: None,
+            scope: Some(directory.to_owned()),
             credential_store: None,
         }),
         description: expand(entry.description.as_deref().unwrap_or_default())
@@ -393,31 +312,12 @@ fn normalize(
             definition.headers.insert("Authorization".into(), token);
         }
     }
-    let transport =
-        expand(entry.transport.as_deref().unwrap_or_default()).context("field 'transport'")?;
-    let url = entry
-        .base_url
-        .or(entry.snake_base_url)
-        .or(entry.url)
-        .or(entry.server_url)
-        .or(entry.snake_server_url);
-    if let Some(url) = url.filter(|url| !url.is_empty()) {
+    definition.transport = transport.to_owned();
+    if let Some(url) = url {
         definition.url =
             values::expand_environment(&url, &effective_environment).context("field 'url'")?;
-        let parsed = reqwest::Url::parse(&definition.url)
-            .map_err(|_| anyhow!("field 'url' must be an absolute HTTP/SSE URL"))?;
-        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
-            bail!("field 'url' must be an absolute HTTP/SSE URL");
-        }
-        definition.transport = match transport.as_str() {
-            "" | "http" | "streamable-http" => "http".into(),
-            "sse" => "sse".into(),
-            _ => bail!("field 'transport' must be http or sse for a URL"),
-        };
+        entry::validate_url(&definition.url)?;
         return Ok(definition);
-    }
-    if !matches!(transport.as_str(), "" | "stdio") {
-        bail!("field 'transport' must be stdio for a command");
     }
     let command = entry
         .command

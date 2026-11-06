@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,12 +12,12 @@ use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_mcp-cli");
-#[path = "common/fixture_home.rs"]
-mod fixture_home;
+#[path = "common/fixture_lifecycle.rs"]
+mod fixture_lifecycle;
+use fixture_lifecycle::{FixtureLifecycle, fixture_home};
 
 struct Daemon {
-    home: PathBuf,
-    child: Child,
+    lifecycle: FixtureLifecycle,
 }
 
 impl Daemon {
@@ -25,59 +25,19 @@ impl Daemon {
         let home = fixture_home::create("mcp-cli-cli")?;
         tokio::fs::create_dir(home.join("config")).await?;
         tokio::fs::write(home.join("config").join("config.json"), config.to_string()).await?;
-        let child = Command::new(BINARY)
-            .args(["pool", "serve"])
-            .env("MCP_CLI_HOME", &home)
-            .env_remove("MCP_CLI_CONFIG")
-            .current_dir(&home)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()?;
-        let daemon = Self { home, child };
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if daemon.control_is_live().await {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .map_err(io::Error::other)?;
-        Ok(daemon)
-    }
-
-    async fn control_is_live(&self) -> bool {
-        #[cfg(unix)]
-        {
-            tokio::net::UnixStream::connect(self.home.join("state").join("mcp-cli-control.sock"))
-                .await
-                .is_ok()
-        }
-        #[cfg(windows)]
-        {
-            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for byte in self.home.to_string_lossy().as_bytes() {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            let pipe = format!(r"\\.\pipe\mcp-cli-{:08x}-control", hash as u32);
-            tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(&pipe)
-                .is_ok()
-        }
+        let mut lifecycle = FixtureLifecycle::new(Path::new(BINARY), &home, &home, &home, None);
+        let mut command = lifecycle.command();
+        command.args(["pool", "serve"]);
+        lifecycle.start(command)?;
+        lifecycle.ready(Duration::from_secs(10)).await?;
+        Ok(Self { lifecycle })
     }
 
     async fn command(&self, args: &[&str]) -> io::Result<std::process::Output> {
         tokio::time::timeout(
             Duration::from_secs(15),
-            Command::new(BINARY)
+            Command::from(self.lifecycle.command())
                 .args(args)
-                .env("MCP_CLI_HOME", &self.home)
-                .env_remove("MCP_CLI_CONFIG")
-                .current_dir(&self.home)
                 .kill_on_drop(true)
                 .output(),
         )
@@ -92,11 +52,8 @@ impl Daemon {
     }
 
     fn proxy(&self) -> io::Result<Child> {
-        Command::new(BINARY)
+        Command::from(self.lifecycle.command())
             .args(["proxy", "echo"])
-            .env("MCP_CLI_HOME", &self.home)
-            .env_remove("MCP_CLI_CONFIG")
-            .current_dir(&self.home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -104,14 +61,8 @@ impl Daemon {
             .spawn()
     }
 
-    async fn finish(mut self) -> io::Result<()> {
-        let output = self.command(&["shutdown"]).await?;
-        assert!(output.status.success(), "shutdown failed: {output:?}");
-        let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-            .await
-            .map_err(io::Error::other)??;
-        assert!(status.success());
-        tokio::fs::remove_dir_all(&self.home).await
+    async fn finish(self) -> io::Result<()> {
+        self.lifecycle.finish().await
     }
 }
 
@@ -341,10 +292,11 @@ async fn concurrent_proxy_clients_share_one_initialized_session() -> io::Result<
     assert!(stopped.status.success(), "stop failed: {stopped:?}");
     let status = daemon.status().await?;
     assert_eq!(status.get("servers"), Some(&json!([])));
-    drop(third_input);
-    tokio::time::timeout(Duration::from_secs(5), third.wait())
+    let exited = tokio::time::timeout(Duration::from_secs(5), third.wait())
         .await
         .map_err(io::Error::other)??;
+    assert!(exited.success(), "proxy failed on upstream EOF: {exited}");
+    drop(third_input);
     daemon.finish().await?;
     server.abort();
     Ok(())

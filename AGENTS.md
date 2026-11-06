@@ -192,13 +192,14 @@ upstream process/connection instead of launching N copies.
   `MCPORTER_CONFIG` and legacy config paths are not read at runtime.
 - Project lookup uses the nearest `.mcp` directory or Git root, otherwise cwd.
   `--root` chooses an explicit project.
-- Credentials: `~/.mcp/credentials.json` and `PROJECT/.mcp/credentials.json`.
-  Project auth overrides home auth independently of config ownership.
-  Invalid/expired project credentials do not fall back to home credentials.
-  Refresh writes the selected store. Explicit credential mutations write the
-  active project store; `--config` writes beside the selected file.
-  Clearing a project override restores home fallback. Explicit `tokenCacheDir`
-  remains supported; legacy credential directories are not auto-discovered.
+- Credentials follow the selected server's defining config file. Home definitions
+  use `~/.mcp/credentials.json` across projects; project definitions use
+  `PROJECT/.mcp/credentials.json`. A project definition never falls back to home
+  credentials. Removing that definition restores the home definition and its auth.
+  Login, refresh, inspection, and credential mutations use the same owning store.
+  `--config` uses its adjacent store; `--root` does not relocate home credentials.
+  Explicit `tokenCacheDir` remains supported. Old project credentials are not moved
+  automatically; legacy credential directories are not auto-discovered.
 - Default state: `~/.mcp/` on every platform (`%USERPROFILE%\.mcp\` on Windows).
   Logs use `~/.mcp/logs/`; Unix server sockets use `~/.mcp/run/`.
   `MCP_CLI_HOME` overrides retain their `state/` layout. Stop the old daemon

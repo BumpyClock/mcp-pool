@@ -10,9 +10,6 @@ mod resolution;
 pub(super) use resolution::{has_real_tool, is_discovery_pseudo, resolve_tool};
 
 pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<String>) -> Result<()> {
-    let has_explicit_json_input = arguments
-        .iter()
-        .any(|argument| matches!(argument.as_str(), "--args" | "--params" | "--json"));
     let mut parsed = tool_arguments::call(arguments)?;
     if parsed.inputs.has_stdin() {
         tool_arguments::merge_stdin(&mut parsed, &stdin().await?)?;
@@ -38,15 +35,16 @@ pub(super) async fn run(configuration: &ServerConfiguration, arguments: Vec<Stri
                 connect(&selected, parsed.timeout, parsed.no_oauth),
             )
             .await?;
-        let tools = progress
+        let mut tools = progress
             .wait("Discovering MCP tools", client.list_tools())
             .await?;
+        crate::tool_filter::normalize_catalog(&mut tools);
         let duration = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         if let Some(requested) = tool.as_deref()
             && is_discovery_pseudo(requested)
             && !has_real_tool(&tools, requested)
         {
-            if has_explicit_json_input
+            if parsed.inputs.has_explicit_json()
                 || parsed.inputs.has_stdin()
                 || !parsed.arguments.is_empty()
                 || !parsed.positionals.is_empty()

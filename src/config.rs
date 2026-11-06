@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 use std::io;
+#[cfg(any(unix, test))]
+use std::path::Path;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -20,38 +22,36 @@ pub fn run_dir() -> io::Result<PathBuf> {
 
 /// Windows named pipes use a stable per-home hash because their namespace is global.
 #[cfg(windows)]
-fn home_scope_hash() -> String {
+fn home_scope_hash() -> io::Result<String> {
     let seed = crate::environment::string("MCP_CLI_HOME")
         .or_else(|| dirs::home_dir().map(|path| path.to_string_lossy().into_owned()))
-        .unwrap_or_default();
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "home directory not found"))?;
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in seed.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{:08x}", hash as u32)
+    Ok(format!("{:08x}", hash as u32))
 }
 
 #[cfg(unix)]
-fn unix_socket_path(resolved: io::Result<PathBuf>, file_name: &str) -> PathBuf {
-    resolved
-        .map(|dir| dir.join(file_name))
-        .unwrap_or_else(|_| PathBuf::from(format!("/tmp/{file_name}")))
+fn unix_socket_path(directory: io::Result<PathBuf>, filename: &str) -> io::Result<PathBuf> {
+    Ok(directory?.join(filename))
 }
 
-pub fn control_socket_path() -> PathBuf {
+pub fn control_socket_path() -> io::Result<PathBuf> {
     #[cfg(unix)]
     {
         unix_socket_path(state_dir(), "mcp-cli-control.sock")
     }
     #[cfg(windows)]
     {
-        let scope = home_scope_hash();
-        PathBuf::from(format!(r"\\.\pipe\mcp-cli-{scope}-control"))
+        let scope = home_scope_hash()?;
+        Ok(PathBuf::from(format!(r"\\.\pipe\mcp-cli-{scope}-control")))
     }
 }
 
-pub fn server_socket_path(name: &str) -> PathBuf {
+pub fn server_socket_path(name: &str) -> io::Result<PathBuf> {
     let safe = sanitize_socket_name(name);
     #[cfg(unix)]
     {
@@ -59,9 +59,19 @@ pub fn server_socket_path(name: &str) -> PathBuf {
     }
     #[cfg(windows)]
     {
-        let scope = home_scope_hash();
-        PathBuf::from(format!(r"\\.\pipe\mcp-cli-{scope}-{safe}"))
+        let scope = home_scope_hash()?;
+        Ok(PathBuf::from(format!(r"\\.\pipe\mcp-cli-{scope}-{safe}")))
     }
+}
+
+#[cfg(any(unix, test))]
+pub fn server_name_from_socket_path(path: &Path) -> Option<String> {
+    let filename = path.file_name()?.to_string_lossy();
+    filename
+        .strip_prefix("mcp-cli-")?
+        .strip_suffix(".sock")
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
 }
 
 fn sanitize_socket_name(name: &str) -> String {
@@ -211,10 +221,51 @@ mod tests {
         #[cfg(unix)]
         {
             assert_eq!(run_dir()?, expected.join("run"));
-            assert_eq!(control_socket_path(), expected.join("mcp-cli-control.sock"));
             assert_eq!(
-                server_socket_path("fixture"),
+                control_socket_path()?,
+                expected.join("mcp-cli-control.sock")
+            );
+            assert_eq!(
+                server_socket_path("fixture")?,
                 expected.join("run/mcp-cli-fixture.sock")
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn endpoint_resolution_preserves_state_directory_errors() {
+        let error = unix_socket_path(
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "state directory unavailable",
+            )),
+            "mcp-cli-control.sock",
+        )
+        .err();
+        assert_eq!(
+            error.as_ref().map(io::Error::kind),
+            Some(io::ErrorKind::NotFound)
+        );
+        assert_eq!(
+            error.map(|error| error.to_string()).as_deref(),
+            Some("state directory unavailable")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn endpoint_codec_round_trips_the_sanitized_endpoint_name() -> io::Result<()> {
+        for (name, expected) in [
+            ("echo", "echo"),
+            ("a.b", "a_b"),
+            ("", "mcp"),
+            ("écho", "_cho"),
+        ] {
+            assert_eq!(
+                server_name_from_socket_path(&server_socket_path(name)?).as_deref(),
+                Some(expected)
             );
         }
         Ok(())

@@ -1,15 +1,17 @@
 # mcp-cli
 
-Standalone, platform-independent CLI for pooling MCP (Model Context Protocol) servers,
-with discovery, call, resource, and auth commands inspired by mcporter.
-Each pooled MCP server runs **once** as a single upstream; many agent clients share it
-over a local socket, with JSON-RPC requests multiplexed by `id`.
+`mcp-cli` is a standalone, platform-independent CLI and MCP server for pooling
+MCP (Model Context Protocol) servers. It offers discovery, call, resource, and
+auth commands inspired by mcporter. Each pooled server runs once as an upstream.
+Multiple agent clients share it over a local socket, with JSON-RPC requests
+multiplexed by `id`.
 
 ## Why
 
-Tools like `claude-code` spawn every configured MCP server themselves. If you run
-several agent sessions in parallel, the same heavy MCP (e.g. an `npx` server) gets
-launched once per session. `mcp-cli` deduplicates that: one upstream, many clients.
+Tools like `claude-code` spawn their configured MCP servers for each session.
+When several agent sessions run in parallel, each can launch its own copy of the
+same server, such as an `npx` server. `mcp-cli` lets those sessions share one
+upstream.
 
 ## Install / build
 
@@ -32,8 +34,9 @@ sh ./install.sh --bin-dir "$HOME/.local/bin"
 
 The installers default to `~/.local/bin`, build the host target from this
 repository even when invoked elsewhere, and verify the staged executable before
-replacing an existing file. A locked Windows executable fails without stopping its
-daemon. The scripts do not change `PATH`; they warn if another executable would
+replacing an existing file. Hashing or staged-validation failure retains the
+previous executable and its permissions. A locked Windows executable fails without
+stopping its daemon. The scripts do not change `PATH`; they warn if another executable would
 still be selected. `mcp-cli --version` includes the Git revision and a source
 fingerprint, so two different dirty builds no longer look identical.
 `MCP_CLI_BIN_DIR` selects the default install directory; `MCP_POOL_BIN_DIR`
@@ -53,10 +56,14 @@ use `./dev.sh`.
 
 The [CLI UX audit](docs/cli-ux-audit.md) compares every supported command family
 with mcporter using isolated local fixtures and retains command transcripts.
+With `ast-grep` installed, `python3 scripts/rust_codebase_map.py --format dot`
+regenerates the syntax dependency graph; `--format skeleton` lists function
+signatures.
 
 ### Reproducible opt-in push checks
 
-The checked-in toolchain pins Rust 1.95.0 with rustfmt and Clippy. Prepare it, locked dependencies, and Python 3.11+ explicitly before opting in:
+The checked-in toolchain pins Rust 1.95.0 with rustfmt and Clippy. Before
+opting in, prepare that toolchain, the locked dependencies, and Python 3.11+:
 
 ```sh
 rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
@@ -73,7 +80,7 @@ The hook uses the already-installed pinned Rust toolchain, full project `cargo f
 
 Unix tests are not Windows acceptance. A non-Unix hook host reports that Unix IPC remains required in CI; Windows named-pipe/process behavior and the full suite still need native qualification. The hook does not invoke MCP commands, refresh tokens, launch providers, import credentials or restart daemons. Its fixture tests use stub commands in disposable Git repositories and make no outbound push. Run full project tests separately.
 
-The existing `unix-ipc` workflow uses Boat. It runs on pull requests and on manual dispatch. It prepares the pinned compiler and Python, then tests hook fixtures serially with the existing isolated Unix IPC gate. Owner-only public execution follows the separately configured actor policy; outsiders and bots are not implicitly authorized.
+The existing `unix-ipc` workflow uses Boat. It runs on pull requests and on manual dispatch. It reads the compiler pin from `rust-toolchain.toml`, prepares Python, and runs hook fixtures plus `bash scripts/test_unix_ipc.sh`. The same executable gate can run locally without parsing workflow YAML. Owner-only public execution follows the separately configured actor policy; outsiders and bots are not implicitly authorized.
 
 ## Configuration and imports
 
@@ -193,6 +200,19 @@ mcp-cli resources docs               # list resources
 mcp-cli resource docs "docs://guide"  # read a resource
 ```
 
+Human `list` output starts with a version and server-count header. Each row shows
+the server name, tool count or failure status, and elapsed time. Healthy rows also
+show configured descriptions. Authentication failures include a named OAuth login command; HTTP 403 also
+points to account permissions. A final summary counts healthy servers, auth
+requirements, offline servers, HTTP errors, and other errors. Terminal output
+uses bold names, muted details, yellow auth warnings, and red failures.
+`--no-color`, `NO_COLOR`, redirected output, and `TERM=dumb` disable color.
+`--quiet` emits no output. JSON and detailed server/tool documentation retain their
+formats; JSON keeps the underlying diagnostic in `issue.rawMessage`.
+Authentication failures do not trigger protocol fallback or request replay. The
+legacy-protocol hint is reserved for failed discovery probes that receive no
+JSON-RPC error response.
+
 Root `--help` exposes both MCP commands and native pool controls. `help call`
 and `call --help` describe the same command. Nested commands such as
 `config get --help`, `daemon start --help`, and `vault set --help` show their
@@ -255,12 +275,17 @@ result format. Native status and `pool list` use it for stable line-based rows.
 `call` accepts `SERVER.TOOL`, `SERVER TOOL`, or `--server NAME --tool NAME`.
 Dotted tool selectors split at the first dot: `docs.search.v2` selects server
 `docs` and tool `search.v2`. This also applies to tool-specific discovery.
+The inferred command form instead chooses the longest configured server prefix.
+Use `--server NAME --tool NAME` to make dotted server names unambiguous.
 Arguments can use `key=value`, `key:value`, JSON through `--args`/`--params`, or
 `--args -` for a JSON object on stdin. Positional arguments use the tool schema's
 property declaration order. Named `key=@FILE` values read a regular UTF-8 file
 as literal text, up to 16 MiB; `key=@@text` sends literal `@text`.
 Tool-option flags must match schema properties or their kebab-case spelling;
-exact schema property names take precedence over aliases. Unknown options are rejected.
+exact schema property names take precedence over aliases. Ambiguous kebab-case
+aliases and unknown options fail before dispatch. Local schema references use the
+same argument types as equivalent inline properties. Discovery and bridge catalogs
+omit missing or empty tool names and retain the first entry for each exact name.
 Tool names resolve exactly first, then through a unique case-insensitive alias
 that ignores punctuation. For example, `list-pages` can select upstream
 `list_pages`. Ambiguous aliases fail; near-miss spellings only suggest a name and
@@ -441,9 +466,9 @@ journals retain their existing names for compatibility.
 
 `MCP_CLI_HOME` redirects the home config and home credential layer to
 `MCP_CLI_HOME/config/`, and keeps daemon state, sockets, and logs under
-`MCP_CLI_HOME/state/`. This override is unchanged. It does
-not relocate project config or project credentials. Use `MCP_CLI_CONFIG` or
-`--config PATH` for a fully explicit configuration and adjacent credential scope.
+`MCP_CLI_HOME/state/`. The override does not relocate project config or project
+credentials. Use `MCP_CLI_CONFIG` or `--config PATH` for a fully explicit
+configuration and adjacent credential scope.
 
 Set `MCP_CLI_CREDENTIALS_READ_ONLY=1` in the calling process to
 allow use of valid cached credentials without refresh or credential writes.
@@ -484,17 +509,19 @@ mcp-cli vault set docs --tokens-file tokens.json
 mcp-cli vault clear docs
 ```
 
-Credentials use `~/.mcp/credentials.json` and
-`PROJECT/.mcp/credentials.json`. Project credentials override home credentials
-independently of where a server is defined, so a project can authenticate an
-inherited home server as a different account without copying its definition.
-An expired or invalid project credential never falls back to a home account.
-Refresh updates the selected credential store, not a copy of a rotating token.
-`auth`, `vault set`, and logout/clear target the active project scope;
-`--config PATH` targets credentials beside that config. To authorize at home,
-run `mcp-cli --config ~/.mcp/config.json auth SERVER`.
-Clearing a project credential restores home fallback. Credential scopes also
-separate pooled connections, including projects using different accounts.
+Credentials belong to the config file that defines the selected server.
+Servers from `~/.mcp/config.json` use `~/.mcp/credentials.json` from every project.
+Servers from `PROJECT/.mcp/config.json` use `PROJECT/.mcp/credentials.json`.
+A same-named project definition replaces the home definition and uses only its
+project credentials. Missing, expired, or cleared project credentials do not
+fall back to a home account. Removing the project definition restores the home
+definition and its home credentials.
+Login, refresh, credential inspection, `vault set`, and logout/clear all use the
+defining config's store. `--config PATH` uses credentials beside that config;
+`--root` selects project definitions without relocating inherited home credentials.
+Home-defined servers share pooled connections across projects. Project definitions
+and explicit configs retain separate pooled identities and credentials.
+Existing credentials saved in a project by older versions are not moved automatically.
 Explicit `tokenCacheDir` still opts into that cache and can intentionally share
 credentials; legacy mcporter credential paths are not discovered automatically.
 Do not use `auth --reset`, `vault set`, `vault clear`, or config login/logout
@@ -677,11 +704,10 @@ of complete parity.
 Imports copy definitions; they do not enable live editor-config dependencies.
 `emit-ts`, `generate-cli`, `inspect-cli`, `record`, `replay`, and an SDK are
 outside this implementation's scope.
-Pools remain owned by the persistent native daemon, not an ephemeral per-command
-runtime. This lifetime is intentional:
-commands and agent clients reuse the same daemon and multiplexer, without a
-second mcporter-style broker. Concurrent routing, verified retirement, and
-the prohibition on replaying unknown outcomes remain part of the pool contract.
+The persistent native daemon owns pools, so commands and agent clients reuse
+the same daemon and multiplexer rather than an ephemeral per-command runtime or
+second broker. Concurrent routing, verified retirement, and the prohibition on
+replaying unknown outcomes remain part of the pool contract.
 
 Output formatting is an adapter, not a separate execution path. `--output raw`
 deliberately emits a JSON result envelope rather than Node inspect text.
@@ -728,6 +754,9 @@ Set `MCP_CLI_DEBUG=1` to enable diagnostic logging to the state dir.
 `proxy NAME` and `pool proxy NAME` both resolve the merged `.mcp` configuration,
 including scoped credentials. Both accept `--config` and `--root`.
 No legacy TOML or mcporter configuration is read as a fallback.
+A proxy exits when its pool connection closes, even while agent stdin stays open.
+Closing stdin stops new requests but keeps the pool connection open for up to
+800 ms so pending responses can drain.
 
 ## Local endpoint security
 
@@ -786,8 +815,10 @@ and incremental SSE responses are supported. `--transport sse` uses the legacy
 GET event stream, discovers its same-origin message endpoint, and sends POSTs
 there. It does not use a POST-only approximation of legacy SSE.
 
-HTTP transport limits are 32 concurrent requests and 1 MiB per JSON response or
-SSE frame. The default request deadline is 60 seconds and the default stream
+HTTP transport limits are 32 concurrent requests, 1 MiB per outgoing request,
+and 16 MiB per incoming JSON response or SSE frame. Large tool catalogs can
+exceed 1 MiB; size-limit errors include the response limit in bytes.
+The default request deadline is 60 seconds and the default stream
 read deadline is 30 seconds; configured `timeoutMs` changes these budgets.
 MCP command requests carry their caller's operation budget through the local
 pool to the HTTP backend, rather than inheriting a fixed 60-second ceiling.
@@ -855,25 +886,26 @@ that changes state.
 
 ## Layout
 
-- `transport.rs` — unified local transport (Unix domain sockets / Windows named pipes)
-- `config.rs` — server definitions + paths (XDG-aware)
-- `server_config.rs` normalizes JSONC files and already-parsed documents.
+- `transport.rs` provides local transport over Unix domain sockets or Windows named pipes.
+- `config.rs` defines server settings and runtime paths.
+- `server_config.rs` and `server_config_entry.rs` normalize JSONC and own entry decoding.
 - `server_config_settings.rs` interprets borrowed settings without duplicating mutable config.
-- `mcp_cli.rs` / `tool_arguments.rs` / `tool_output.rs` / `tool_discovery.rs` — MCP command parsing, output, and discovery
-- `config_commands.rs` owns config mutations; `config_commands_input.rs` adapts CLI arguments.
+- `mcp_cli.rs`, `tool_arguments.rs`, `tool_output.rs`, and `tool_discovery.rs` handle MCP commands, output, and discovery.
+- `config_commands_plan.rs` shares conflict and retirement planning between copy and batch imports; `config_commands_input.rs` adapts CLI arguments.
 - `daemon_commands.rs` owns auth, vault, and daemon command orchestration.
-- `mcp_client.rs` / `mcp_client_wire.rs` — MCP requests through pooled local connections
-- `mcp_bridge.rs` / `mcp_bridge_*.rs` — keep-alive tool bridge over stdio or HTTP
-- `tool_filter.rs` — shared tool filtering for discovery, calls, and bridge exposure
-- `oauth.rs` / `oauth_*.rs` — explicit authorization, credential reuse, storage, and refresh
-- `upstream.rs` — upstream ownership and confirmed shutdown contract
-- `upstream_stdio.rs` / `upstream_http.rs` — stdio and remote transport backends
-- `jsonrpc.rs` — JSON-RPC id translation (per-client ids rewritten to pool-unique ids)
-- `socket_proxy.rs` / `socket_proxy_*.rs` own generation lifecycle, client handling, and routing.
+- `mcp_client_endpoint.rs` owns credential preparation and pool identity; `mcp_client.rs` and `mcp_client_wire.rs` own local MCP sessions.
+- `mcp_bridge.rs` and `mcp_bridge_*.rs` implement the keep-alive tool bridge over stdio or HTTP.
+- `tool_filter.rs` normalizes catalogs and filters discovery, calls, and bridge exposure.
+- `tool_schema_view.rs` owns bounded schema references and option aliases; `tool_inputs.rs` owns ordered input provenance.
+- `oauth.rs` and `oauth_*.rs` handle authorization, credential reuse, storage, and refresh.
+- `upstream.rs` defines upstream ownership and confirmed shutdown.
+- `upstream_stdio.rs` and `upstream_http.rs` implement stdio and remote transport backends.
+- `jsonrpc.rs` translates per-client JSON-RPC IDs to pool-unique IDs.
+- `socket_proxy.rs` owns generation lifecycle; `socket_proxy_cache.rs` owns route/cache transactions, with delivery outside its locks.
 - `mcp_session.rs` / `session_cache.rs` own shared-request transitions and cache state.
-- `pool.rs` — registry of pooled servers + socket discovery for daemon reattach
-- `control.rs` / `daemon.rs` — control protocol + long-lived daemon
+- `pool.rs` and `pool_endpoint.rs` separate owned servers from discovered external endpoints.
+- `control.rs` and `daemon.rs` implement the control protocol and long-lived daemon.
 - `daemon_client.rs` owns control exchange and launch mechanics with distinct connection policies.
 - `daemon_configuration_ownership.rs` selects pool views for native control and mutation retirement.
-- `proxy.rs` — per-agent stdio bridge to a pool socket (self-starts the upstream)
-- `cli.rs` / `cli_output.rs` / `main.rs` — subcommand dispatch and output
+- `proxy.rs` bridges an agent's stdio to a pool socket and starts the upstream when needed.
+- `cli_syntax.rs` derives global option arity from Clap; `cli.rs`, `cli_output.rs`, and `main.rs` own dispatch, output, and runtime lifetime.

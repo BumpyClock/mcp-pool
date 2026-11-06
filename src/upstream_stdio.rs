@@ -8,7 +8,7 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::diagnostics;
-use crate::upstream::UpstreamHandle;
+use crate::upstream::{SetupFailure, UpstreamHandle};
 use crate::upstream_process::OwnedProcess;
 
 /// Bounds draining after retirement because descendants may inherit stdout writers.
@@ -32,7 +32,17 @@ pub async fn spawn_with_cwd(
     cwd: Option<std::path::PathBuf>,
     response_tx: mpsc::Sender<String>,
 ) -> io::Result<UpstreamHandle> {
-    spawn_configured(command, args, env, cwd, false, response_tx).await
+    spawn_configured(
+        command,
+        args,
+        env,
+        cwd,
+        false,
+        response_tx,
+        diagnostics::ServerLog::default(),
+    )
+    .await
+    .map_err(io::Error::from)
 }
 
 pub async fn spawn_configured(
@@ -42,7 +52,9 @@ pub async fn spawn_configured(
     cwd: Option<std::path::PathBuf>,
     clear_env: bool,
     response_tx: mpsc::Sender<String>,
-) -> io::Result<UpstreamHandle> {
+    log: diagnostics::ServerLog,
+) -> Result<UpstreamHandle, SetupFailure> {
+    let log = log.with_redactions(env.values().cloned());
     #[cfg(windows)]
     let command = resolve_windows_command(&command, &env, cwd.as_deref(), clear_env)?;
     let mut launch = Command::new(command);
@@ -58,7 +70,7 @@ pub async fn spawn_configured(
     if let Some(cwd) = cwd {
         launch.current_dir(cwd);
     }
-    let mut process = OwnedProcess::spawn(launch).await?;
+    let mut process = OwnedProcess::spawn(launch, log.clone()).await?;
     let pipes = (
         process.child.stdin.take(),
         process.child.stdout.take(),
@@ -66,45 +78,43 @@ pub async fn spawn_configured(
     );
     let (Some(stdin), Some(stdout), Some(stderr)) = pipes else {
         process.retire().await.map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                format!("upstream pipe setup failed; retirement was not confirmed: {error}"),
-            )
+            SetupFailure::RetirementUnverified(io::Error::other(format!(
+                "upstream pipe setup failed; retirement was not confirmed: {error}"
+            )))
         })?;
-        return Err(io::Error::other(
-            "upstream standard pipes were not established",
-        ));
+        return Err(io::Error::other("upstream standard pipes were not established").into());
     };
     let (request_tx, request_rx) = mpsc::channel(1024);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let (completion_tx, completion_rx) = watch::channel(None);
+    let handle_log = log.clone();
     tokio::spawn(async move {
         let result = {
-            let responses = read_responses(stdout, response_tx);
+            let responses = read_responses(stdout, response_tx, &log);
             tokio::pin!(responses);
             let natural_exit = {
                 let requests = write_requests(stdin, request_rx);
-                let errors = async move {
-                    read_stderr(stderr).await?;
+                let errors = async {
+                    read_stderr(stderr, &log).await?;
                     std::future::pending::<io::Result<()>>().await
                 };
                 tokio::select! {
                     _ = &mut shutdown_rx => false,
                     result = process.wait_for_exit() => {
                         let exited = result.is_ok();
-                        log_worker_result("wait", result);
+                        log_worker_result(&log, "wait", result);
                         exited
                     }
                     result = requests => {
-                        log_worker_result("stdin", result);
+                        log_worker_result(&log, "stdin", result);
                         false
                     }
                     result = &mut responses => {
-                        log_worker_result("stdout", result);
+                        log_worker_result(&log, "stdout", result);
                         false
                     }
                     result = errors => {
-                        log_worker_result("stderr", result);
+                        log_worker_result(&log, "stderr", result);
                         false
                     }
                 }
@@ -112,25 +122,25 @@ pub async fn spawn_configured(
             let result = process.retire().await.map_err(|error| error.to_string());
             if natural_exit && result.is_ok() {
                 match tokio::time::timeout(STDOUT_DRAIN_TIMEOUT, &mut responses).await {
-                    Ok(result) => log_worker_result("stdout_drain", result),
-                    Err(_) => diagnostics::log("upstream_stdout_drain_timeout"),
+                    Ok(result) => log_worker_result(&log, "stdout_drain", result),
+                    Err(_) => log.log("upstream_stdout_drain_timeout"),
                 }
             }
             result
         };
         if let Err(error) = &result {
-            diagnostics::log(format!("upstream_retirement_unverified error={error}"));
+            log.log(format!("upstream_retirement_unverified error={error}"));
         } else {
-            diagnostics::log("upstream_stdio_retired");
+            log.log("upstream_stdio_retired");
         }
         completion_tx.send_replace(Some(result));
     });
-    Ok(UpstreamHandle::new(request_tx, shutdown_tx, completion_rx))
+    Ok(UpstreamHandle::new(request_tx, shutdown_tx, completion_rx).with_log(handle_log))
 }
 
-fn log_worker_result(worker: &str, result: io::Result<()>) {
+fn log_worker_result(log: &diagnostics::ServerLog, worker: &str, result: io::Result<()>) {
     if let Err(error) = result {
-        diagnostics::log(format!("upstream_{worker}_error error={error}"));
+        log.log(format!("upstream_{worker}_error error={error}"));
     }
 }
 
@@ -146,7 +156,11 @@ async fn write_requests(
     Ok(())
 }
 
-async fn read_responses(stdout: ChildStdout, responses: mpsc::Sender<String>) -> io::Result<()> {
+async fn read_responses(
+    stdout: ChildStdout,
+    responses: mpsc::Sender<String>,
+    log: &diagnostics::ServerLog,
+) -> io::Result<()> {
     let mut reader = BufReader::new(stdout);
     let mut buffer = String::new();
     let mut forwarded: u64 = 0;
@@ -167,14 +181,14 @@ async fn read_responses(stdout: ChildStdout, responses: mpsc::Sender<String>) ->
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(payload)) => {
                 let blocked_since = std::time::Instant::now();
-                diagnostics::log(format!(
+                log.log(format!(
                     "upstream_stdout_backpressure response_channel_full available={}",
                     responses.capacity()
                 ));
                 if responses.send(payload).await.is_err() {
                     return Ok(());
                 }
-                diagnostics::log(format!(
+                log.log(format!(
                     "upstream_stdout_unblocked blocked_ms={}",
                     blocked_since.elapsed().as_millis()
                 ));
@@ -183,7 +197,7 @@ async fn read_responses(stdout: ChildStdout, responses: mpsc::Sender<String>) ->
         }
         forwarded += 1;
         if forwarded.is_multiple_of(1000) {
-            diagnostics::log(format!(
+            log.log(format!(
                 "upstream_stdout_gauge forwarded={forwarded} channel_available={}",
                 responses.capacity()
             ));
@@ -192,7 +206,7 @@ async fn read_responses(stdout: ChildStdout, responses: mpsc::Sender<String>) ->
 }
 
 /// A closed stderr pipe alone does not establish that the upstream process exited.
-async fn read_stderr(stderr: ChildStderr) -> io::Result<()> {
+async fn read_stderr(stderr: ChildStderr, log: &diagnostics::ServerLog) -> io::Result<()> {
     let raw = crate::environment::string("MCP_CLI_RAW_UPSTREAM_STDERR")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"))
         .unwrap_or(false);
@@ -206,12 +220,13 @@ async fn read_stderr(stderr: ChildStderr) -> io::Result<()> {
         let text = String::from_utf8_lossy(&buffer);
         let trimmed = text.trim_end_matches(['\r', '\n']);
         if !trimmed.is_empty() {
+            let line = log.redact(trimmed);
             let line = if raw {
-                trimmed.to_string()
+                line
             } else {
-                diagnostics::summarize_log_line(trimmed)
+                diagnostics::summarize_log_line(&line)
             };
-            diagnostics::log(format!("upstream_stderr {line}"));
+            log.log(format!("upstream_stderr {line}"));
         }
     }
 }
@@ -393,8 +408,16 @@ mod options_tests {
             "MCP_CLI_TRANSPORT_TEST_VALUE".into(),
             "synthetic-captured-value".into(),
         )]);
-        let mut handle =
-            spawn_configured(command, arguments, environment, None, true, responses).await?;
+        let mut handle = spawn_configured(
+            command,
+            arguments,
+            environment,
+            None,
+            true,
+            responses,
+            diagnostics::ServerLog::default(),
+        )
+        .await?;
         for expected in ["synthetic-captured-value", absent] {
             let response = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
                 .await
@@ -408,3 +431,7 @@ mod options_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "upstream_stdio_logging_tests.rs"]
+mod logging_tests;

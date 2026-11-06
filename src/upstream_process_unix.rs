@@ -4,11 +4,15 @@ use tokio::process::{Child, Command};
 
 pub(super) struct Ownership {
     process_group: Option<libc::pid_t>,
+    log: crate::diagnostics::ServerLog,
 }
 
 impl Ownership {
     /// On Linux, adopts orphaned descendants so they can be reaped with this group.
-    pub(super) fn prepare(command: &mut Command) -> io::Result<Self> {
+    pub(super) fn prepare(
+        command: &mut Command,
+        log: &crate::diagnostics::ServerLog,
+    ) -> io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
             if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } != 0 {
@@ -18,6 +22,7 @@ impl Ownership {
         command.process_group(0);
         Ok(Self {
             process_group: None,
+            log: log.clone(),
         })
     }
 
@@ -98,7 +103,6 @@ impl Ownership {
         }
     }
 
-    /// Signals only the process group created for this child.
     fn signal(&self, signal: libc::c_int) -> io::Result<bool> {
         let process_group = self
             .process_group
@@ -120,7 +124,8 @@ impl Drop for Ownership {
         if self.process_group.is_some()
             && let Err(error) = self.terminate()
         {
-            crate::diagnostics::log(format!("upstream_process_group_drop_error error={error}"));
+            self.log
+                .log(format!("upstream_process_group_drop_error error={error}"));
         }
     }
 }

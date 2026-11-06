@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct Options {
+    pub(super) log: ServerLog,
     headers: HeaderMap,
     auth: Option<crate::oauth::HttpAuth>,
     pub(super) request_timeout: Duration,
@@ -13,7 +14,14 @@ impl Options {
         headers: BTreeMap<String, String>,
         timeout_ms: Option<u64>,
         auth: Option<crate::oauth::HttpAuth>,
+        log: ServerLog,
     ) -> io::Result<Self> {
+        let log = log.with_redactions(
+            headers.values().cloned().chain(
+                auth.iter()
+                    .flat_map(|auth| [auth.server_url.clone(), auth.identity_key.clone()]),
+            ),
+        );
         let invalid = || {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -43,6 +51,7 @@ impl Options {
             ));
         }
         Ok(Self {
+            log,
             headers: configured,
             auth,
             request_timeout: configured_request_timeout(timeout_ms),
@@ -70,23 +79,25 @@ impl Options {
     pub(super) async fn authorize(
         &self,
         builder: reqwest::RequestBuilder,
-    ) -> Result<reqwest::RequestBuilder, String> {
+    ) -> Result<reqwest::RequestBuilder, HttpFailure> {
         let mut builder = builder.headers(self.headers.clone());
         if let Some(auth) = &self.auth {
             let value = crate::oauth::authorization_header(auth)
                 .await
                 .map_err(|_| {
-                    if auth.read_only {
+                    let message = if auth.read_only {
                         "HTTP authorization unavailable: read-only policy blocks refresh; remove MCP_CLI_CREDENTIALS_READ_ONLY and MCP_POOL_CREDENTIALS_READ_ONLY only for explicitly authorized `mcp-cli auth SERVER`"
                     } else if auth.cached_only {
                         "HTTP authorization unavailable: --no-oauth permits valid cached credentials only; run `mcp-cli auth SERVER` explicitly before retrying"
                     } else {
                         "HTTP authorization could not be refreshed"
-                    }
+                    };
+                    HttpFailure::new(FailureKind::Auth, message)
                 })?;
             if let Some(value) = value {
-                let mut value = HeaderValue::from_str(&value)
-                    .map_err(|_| "HTTP authorization header is invalid")?;
+                let mut value = HeaderValue::from_str(&value).map_err(|_| {
+                    HttpFailure::new(FailureKind::Auth, "HTTP authorization header is invalid")
+                })?;
                 value.set_sensitive(true);
                 builder = builder.header(AUTHORIZATION, value);
             }

@@ -56,7 +56,6 @@ impl Fixture {
 
     pub fn seed(&self, patch: Value) -> Result<()> {
         let authentication = context(&self.server)?;
-        let _locks = store::transaction(&authentication)?;
         store::save(&authentication, &patch, None)
     }
 

@@ -16,6 +16,8 @@ pub(crate) use crate::diagnostics::logging;
 mod migration;
 #[path = "daemon_options.rs"]
 mod options;
+#[path = "daemon_retirement.rs"]
+mod retirement;
 
 pub(crate) async fn auth_with_timeout(
     configuration: &ServerConfiguration,
@@ -318,21 +320,7 @@ async fn stop() -> Result<()> {
         checked(response)?;
     }
     crate::diagnostics::log("daemon stop: shutdown acknowledged; verifying endpoint disappearance");
-    let expires = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        match crate::transport::connect(&crate::config::control_socket_path()).await {
-            Ok(stream) => drop(stream),
-            Err(error) if crate::daemon_client::endpoint_absent(&error) => {
-                return Ok(());
-            }
-            Err(error) if crate::daemon_client::endpoint_busy(&error) => {}
-            Err(error) => return Err(error).context("Verifying daemon endpoint retirement"),
-        }
-        if tokio::time::Instant::now() >= expires {
-            bail!("Daemon retirement not verified within 15 seconds; replacement was not started");
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    retirement::wait(&crate::config::control_socket_path()?).await
 }
 
 async fn start(options: &options::Options) -> Result<()> {

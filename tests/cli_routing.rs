@@ -1,3 +1,6 @@
+#[path = "common/fixture_lifecycle.rs"]
+mod fixture_lifecycle;
+
 use std::io;
 
 use serde_json::{Value, json};
@@ -356,6 +359,39 @@ async fn exact_dotted_servers_and_explicit_native_commands_win() -> io::Result<(
         Some(&json!("expression"))
     );
 
+    // Explicit selectors split at the first dot. Inference above uses the longest configured prefix.
+    let explicit = fixture
+        .command(&[
+            "call",
+            "fixture.v2.echo.v2",
+            "label=explicit",
+            "--output",
+            "json",
+        ])
+        .await?;
+    assert!(!explicit.status.success());
+    let explicit_error = parse_json(&explicit)?;
+    assert_eq!(explicit_error.get("server"), Some(&json!("fixture")));
+    assert_eq!(explicit_error.get("tool"), Some(&json!("v2.echo.v2")));
+    let unambiguous = parse_json(
+        &fixture
+            .success(&[
+                "call",
+                "--server",
+                "fixture.v2",
+                "--tool",
+                "echo.v2",
+                "label=explicit-flags",
+                "--output",
+                "json",
+            ])
+            .await?,
+    )?;
+    assert_eq!(
+        unambiguous.pointer("/arguments/label"),
+        Some(&json!("explicit-flags"))
+    );
+
     let before = fixture.event_count("spawn").await?;
     let native = fixture.success(&["status"]).await?;
     assert!(!String::from_utf8_lossy(&native.stdout).contains("\"mode\":\"server\""));
@@ -379,6 +415,117 @@ async fn unknown_and_extra_tokens_fail_without_guessing() -> io::Result<()> {
     assert!(!extra.status.success());
     let extra_error = String::from_utf8_lossy(&extra.stderr);
     assert!(extra_error.contains("Usage: list"), "{extra_error}");
+    assert_eq!(spawn_count(&fixture).await?, 0);
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn literal_help_and_quiet_do_not_override_mcp_dispatch() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    fixture.warm("fixture").await?;
+    for marker in ["--help", "-h", "--quiet", "--plain", "--no-color"] {
+        let output = parse_json(
+            &fixture
+                .success(&["call", "fixture.echo", "--output", "json", "--", marker])
+                .await?,
+        )?;
+        assert_eq!(output.pointer("/arguments/label"), Some(&json!(marker)));
+    }
+    let inferred = parse_json(
+        &fixture
+            .success(&["fixture", "--output", "json", "--", "echo", "--help"])
+            .await?,
+    )?;
+    assert_eq!(inferred.pointer("/arguments/label"), Some(&json!("--help")));
+    let literal_tool = parse_json(
+        &fixture
+            .success(&["fixture", "--output", "json", "--", "--help"])
+            .await?,
+    )?;
+    assert_eq!(literal_tool.get("name"), Some(&json!("fixture")));
+    let literal_list = fixture
+        .command(&["fixture", "--output", "json", "--", "list"])
+        .await?;
+    assert!(!literal_list.status.success());
+    assert_eq!(parse_json(&literal_list)?.get("tool"), Some(&json!("list")));
+    let help = fixture.success(&["help", "call", "--", "--quiet"]).await?;
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: mcp-cli call"));
+
+    for marker in ["--help", "-h", "--quiet"] {
+        let failed = fixture.command(&["list", "--", marker]).await?;
+        assert!(!failed.status.success(), "{failed:?}");
+        assert!(
+            !failed.stderr.is_empty(),
+            "literal marker suppressed an error: {marker}"
+        );
+        assert!(!String::from_utf8_lossy(&failed.stdout).contains("Usage: mcp-cli list"));
+    }
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn global_values_and_literal_paths_do_not_reselect_configuration() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    fixture.warm("fixture").await?;
+    let output = parse_json(
+        &fixture
+            .success(&[
+                "--no-color",
+                "--plain",
+                "--log-level=error",
+                "--json",
+                "fixture",
+                "echo",
+                "--",
+                "--config=missing.json",
+            ])
+            .await?,
+    )?;
+    assert_eq!(
+        output.pointer("/arguments/label"),
+        Some(&json!("--config=missing.json"))
+    );
+    let invalid_level = fixture
+        .command(&["--log-level", "--config", "fixture"])
+        .await?;
+    assert!(!invalid_level.status.success());
+    assert!(String::from_utf8_lossy(&invalid_level.stderr).contains("--log-level must be"));
+    assert!(!String::from_utf8_lossy(&invalid_level.stderr).contains("requires a path"));
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn oauth_timeout_remains_an_authorization_only_global() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    for prefix in ["--oauth-timeout=10", "--oauth-timeout"] {
+        let mut arguments = vec![prefix];
+        if prefix == "--oauth-timeout" {
+            arguments.push("10");
+        }
+        arguments.extend(["fixture", "--json"]);
+        let rejected = fixture.command(&arguments).await?;
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr)
+                .contains("applies only to auth or config login")
+        );
+    }
+    let help = fixture
+        .success(&["--oauth-timeout=10", "auth", "--help"])
+        .await?;
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage: mcp-cli auth"));
+    assert_eq!(spawn_count(&fixture).await?, 0);
+    fixture.finish().await
+}
+
+#[tokio::test]
+async fn native_add_rejects_empty_url_without_changing_config() -> io::Result<()> {
+    let fixture = Fixture::new().await?;
+    let original = tokio::fs::read(&fixture.config).await?;
+    let rejected = fixture.command(&["add", "empty", "--url", ""]).await?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("--url must not be empty"));
+    assert_eq!(tokio::fs::read(&fixture.config).await?, original);
     assert_eq!(spawn_count(&fixture).await?, 0);
     fixture.finish().await
 }

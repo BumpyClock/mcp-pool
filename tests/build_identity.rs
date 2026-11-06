@@ -1,6 +1,10 @@
 use std::error::Error;
 use tokio::process::Command;
 
+#[path = "../build.rs"]
+#[allow(dead_code)]
+mod build_script;
+
 #[tokio::test]
 async fn built_version_reports_the_source_build_identity() -> Result<(), Box<dyn Error>> {
     let output = Command::new(env!("CARGO_BIN_EXE_mcp-cli"))

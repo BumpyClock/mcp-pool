@@ -26,8 +26,8 @@ async fn running(
 }
 
 async fn exercise(restart: bool, failure: bool) -> io::Result<()> {
-    let first = proxy();
-    let second = proxy();
+    let first = proxy()?;
+    let second = proxy()?;
     let (old_first_shutdown, old_first_retired, old_first_responses, old_first_requests) =
         running(&first).await?;
     let (old_second_shutdown, old_second_retired, old_second_responses, old_second_requests) =

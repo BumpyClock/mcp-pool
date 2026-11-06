@@ -342,12 +342,12 @@ mod tests {
         assert!(cache.get("tools/list").is_none());
         assert!(cache.get("server/discover").is_none());
 
-        cache.store_result("tools/list", json!({"tools":[],"ttlMs":1}));
+        cache.store_result("tools/list", json!({"tools":[],"ttlMs":60_000}));
         cache.store_result(
             "server/discover",
-            json!({"supportedVersions":["2025-11-25"],"ttlMs":1}),
+            json!({"supportedVersions":["2025-11-25"],"ttlMs":60_000}),
         );
-        std::thread::sleep(Duration::from_millis(2));
+        cache.elapse_results(Duration::from_secs(61));
         assert!(cache.get("tools/list").is_none());
         assert!(cache.get("server/discover").is_none());
 

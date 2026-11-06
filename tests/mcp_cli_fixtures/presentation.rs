@@ -20,6 +20,19 @@ async fn server_discovery_displays_complete_docs_and_keeps_brief_and_json_modes(
     );
     tokio::fs::write(&fixture.config, configuration.to_string()).await?;
     fixture.warm("fixture").await?;
+    fixture.warm("array").await?;
+    let listing = fixture.success(&["list", "--no-color"]).await?;
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(listing.starts_with(&format!(
+        "mcp-cli {} - Listing 2 servers\n",
+        env!("CARGO_PKG_VERSION")
+    )));
+    assert!(listing.contains("- fixture - Controlled tool documentation (4 tools, "));
+    assert!(
+        listing.ends_with("✓ Listed 2 servers (2 healthy).\n"),
+        "{listing}"
+    );
+    assert!(!listing.contains('\x1b'));
     for command in ["list", "describe", "list-tools"] {
         let output = fixture.success(&[command, "fixture"]).await?;
         let text = String::from_utf8_lossy(&output.stdout);

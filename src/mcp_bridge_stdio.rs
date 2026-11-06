@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use super::{BridgeState, rpc};
+use crate::process_stdin;
 
 const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT: usize = 64;
@@ -20,7 +21,8 @@ enum InputFrame {
 
 pub(super) async fn serve(state: Arc<BridgeState>) -> Result<()> {
     let (sender, receiver) = mpsc::channel(16);
-    let reader = tokio::spawn(read_input(sender));
+    let input = process_stdin::stdin()?;
+    let reader = tokio::spawn(read_input(sender, input));
     let outcome = serve_loop(state, receiver).await;
     reader.abort();
     match reader.await {
@@ -94,8 +96,8 @@ async fn serve_loop(state: Arc<BridgeState>, mut input: mpsc::Receiver<InputFram
     Ok(())
 }
 
-async fn read_input(sender: mpsc::Sender<InputFrame>) {
-    let mut input = BufReader::new(tokio::io::stdin());
+async fn read_input(sender: mpsc::Sender<InputFrame>, input: process_stdin::Input) {
+    let mut input = BufReader::new(input);
     loop {
         match read_limited_line(&mut input).await {
             Ok(Some(frame)) => {

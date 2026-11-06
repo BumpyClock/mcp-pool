@@ -74,7 +74,6 @@ fn constructs_protected_owner_only_pipe_descriptor() -> io::Result<()> {
     if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut owner_defaulted) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let user = current_user_sid_string()?;
     let mut token = open_process_token(unsafe { GetCurrentProcess() })?;
     let user_buffer = token_user_information(token.get())?;
     let user_sid = token_user_sid(&user_buffer)?;
@@ -128,10 +127,6 @@ fn constructs_protected_owner_only_pipe_descriptor() -> io::Result<()> {
     );
     drop(user_buffer);
     token.close()?;
-    assert_eq!(
-        owner_only_pipe_sddl(&user),
-        format!("O:{user}D:P(A;;GA;;;{user})")
-    );
     Ok(())
 }
 

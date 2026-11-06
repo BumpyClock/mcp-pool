@@ -2,12 +2,10 @@ use serde_json::{Map, Value, json};
 
 use super::{BridgeFailure, BridgeState};
 
-const DEFAULT_PROTOCOL_VERSION: &str = "2025-11-25";
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
-    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
-pub(super) const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
-const PROTOCOL_VERSION_META_KEY: &str = "io.modelcontextprotocol/protocolVersion";
-const SUBSCRIPTION_ID_META_KEY: &str = "io.modelcontextprotocol/subscriptionId";
+use crate::mcp_protocol;
+pub(super) use crate::mcp_protocol::MODERN_VERSION as MODERN_PROTOCOL_VERSION;
+
+use crate::mcp_protocol::{SERVER_INFO_META_KEY, SUBSCRIPTION_ID_META_KEY};
 
 pub(super) struct ListenSubscription {
     pub id: Value,
@@ -95,15 +93,11 @@ pub(super) fn protocol_version_for_request(message: &Value) -> Option<String> {
 }
 
 pub(super) fn supports_protocol_version(version: &str) -> bool {
-    version == MODERN_PROTOCOL_VERSION || SUPPORTED_PROTOCOL_VERSIONS.contains(&version)
+    mcp_protocol::supports_version(version)
 }
 
 pub(super) fn modern_protocol_version(message: &Value) -> Option<&str> {
-    message
-        .get("params")?
-        .get("_meta")?
-        .get(PROTOCOL_VERSION_META_KEY)?
-        .as_str()
+    mcp_protocol::protocol_metadata(message.get("params")?)
 }
 
 pub(super) fn listen_subscription(
@@ -157,7 +151,7 @@ pub(super) fn subscription_acknowledgement(id: &Value, tools_list_changed: bool)
         "jsonrpc":"2.0",
         "method":"notifications/subscriptions/acknowledged",
         "params":{"notifications":notifications},
-        "_meta":{"io.modelcontextprotocol/subscriptionId":id}
+        "_meta":{(SUBSCRIPTION_ID_META_KEY):id}
     })
 }
 
@@ -168,8 +162,8 @@ pub(super) fn subscription_completion(id: &Value) -> Value {
         "result":{
             "resultType":"complete",
             "_meta":{
-                "io.modelcontextprotocol/subscriptionId":id,
-                "io.modelcontextprotocol/serverInfo":{
+                (SUBSCRIPTION_ID_META_KEY):id,
+                (SERVER_INFO_META_KEY):{
                     "name":"mcp-cli",
                     "version":env!("CARGO_PKG_VERSION")
                 }
@@ -304,7 +298,7 @@ fn discover_result(
         "capabilities":{"tools":tool_capability},
         "instructions":instructions,
         "_meta":{
-            "io.modelcontextprotocol/serverInfo":{
+            (SERVER_INFO_META_KEY):{
                 "name":"mcp-cli",
                 "version":env!("CARGO_PKG_VERSION")
             }
@@ -333,11 +327,7 @@ async fn call_tool(
 }
 
 fn negotiate_protocol_version(requested: &str) -> String {
-    if SUPPORTED_PROTOCOL_VERSIONS.contains(&requested) {
-        requested.to_owned()
-    } else {
-        DEFAULT_PROTOCOL_VERSION.to_owned()
-    }
+    mcp_protocol::negotiate_legacy_version(requested).to_owned()
 }
 
 fn success_response(id: Value, result: Value) -> Value {

@@ -45,7 +45,16 @@ async fn configured_headers_reach_streamable_post() -> TestResult {
     let mut configured = headers();
     configured.insert("McP-SeSsIoN-Id".into(), "configured-session".into());
     configured.insert("MCP-Protocol-Version".into(), "configured-version".into());
-    let mut handle = spawn_configured(url, false, configured, None, None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        configured,
+        None,
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#.into())
@@ -85,7 +94,16 @@ async fn configured_headers_reach_legacy_get_and_post() -> TestResult {
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle = spawn_configured(url, true, headers(), None, None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        true,
+        headers(),
+        None,
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#.into())
@@ -109,7 +127,16 @@ async fn configured_deadline_is_effective_and_errors_do_not_echo_secrets() -> Te
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle = spawn_configured(url, false, headers(), Some(50), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        headers(),
+        Some(50),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#.into())
@@ -122,7 +149,7 @@ async fn configured_deadline_is_effective_and_errors_do_not_echo_secrets() -> Te
     assert!(!response.to_string().contains("synthetic"));
     stop(&mut handle).await?;
     server.await??;
-    let options = Options::new(BTreeMap::new(), Some(120_000), None)?;
+    let options = Options::new(BTreeMap::new(), Some(120_000), None, ServerLog::default())?;
     assert_eq!(options.request_timeout, Duration::from_secs(120));
     assert_eq!(options.read_timeout, Duration::from_secs(120));
     Ok(())
@@ -141,8 +168,16 @@ async fn configured_deadline_can_exceed_default_request_and_read_caps() -> TestR
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, false, BTreeMap::new(), Some(3500), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        Some(3500),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#.into())
@@ -165,6 +200,7 @@ async fn rejected_header_and_url_values_are_redacted() -> TestResult {
         None,
         None,
         responses.clone(),
+        ServerLog::default(),
     )
     .await
     .err()
@@ -177,6 +213,7 @@ async fn rejected_header_and_url_values_are_redacted() -> TestResult {
         None,
         None,
         responses,
+        ServerLog::default(),
     )
     .await
     .err()
@@ -234,7 +271,16 @@ async fn initial_404_or_405_can_switch_to_legacy_sse_and_retire() -> TestResult 
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         });
         let (responses, mut receiver) = mpsc::channel(8);
-        let mut handle = spawn_configured(url, false, headers(), None, None, responses).await?;
+        let mut handle = spawn_configured(
+            url,
+            false,
+            headers(),
+            None,
+            None,
+            responses,
+            ServerLog::default(),
+        )
+        .await?;
         handle.request_tx.send(super::tests::initialize(1)).await?;
         handle
             .request_tx
@@ -274,7 +320,16 @@ async fn auth_failures_and_unknown_outcomes_do_not_fallback() -> TestResult {
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         });
         let (responses, mut receiver) = mpsc::channel(4);
-        let mut handle = spawn_configured(url, false, headers(), None, None, responses).await?;
+        let mut handle = spawn_configured(
+            url,
+            false,
+            headers(),
+            None,
+            None,
+            responses,
+            ServerLog::default(),
+        )
+        .await?;
         handle.request_tx.send(super::tests::initialize(1)).await?;
         let response = message(&mut receiver).await?;
         assert!(response.get("error").is_some());
@@ -319,16 +374,33 @@ async fn credentials_are_not_sent_to_redirects_or_cross_origin_legacy_endpoints(
         });
         let (responses, mut receiver) = mpsc::channel(4);
         if legacy {
-            let error = spawn_configured(url, true, headers(), None, None, responses)
-                .await
-                .err()
-                .ok_or("cross-origin endpoint accepted")?;
+            let error = spawn_configured(
+                url,
+                true,
+                headers(),
+                None,
+                None,
+                responses,
+                ServerLog::default(),
+            )
+            .await
+            .err()
+            .ok_or("cross-origin endpoint accepted")?;
             assert_eq!(
                 error.to_string(),
                 "Legacy SSE message endpoint must use the same origin"
             );
         } else {
-            let mut handle = spawn_configured(url, false, headers(), None, None, responses).await?;
+            let mut handle = spawn_configured(
+                url,
+                false,
+                headers(),
+                None,
+                None,
+                responses,
+                ServerLog::default(),
+            )
+            .await?;
             handle.request_tx.send(super::tests::initialize(1)).await?;
             let response = message(&mut receiver).await?;
             assert_eq!(
@@ -340,5 +412,28 @@ async fn credentials_are_not_sent_to_redirects_or_cross_origin_legacy_endpoints(
         }
         server.await??;
     }
+    Ok(())
+}
+
+#[test]
+fn http_diagnostics_retain_caller_and_configured_header_redactions() -> TestResult {
+    let options = Options::new(
+        BTreeMap::from([
+            (
+                "Authorization".to_owned(),
+                "Bearer synthetic-token".to_owned(),
+            ),
+            ("X-Api-Key".to_owned(), "synthetic-key".to_owned()),
+        ]),
+        None,
+        None,
+        ServerLog::new("logical-server").with_redactions(["caller-secret".to_owned()]),
+    )?;
+    assert_eq!(
+        options
+            .log
+            .redact("caller-secret Bearer synthetic-token synthetic-key"),
+        "[redacted] [redacted] [redacted]"
+    );
     Ok(())
 }

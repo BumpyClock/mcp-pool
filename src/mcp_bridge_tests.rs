@@ -161,10 +161,12 @@ async fn exposed_tools_normalize_invalid_schemas_and_preserve_extensions() -> Re
         vec![
             json!({"name":"", "inputSchema":{"type":"object"}}),
             json!({"description":"missing name"}),
+            json!({"name":42}),
             json!({
                 "name":"normalize", "description":"", "inputSchema":{"type":"array"},
                 "outputSchema":null, "annotations":{"readOnlyHint":true}
             }),
+            json!({"name":"normalize","description":"duplicate must not replace first metadata"}),
             json!({
                 "name":"preserve", "description":"kept",
                 "inputSchema":{"type":"object","required":["query"],"additionalProperties":false},

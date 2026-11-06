@@ -5,12 +5,13 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
-import textwrap
+import tomllib
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
 ZERO = "0" * 40
-CARGO = ["rustup", "run", "1.95.0", "cargo"]
+TOOLCHAIN = tomllib.loads((SOURCE / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
+CARGO = ["rustup", "run", TOOLCHAIN, "cargo"]
 FORMAT = CARGO + ["fmt", "--all", "--", "--check"]
 CHECK = CARGO + ["check", "--offline", "--locked", "--bin", "mcp-cli"]
 IPC = CARGO + ["test", "--offline", "--locked", "--bin", "mcp-cli", "--", "local_security", "transport::tests", "--test-threads=1"]
@@ -156,7 +157,7 @@ if os.environ.get('HOOK_FAIL')==' '.join(call):sys.exit(37)
 
     def test_nonzero_propagation_and_ipc_cleanup_on_failure(self):
         self.update()
-        for command in (FORMAT, CHECK, IPC, ["rustup", "run", "1.95.0", "rustc", "--version"]):
+        for command in (FORMAT, CHECK, IPC, ["rustup", "run", TOOLCHAIN, "rustc", "--version"]):
             with self.subTest(command=command):
                 self.assertEqual(self.hook(self.record(), HOOK_FAIL=" ".join(command)).returncode, 37)
                 if self.ipc_log.exists():
@@ -223,9 +224,7 @@ if os.environ.get('HOOK_FAIL')==' '.join(call):sys.exit(37)
         self.assertIn(IPC, self.calls())
 
     def run_workflow_step(self, mktemp_exit=0, cargo_exit=0):
-        workflow = (SOURCE / '.github/workflows/unix-ipc.yml').read_text()
-        step = workflow.split('      - name: Test local security and transport\n', 1)[1]
-        body = textwrap.dedent(step.split('        run: |\n', 1)[1])
+        body = (SOURCE / 'scripts/test_unix_ipc.sh').read_text()
         shell = shutil.which('bash')
         if shell is None:
             raise RuntimeError('Prepare Bash before running workflow fixtures.')

@@ -40,6 +40,29 @@ impl std::fmt::Debug for UpstreamSpec {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SetupFailure {
+    #[error(transparent)]
+    Failed(#[from] io::Error),
+    #[error("{0}")]
+    RetirementUnverified(io::Error),
+}
+
+impl SetupFailure {
+    pub(crate) fn retirement_unverified(&self) -> bool {
+        matches!(self, Self::RetirementUnverified(_))
+    }
+}
+
+impl From<SetupFailure> for io::Error {
+    fn from(failure: SetupFailure) -> Self {
+        match failure {
+            SetupFailure::Failed(error) => error,
+            failure @ SetupFailure::RetirementUnverified(_) => io::Error::other(failure),
+        }
+    }
+}
+
 pub(crate) type Completion = Option<Result<(), String>>;
 
 #[derive(Debug, Clone)]
@@ -76,6 +99,7 @@ pub struct UpstreamHandle {
     pub request_tx: mpsc::Sender<UpstreamRequest>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     completion: watch::Receiver<Completion>,
+    log: crate::diagnostics::ServerLog,
 }
 
 impl UpstreamHandle {
@@ -88,10 +112,20 @@ impl UpstreamHandle {
             request_tx,
             shutdown_tx: Some(shutdown_tx),
             completion,
+            log: crate::diagnostics::ServerLog::default(),
         }
     }
 
-    pub async fn spawn(spec: UpstreamSpec, response_tx: mpsc::Sender<String>) -> io::Result<Self> {
+    pub(crate) fn with_log(mut self, log: crate::diagnostics::ServerLog) -> Self {
+        self.log = log;
+        self
+    }
+
+    pub async fn spawn(
+        spec: UpstreamSpec,
+        response_tx: mpsc::Sender<String>,
+        log: crate::diagnostics::ServerLog,
+    ) -> Result<Self, SetupFailure> {
         match spec {
             UpstreamSpec::Stdio {
                 command,
@@ -107,6 +141,7 @@ impl UpstreamHandle {
                     cwd,
                     clear_env,
                     response_tx,
+                    log,
                 )
                 .await
             }
@@ -116,17 +151,17 @@ impl UpstreamHandle {
                 headers,
                 timeout_ms,
                 auth,
-            } => {
-                crate::upstream_http::spawn_configured(
-                    url,
-                    sse,
-                    headers,
-                    timeout_ms,
-                    auth.map(|auth| *auth),
-                    response_tx,
-                )
-                .await
-            }
+            } => crate::upstream_http::spawn_configured(
+                url,
+                sse,
+                headers,
+                timeout_ms,
+                auth.map(|auth| *auth),
+                response_tx,
+                log,
+            )
+            .await
+            .map_err(SetupFailure::from),
         }
     }
 
@@ -145,7 +180,7 @@ impl UpstreamHandle {
         if let Some(sender) = self.shutdown_tx.take()
             && sender.send(()).is_err()
         {
-            crate::diagnostics::log("upstream_shutdown_owner_already_exited");
+            self.log.log("upstream_shutdown_owner_already_exited");
         }
         self.wait_for_exit().await
     }
@@ -156,7 +191,7 @@ impl Drop for UpstreamHandle {
         if let Some(sender) = self.shutdown_tx.take()
             && sender.send(()).is_err()
         {
-            crate::diagnostics::log("upstream_drop_owner_already_exited");
+            self.log.log("upstream_drop_owner_already_exited");
         }
     }
 }
@@ -164,6 +199,15 @@ impl Drop for UpstreamHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_retirement_is_independent_of_io_error_kind() {
+        let ordinary = SetupFailure::from(io::Error::new(io::ErrorKind::ResourceBusy, "ordinary"));
+        assert!(!ordinary.retirement_unverified());
+        let unverified = SetupFailure::RetirementUnverified(io::Error::other("unconfirmed"));
+        assert!(unverified.retirement_unverified());
+        assert_eq!(unverified.to_string(), "unconfirmed");
+    }
 
     #[tokio::test]
     async fn shutdown_waits_for_confirmed_retirement() -> io::Result<()> {

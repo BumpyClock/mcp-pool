@@ -61,7 +61,6 @@ pub(crate) async fn run(
     for warning in &batch.warnings {
         crate::mcp_cli::context::warning(warning);
     }
-    // Imports are copies. External files are never part of runtime configuration.
     let destination = crate::config_paths::absolute(&match destination {
         Some(path) => path,
         None => crate::config_paths::explicit(None)?.unwrap_or(crate::config_paths::home_config()?),
@@ -76,7 +75,7 @@ pub(crate) async fn run(
         .iter()
         .map(|(name, server)| (name.clone(), server.entry.clone()))
         .collect();
-    crate::server_config::validate_document(&json!({"mcpServers":entries}))?;
+    crate::server_config::validate_new_entries(&json!({"mcpServers":entries}))?;
     let report = json!({
         "destination":destination,"dryRun":dry_run,
         "servers":batch.servers.iter().map(|(name, server)| {
@@ -86,49 +85,21 @@ pub(crate) async fn run(
             }
         }).collect::<Vec<_>>()
     });
-    let mutate = |document: &mut Value| -> Result<()> {
-        let servers = document
-            .get_mut("mcpServers")
-            .and_then(Value::as_object_mut)
-            .context("Destination needs an mcpServers object")?;
-        for (name, entry) in &entries {
-            if let Some(existing) = servers.get(name)
-                && existing != entry
-                && !replace
-            {
-                bail!(
-                    "Server '{name}' already exists in {}; use --replace to overwrite it. No changes made.",
-                    destination.display()
-                );
-            }
-        }
-        servers.extend(entries.clone());
-        Ok(())
-    };
+    let mutation = crate::config_commands::EntryMutation::import(entries.clone(), replace);
     if dry_run {
         let mut document = crate::config_commands::write::read_document(&destination)?;
-        mutate(&mut document)?;
+        mutation.apply(&mut document, &destination)?;
         crate::server_config::validate_document(&document)?;
     } else {
         authentication.ensure_writable()?;
         let planned_authentication = &authentication;
         let previous_source = destination.clone();
-        let changed = entries.clone();
-        crate::config_commands::write::write_checked_mutation(
+        crate::config_commands::write::write_planned_mutation(
             &destination,
-            crate::config_commands::write::WritePolicy::PreserveUnchanged,
-            mutate,
-            move |document| async move {
-                for (name, entry) in &changed {
-                    if document
-                        .get("mcpServers")
-                        .and_then(|servers| servers.get(name))
-                        .is_some_and(|old| old != entry)
-                    {
-                        crate::config_commands::retire_previous(&previous_source, &document, name)
-                            .await?;
-                    }
-                }
+            mutation.write_policy(),
+            |document| mutation.apply(document, &destination),
+            move |_, retirements| async move {
+                retirements.retire(&previous_source).await?;
                 planned_authentication.retire().await
             },
         )

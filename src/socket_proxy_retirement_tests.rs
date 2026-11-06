@@ -5,7 +5,7 @@ use crate::pool::Pool;
 pub(crate) const RETIREMENT_ERROR: &str = "tree retirement unverified";
 
 pub(crate) async fn failed_retirement_pool() -> io::Result<Arc<Pool>> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -102,7 +102,7 @@ async fn failed_shutdown_preserves_poison_and_allows_unrelated_pool_operations()
         pool.shutdown().await.err().map(|error| error.to_string()),
         Some(RETIREMENT_ERROR.to_string())
     );
-    let healthy = proxy();
+    let healthy = proxy()?;
     let Backend {
         setup,
         handle,

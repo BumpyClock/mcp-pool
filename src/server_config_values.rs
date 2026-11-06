@@ -33,13 +33,7 @@ pub(super) fn environment_from_os(
         .collect()
 }
 
-pub(super) fn windows_absolute(value: &str) -> bool {
-    let mut characters = value.chars();
-    matches!(
-        (characters.next(), characters.next(), characters.next()),
-        (Some(drive), Some(':'), Some('\\' | '/')) if drive.is_ascii_alphabetic()
-    ) || value.starts_with(r"\\")
-}
+pub(crate) use crate::stdio_tokens::{command_tokens, windows_absolute};
 
 pub(super) fn looks_like_path(value: &str) -> bool {
     windows_absolute(value) || value.starts_with(['/', '~']) || value.contains(['/', '\\'])
@@ -81,50 +75,6 @@ pub(crate) fn existing_command_path(command: &str, directory: &Path) -> Result<b
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error).context("could not inspect command path"),
     }
-}
-
-pub(crate) fn command_tokens(command: &str) -> Result<Vec<String>> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut started = false;
-    let mut characters = command.trim().chars().peekable();
-    while let Some(character) = characters.next() {
-        match character {
-            '\'' | '"' if quote == Some(character) => quote = None,
-            '\'' | '"' if quote.is_none() => {
-                quote = Some(character);
-                started = true;
-            }
-            '\\' if !windows_absolute(&current) => {
-                match characters.peek().copied() {
-                    Some(next) if next == '"' || next == '\'' || next.is_whitespace() => {
-                        current.push(next);
-                        characters.next();
-                    }
-                    _ => current.push(character),
-                }
-                started = true;
-            }
-            character if character.is_whitespace() && quote.is_none() => {
-                if started {
-                    tokens.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            character => {
-                current.push(character);
-                started = true;
-            }
-        }
-    }
-    if quote.is_some() {
-        bail!("unclosed quote in command string");
-    }
-    if started {
-        tokens.push(current);
-    }
-    Ok(tokens)
 }
 
 fn valid_environment_name(name: &str) -> bool {

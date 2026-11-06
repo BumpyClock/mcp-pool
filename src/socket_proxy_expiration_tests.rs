@@ -7,7 +7,7 @@ async fn age_registered_requests(proxy: &SocketProxy, count: usize) -> io::Resul
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation.request_map.lock().len() != count {
+        while generation.routes.pending_count() != count {
             tokio::task::yield_now().await;
         }
     })
@@ -19,26 +19,15 @@ async fn age_registered_requests(proxy: &SocketProxy, count: usize) -> io::Resul
 }
 
 fn age_pending_requests(generation: &Generation, keep_tools: bool, remaining: Duration) {
-    let expiry = Instant::now() + remaining;
-    let mut requests = generation.request_map.lock();
-    let mut cache = generation.handshake_cache.lock();
-    for request in requests.values_mut() {
-        if keep_tools && request.cache_key == Some(CacheableMethod::ToolsList) {
-            continue;
-        }
-        request.inserted_at = expiry - request.expires_after;
-        if let Some(method) = request.cache_key
-            && let Some(deadline) = cache.deadline(method)
-        {
-            cache.elapse_shared_wait(method, deadline.current().saturating_duration_since(expiry));
-        }
-    }
+    generation
+        .routes
+        .expire_requests_except(keep_tools.then_some(CacheableMethod::ToolsList), remaining);
 }
 
 #[tokio::test]
 async fn unpublished_backend_expires_socket_leader_and_followers_before_dispatch() -> io::Result<()>
 {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -92,7 +81,7 @@ async fn unpublished_backend_expires_socket_leader_and_followers_before_dispatch
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation.request_map.lock().len() != 1 {
+        while generation.routes.pending_count() != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -221,7 +210,7 @@ async fn stop_retires_client_with_backpressured_forward() -> io::Result<()> {
         .await
         .map_err(io::Error::other)??;
     assert!(generation.clients.lock().is_empty());
-    assert!(generation.request_map.lock().is_empty());
+    assert_eq!(generation.routes.pending_count(), 0);
     Ok(())
 }
 
@@ -243,27 +232,23 @@ async fn disconnected_initialize_leader_still_expires_followers() -> io::Result<
         .lock()
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
-    {
-        let pending = generation.request_map.lock();
-        assert_eq!(
-            pending.len(),
-            1,
-            "disconnected leader retains the shared deadline"
-        );
-    }
+    assert_eq!(
+        generation.routes.pending_count(),
+        1,
+        "disconnected leader retains the shared deadline"
+    );
     age_pending_requests(&generation, false, Duration::ZERO);
     generation.expiration_changed.notify_one();
     assert_eq!(
         read(&mut second).await?,
         json!({"jsonrpc":"2.0","id":"second","error":{"code":-32001,"message":"initialize timed out"}})
     );
-    assert!(generation.request_map.lock().is_empty());
-    assert!(!generation.handshake_cache.lock().initialization_ready());
+    assert_eq!(generation.routes.pending_count(), 0);
+    assert!(!generation.routes.initialization_ready());
     assert!(
         generation
-            .handshake_cache
-            .lock()
-            .deadline(CacheableMethod::Initialize)
+            .routes
+            .shared_deadline(CacheableMethod::Initialize)
             .is_none()
     );
     assert!(
@@ -301,12 +286,7 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation
-            .handshake_cache
-            .lock()
-            .waiter_count(CacheableMethod::ToolsList)
-            != 1
-        {
+        while generation.routes.waiter_count(CacheableMethod::ToolsList) != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -314,7 +294,7 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
     .map_err(io::Error::other)?;
     {
         age_pending_requests(&generation, true, Duration::from_millis(100));
-        generation.handshake_cache.lock().elapse_waiters(
+        generation.routes.elapse_waiters(
             CacheableMethod::ToolsList,
             Duration::from_secs(REQUEST_TTL_SECS) - Duration::from_millis(100),
         );
@@ -337,15 +317,14 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
     assert!(second_ids.contains(&Some(&json!("second"))));
     assert!(second_ids.contains(&Some(&json!("tools-b"))));
     assert_eq!(
-        generation.request_map.lock().len(),
+        generation.routes.pending_count(),
         1,
         "tools leader remains live"
     );
     assert!(
         generation
-            .handshake_cache
-            .lock()
-            .deadline(CacheableMethod::ToolsList)
+            .routes
+            .shared_deadline(CacheableMethod::ToolsList)
             .is_some()
     );
     assert!(fixture.requests.try_recv().is_err(), "no automatic replay");
@@ -355,12 +334,7 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
     )
     .await?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation
-            .handshake_cache
-            .lock()
-            .waiter_count(CacheableMethod::ToolsList)
-            != 1
-        {
+        while generation.routes.waiter_count(CacheableMethod::ToolsList) != 1 {
             tokio::task::yield_now().await;
         }
     })
@@ -377,9 +351,8 @@ async fn silent_upstream_deadline_expires_clients_and_allows_explicit_retry() ->
     );
     assert!(
         generation
-            .handshake_cache
-            .lock()
-            .deadline(CacheableMethod::ToolsList)
+            .routes
+            .shared_deadline(CacheableMethod::ToolsList)
             .is_none()
     );
     send(
@@ -445,8 +418,7 @@ async fn server_discovery_waiter_expiration_does_not_cancel_live_leader() -> io:
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
         while generation
-            .handshake_cache
-            .lock()
+            .routes
             .waiter_count(CacheableMethod::ServerDiscover)
             != 1
         {
@@ -456,7 +428,7 @@ async fn server_discovery_waiter_expiration_does_not_cancel_live_leader() -> io:
     .await
     .map_err(io::Error::other)?;
     {
-        generation.handshake_cache.lock().elapse_waiters(
+        generation.routes.elapse_waiters(
             CacheableMethod::ServerDiscover,
             Duration::from_secs(REQUEST_TTL_SECS + 1),
         );
@@ -469,12 +441,11 @@ async fn server_discovery_waiter_expiration_does_not_cancel_live_leader() -> io:
             "code":-32001,"message":"server/discover discovery timed out"
         }})
     );
-    assert_eq!(generation.request_map.lock().len(), 1);
+    assert_eq!(generation.routes.pending_count(), 1);
     assert!(
         generation
-            .handshake_cache
-            .lock()
-            .deadline(CacheableMethod::ServerDiscover)
+            .routes
+            .shared_deadline(CacheableMethod::ServerDiscover)
             .is_some()
     );
     assert!(fixture.requests.try_recv().is_err());

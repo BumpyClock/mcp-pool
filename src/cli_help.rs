@@ -20,7 +20,7 @@ pub(crate) fn command_help(command: &str, arguments: &[String]) {
             "config login SERVER [--reset] [--no-browser|--browser none] [--json]\n\nAuthorize a server, or reuse valid cached credentials. Alias for auth.\n  --reset                 Replace cached credentials through authorization.\n  --no-browser            Do not open the browser automatically.\n  --oauth-timeout MILLISECONDS  Bound explicit authorization.\n\nExample:\n  mcp-cli config login docs --no-browser"
         }
         ("config", Some("logout")) => {
-            "config logout NAME\n\nClear credentials in the active scope. Retires matching pooled views.\nClearing a project override restores home credential fallback.\n\nExample:\n  mcp-cli config logout docs"
+            "config logout NAME\n\nClear credentials beside the server's defining config. Retires matching pooled views.\nProject definitions do not fall back to home credentials.\n\nExample:\n  mcp-cli config logout docs"
         }
         ("config", Some("doctor")) => {
             "config doctor [--json]\n\nValidate merged configuration and inspect cached credential health.\nDoes not connect, refresh tokens, or start browser consent.\n  --json  Emit configuration, warnings, and credential status as JSON.\n\nExample:\n  mcp-cli config doctor"
@@ -50,7 +50,7 @@ pub(crate) fn command_help(command: &str, arguments: &[String]) {
             "vault set SERVER (--tokens-file PATH|--stdin)\n\nSeed OAuth credentials without browser consent. Use exactly one input source.\nPayload: {\"tokens\":{\"access_token\":\"...\",\"token_type\":\"Bearer\"},\n  \"clientInfo\":{\"client_id\":\"...\"}}\nCredential values are never printed. Retires matching pooled views.\n\nExample:\n  mcp-cli vault set docs --tokens-file tokens.json"
         }
         ("vault", Some("clear")) => {
-            "vault clear SERVER\n\nRemove the active OAuth vault entry. Retires matching pooled views.\n\nExample:\n  mcp-cli vault clear docs"
+            "vault clear SERVER\n\nRemove the OAuth vault entry owned by the server's defining config. Retires matching pooled views.\n\nExample:\n  mcp-cli vault clear docs"
         }
         ("call", _) => {
             "call SERVER.TOOL [key=value|key:value ...] [OPTIONS]\n\nInvoke a tool. Also accepts SERVER TOOL or --server NAME --tool NAME.\n\nArguments:\n  --args, --params JSON|-  JSON object, or - to read stdin.\n  key=@FILE               Read UTF-8 text; @@TEXT sends a literal @.\n  'SERVER.TOOL(key: \"value\")'  Function-call syntax.\n  Positional values follow schema property order. -- ends option parsing.\n\nRuntime flags:\n  --output auto|text|markdown|json|raw  Select result format.\n  --timeout MILLISECONDS --no-oauth\n  --raw-strings --no-coerce --save-images DIRECTORY --tail-log\n  raw emits the JSON result envelope; tail-log prints a bounded log tail.\n\nExamples:\n  mcp-cli call docs.search query=\"MCP\" limit:5\n  mcp-cli call docs.search --args '{\"query\":\"MCP\"}' --output json"
@@ -62,7 +62,7 @@ pub(crate) fn command_help(command: &str, arguments: &[String]) {
             "resource SERVER [URI] [--output auto|text|markdown|json|raw]\n  --json --no-oauth --timeout MILLISECONDS\n\nWithout URI, list resources. With URI, read its content. Alias: resources.\n\nExamples:\n  mcp-cli resource docs\n  mcp-cli resource docs docs://guide --output text"
         }
         ("auth", _) => {
-            "auth SERVER [--reset] [--no-browser|--browser none] [--json]\n\nAuthorize a server, or reuse valid cached credentials.\n  --oauth-timeout MILLISECONDS  Bound explicit authorization, not cached refresh.\n  --reset         Replace credentials, not a read-only validation step.\n  --no-browser    Do not open the browser automatically.\n\nExample:\n  mcp-cli auth docs --no-browser"
+            "auth SERVER [--reset] [--no-browser|--browser none] [--json]\n\nAuthorize a server, or reuse valid cached credentials.\nCredentials are stored beside the server's defining config.\n  --oauth-timeout MILLISECONDS  Bound explicit authorization, not cached refresh.\n  --reset         Replace credentials, not a read-only validation step.\n  --no-browser    Do not open the browser automatically.\n\nExample:\n  mcp-cli auth docs --no-browser"
         }
         ("vault", _) => {
             "vault set SERVER (--tokens-file PATH|--stdin)\n  mcp-cli vault clear SERVER\n\nSeed or clear scoped OAuth credentials without printing credential values.\nRun mcp-cli vault set --help for the JSON payload format."
@@ -97,6 +97,6 @@ pub(crate) fn command_help(command: &str, arguments: &[String]) {
 
 fn global_help() {
     println!(
-        "\nGlobal: --config PATH --root PATH --json --plain --debug --log-level LEVEL\n  --oauth-timeout MILLISECONDS (auth/config login only)\n  Config: ~/.mcp/config.json plus PROJECT/.mcp/config.json (project wins).\n  --config or MCP_CLI_CONFIG selects one file. Credentials follow the same scopes."
+        "\nGlobal: --config PATH --root PATH --json --plain --debug --log-level LEVEL\n  --oauth-timeout MILLISECONDS (auth/config login only)\n  Config: ~/.mcp/config.json plus PROJECT/.mcp/config.json (project wins).\n  --config or MCP_CLI_CONFIG selects one file. Credentials stay beside each server's defining config."
     );
 }

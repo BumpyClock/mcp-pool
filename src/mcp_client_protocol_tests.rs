@@ -220,7 +220,8 @@ async fn pins_auth_errors_and_malformed_successes_never_fall_back_or_call() -> R
             McpClient::negotiate(Box::new(stream), Duration::from_secs(1), preference),
             server_work
         );
-        assert!(result.is_err());
+        let error = result.err().context("negotiation unexpectedly succeeded")?;
+        assert!(!format!("{error:#}").contains("set protocolVersion to legacy"));
         served?;
     }
     Ok(())
@@ -247,7 +248,10 @@ async fn unanswered_discovery_drops_only_local_connection_without_replay() -> Re
         ),
         server_work
     );
-    assert!(result.is_err());
+    let error = result
+        .err()
+        .context("unanswered discovery unexpectedly succeeded")?;
+    assert!(format!("{error:#}").contains("set protocolVersion to legacy"));
     served?;
     Ok(())
 }

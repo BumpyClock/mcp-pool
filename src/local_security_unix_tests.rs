@@ -331,6 +331,27 @@ async fn refuses_symlink_and_non_socket_endpoints_without_removing_them() -> io:
 
 #[tokio::test]
 async fn removes_only_a_same_user_stale_socket() -> io::Result<()> {
+    let mut command = tokio::process::Command::new(std::env::current_exe()?);
+    command
+        .args([
+            "--exact",
+            "local_security::unix::tests::stale_socket_fixture",
+            "--test-threads=1",
+        ])
+        .env("MCP_CLI_STALE_SOCKET_FIXTURE", "1")
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), command.output())
+        .await
+        .map_err(io::Error::other)??;
+    assert!(output.status.success(), "{output:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn stale_socket_fixture() -> io::Result<()> {
+    if std::env::var_os("MCP_CLI_STALE_SOCKET_FIXTURE").is_none() {
+        return Ok(());
+    }
     let directory = TestDirectory::create()?;
     let path = directory.socket("stale.sock");
     let listener = bind_unix_listener(&path)?;

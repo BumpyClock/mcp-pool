@@ -85,6 +85,7 @@ async fn modern_discovery_and_calls_own_version_method_and_name_headers() -> Tes
         None,
         None,
         responses,
+        ServerLog::default(),
     )
     .await?;
     for (identifier, method, parameters) in [
@@ -150,8 +151,16 @@ async fn initial_modern_discovery_blocks_call_until_session_ready() -> TestResul
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(8);
-    let mut handle =
-        spawn_configured(url, false, BTreeMap::new(), Some(5000), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        Some(5000),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(modern_request(1, "server/discover", json!({}))?)
@@ -239,8 +248,16 @@ async fn established_modern_refresh_does_not_block_an_unrelated_call() -> TestRe
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(8);
-    let mut handle =
-        spawn_configured(url, false, BTreeMap::new(), Some(5000), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        Some(5000),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(modern_request(1, "server/discover", json!({}))?)
@@ -346,6 +363,10 @@ async fn discovery_auth_failure_is_not_a_negotiation_fallback_signal() -> TestRe
         .await?;
     let response = message(&mut receiver).await?;
     assert_eq!(response.pointer("/error/code"), Some(&json!(-32000)));
+    assert_eq!(
+        response.pointer("/error/data/mcpCliFailure"),
+        Some(&json!({"kind":"auth","statusCode":401}))
+    );
     assert!(
         response
             .pointer("/error/message")

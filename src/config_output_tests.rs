@@ -90,14 +90,13 @@ fn doctor_escapes_names_and_keeps_unsafe_aliases_out_of_hints() {
 
 #[test]
 fn doctor_reports_cached_credential_health_and_actionable_recovery() {
-    for (configured, authenticated, tokens, expired, refreshable, binding, expected, needs_auth) in [
+    for (configured, authenticated, tokens, expired, refreshable, expected, needs_auth) in [
         (
             false,
             false,
             false,
             false,
             false,
-            true,
             "OAuth not configured",
             false,
         ),
@@ -107,7 +106,6 @@ fn doctor_reports_cached_credential_health_and_actionable_recovery() {
             false,
             false,
             false,
-            true,
             "no usable cached OAuth credentials",
             true,
         ),
@@ -117,14 +115,12 @@ fn doctor_reports_cached_credential_health_and_actionable_recovery() {
             true,
             false,
             false,
-            true,
             "cached OAuth credentials valid",
             false,
         ),
         (
             true,
             false,
-            true,
             true,
             true,
             true,
@@ -137,18 +133,7 @@ fn doctor_reports_cached_credential_health_and_actionable_recovery() {
             true,
             true,
             false,
-            true,
             "cached OAuth credentials expired",
-            true,
-        ),
-        (
-            true,
-            false,
-            true,
-            false,
-            false,
-            false,
-            "credential binding mismatch",
             true,
         ),
     ] {
@@ -157,7 +142,7 @@ fn doctor_reports_cached_credential_health_and_actionable_recovery() {
             configured,
             &json!({
                 "authenticated":authenticated, "hasTokens":tokens, "expired":expired,
-                "refreshable":refreshable, "bindingValid":binding,
+                "refreshable":refreshable, "bindingValid":true,
                 "hasClientRegistration":true
             }),
         );
@@ -169,4 +154,47 @@ fn doctor_reports_cached_credential_health_and_actionable_recovery() {
             "{report}"
         );
     }
+}
+
+#[test]
+fn configuration_output_projects_oauth_aliases_without_exposing_secrets() -> anyhow::Result<()> {
+    let raw = json!({
+        "url":"https://example.invalid/mcp",
+        "auth":"oauth",
+        "clientName":7,
+        "client_name":"client",
+        "token_cache_dir":"cache",
+        "oauth_client_id":"identifier",
+        "oauth_client_secret":"private-value",
+        "oauth_client_secret_env":"SECRET_VARIABLE",
+        "oauth_token_endpoint_auth_method":"client_secret_post",
+        "oauth_redirect_url":"http://127.0.0.1/callback",
+        "oauth_client_metadata_url":"https://client.invalid/metadata",
+        "oauthRequestedScope":" ",
+        "oauth_scope":"read"
+    });
+    let configuration = crate::server_config::parse_document(
+        std::path::Path::new("output-test.json"),
+        &json!({"mcpServers":{"test":raw}}),
+    )?;
+    let server = configuration
+        .servers
+        .get("test")
+        .ok_or_else(|| anyhow::anyhow!("missing test server"))?;
+    let projected = super::serialize(server);
+    for (field, value) in [
+        ("auth", "oauth"),
+        ("clientName", "client"),
+        ("tokenCacheDir", "cache"),
+        ("oauthClientId", "identifier"),
+        ("oauthClientSecretEnv", "SECRET_VARIABLE"),
+        ("oauthTokenEndpointAuthMethod", "client_secret_post"),
+        ("oauthRedirectUrl", "http://127.0.0.1/callback"),
+        ("oauthClientMetadataUrl", "https://client.invalid/metadata"),
+        ("oauthRequestedScope", "read"),
+    ] {
+        assert_eq!(projected.get(field), Some(&json!(value)));
+    }
+    assert!(!projected.to_string().contains("private-value"));
+    Ok(())
 }

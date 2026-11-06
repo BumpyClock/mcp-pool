@@ -1,6 +1,6 @@
 use std::mem;
 
-pub(super) const FRAME_LIMIT: usize = 1024 * 1024;
+use super::MAX_RESPONSE_BYTES;
 
 #[derive(Debug)]
 pub(super) struct Event {
@@ -50,8 +50,10 @@ impl Decoder {
                 }
             }
             self.frame_bytes += 1;
-            if self.frame_bytes > FRAME_LIMIT {
-                feed.error = Some("HTTP SSE frame exceeds size limit".into());
+            if self.frame_bytes > MAX_RESPONSE_BYTES {
+                feed.error = Some(format!(
+                    "HTTP SSE frame exceeds size limit ({MAX_RESPONSE_BYTES} bytes)"
+                ));
                 break;
             }
             match byte {
@@ -133,6 +135,31 @@ mod tests {
     }
 
     #[test]
+    fn sixteen_mib_limit_is_per_frame_and_rejects_the_next_byte() {
+        let limit = 16 * 1024 * 1024;
+        let frame = format!("data: {}\n\n", "x".repeat(limit - 8));
+        let mut decoder = Decoder::new();
+        for _ in 0..2 {
+            let feed = decoder.feed(frame.as_bytes());
+            assert!(feed.error.is_none());
+            assert_eq!(feed.events.len(), 1);
+            assert_eq!(
+                feed.events.first().map(|event| event.data.len()),
+                Some(limit - 8)
+            );
+        }
+        let feed = decoder.feed(&vec![b'x'; limit]);
+        assert!(feed.error.is_none());
+        assert!(feed.events.is_empty());
+        let feed = decoder.feed(b"x");
+        assert_eq!(
+            feed.error.as_deref(),
+            Some("HTTP SSE frame exceeds size limit (16777216 bytes)")
+        );
+        assert!(feed.events.is_empty());
+    }
+
+    #[test]
     fn empty_data_lines_and_event_names_survive_every_chunk_boundary() {
         let bytes = "event: ignored\n\nid: ignored\ndata:\n\nevent: message\ndata\n: comment\ndata: λ\ndata:  spaced\ndata:\n\nevent: reset\n\ndata: last\n\n".as_bytes();
         for boundary in 0..=bytes.len() {
@@ -163,10 +190,13 @@ mod tests {
     #[test]
     fn completed_events_survive_invalid_suffix_at_every_chunk_boundary() {
         for (suffix, expected_error) in [
-            (vec![0xff, b'\n'], "HTTP SSE contains invalid UTF-8"),
             (
-                vec![b'x'; FRAME_LIMIT + 1],
-                "HTTP SSE frame exceeds size limit",
+                vec![0xff, b'\n'],
+                "HTTP SSE contains invalid UTF-8".to_owned(),
+            ),
+            (
+                vec![b'x'; MAX_RESPONSE_BYTES + 1],
+                format!("HTTP SSE frame exceeds size limit ({MAX_RESPONSE_BYTES} bytes)"),
             ),
         ] {
             let prefix = b"event: message\r\ndata: {\"id\":7,\"result\":{}}\r\n\r\n";
@@ -187,7 +217,7 @@ mod tests {
                     Some(("message", "{\"id\":7,\"result\":{}}"))
                 );
                 let errors: Vec<String> = first.error.into_iter().chain(second.error).collect();
-                assert_eq!(errors, vec![expected_error], "boundary {boundary}");
+                assert_eq!(errors, vec![expected_error.clone()], "boundary {boundary}");
                 let repeated = decoder.feed(prefix);
                 assert!(repeated.events.is_empty());
                 assert!(repeated.error.is_none());

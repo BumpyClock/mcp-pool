@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use tokio::task::JoinSet;
 
-use crate::mcp_client::McpClient;
+use crate::mcp_client::{McpClient, PreparedEndpoint};
 use crate::server_config::{ConfiguredServer, ServerConfiguration};
 
 use crate::tool_filter as filter;
@@ -104,19 +104,19 @@ impl BridgeState {
         for (server, filter) in servers {
             connections.spawn(async move {
                 let name = server.name.clone();
-                let definition = crate::oauth::prepare(&server, false)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("Could not prepare MCP server '{name}'."))?;
-                let pool_name = crate::mcp_cli::pool_name(&server, &definition)
-                    .map_err(|_| anyhow::anyhow!("Could not identify MCP server '{name}'."))?;
-                let timeout = request_timeout(&definition);
-                let reconnect =
-                    pool_reconnect_factory(pool_name.clone(), definition.clone(), timeout);
-                let client = McpClient::connect(&pool_name, &definition, timeout)
-                    .await
-                    .map_err(|_| {
-                        anyhow::anyhow!("Could not connect to pooled MCP server '{name}'.")
-                    })?;
+                let endpoint = Arc::new(
+                    PreparedEndpoint::prepare(&server, false)
+                        .await
+                        .map_err(|_| anyhow::anyhow!("Could not prepare MCP server '{name}'."))?,
+                );
+                let timeout = request_timeout(endpoint.timeout_ms());
+                let client = endpoint.connect(timeout).await.map_err(|_| {
+                    anyhow::anyhow!("Could not connect to pooled MCP server '{name}'.")
+                })?;
+                let reconnect: ReconnectFactory = Arc::new(move || {
+                    let endpoint = Arc::clone(&endpoint);
+                    Box::pin(async move { endpoint.connect(timeout).await })
+                });
                 Ok::<_, anyhow::Error>((name, client, reconnect, filter, timeout))
             });
         }
@@ -210,7 +210,8 @@ impl BridgeState {
         let mut listed = BTreeMap::new();
         while let Some(completed) = pending.join_next().await {
             match completed {
-                Ok((name, Ok(Ok(tools)))) => {
+                Ok((name, Ok(Ok(mut tools)))) => {
+                    filter::normalize_catalog(&mut tools);
                     listed.insert(name, tools);
                 }
                 Ok((_, Ok(Err(_)))) | Ok((_, Err(_))) | Err(_) => {
@@ -287,24 +288,12 @@ impl BridgeState {
     }
 }
 
-fn pool_reconnect_factory(
-    pool_name: String,
-    definition: crate::config::ServerDef,
-    timeout: Duration,
-) -> ReconnectFactory {
-    Arc::new(move || {
-        let pool_name = pool_name.clone();
-        let definition = definition.clone();
-        Box::pin(async move { McpClient::connect(&pool_name, &definition, timeout).await })
-    })
-}
-
-fn request_timeout(definition: &crate::config::ServerDef) -> Duration {
-    let milliseconds = definition
-        .timeout_ms
-        .filter(|timeout| *timeout > 0)
-        .unwrap_or(DEFAULT_TIMEOUT_MS);
-    Duration::from_millis(milliseconds)
+fn request_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        timeout_ms
+            .filter(|timeout| *timeout > 0)
+            .unwrap_or(DEFAULT_TIMEOUT_MS),
+    )
 }
 
 fn expose_tool(server: &str, mut tool: Value, bare_names: bool) -> Option<Value> {

@@ -29,8 +29,8 @@ pub(super) async fn terminate_session(
                 ACCEPT,
                 HeaderValue::from_static("application/json, text/event-stream"),
             )]))
-            .header("Mcp-Session-Id", identifier)
-            .header("MCP-Protocol-Version", protocol)
+            .header(crate::mcp_protocol::SESSION_ID_HEADER, identifier)
+            .header(crate::mcp_protocol::PROTOCOL_VERSION_HEADER, protocol)
             .send()
             .await
             .map_err(|_| ())
@@ -38,10 +38,10 @@ pub(super) async fn terminate_session(
     match timeout(DELETE_TIMEOUT, request).await {
         Ok(Ok(response)) if response.status().is_success() => {}
         Ok(Ok(response)) if response.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED => {
-            crate::diagnostics::log("upstream_http_session_delete_unsupported");
+            options.log.log("upstream_http_session_delete_unsupported");
         }
         _ => {
-            crate::diagnostics::log("upstream_http_session_delete_failed");
+            options.log.log("upstream_http_session_delete_failed");
         }
     }
 }

@@ -59,6 +59,13 @@ def read_line(stream, timeout=10):
         raise RuntimeError("Timed out waiting for fixture readiness") from error
 
 
+def decode_json(contents, source):
+    try:
+        return json.loads(contents)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Invalid JSON from {source}") from error
+
+
 def validate_output(value, token, size=64):
     if not isinstance(value, dict) or value.get("isError") or "error" in value:
         raise RuntimeError(f"Tool returned error or invalid output: {value!r}")
@@ -66,7 +73,7 @@ def validate_output(value, token, size=64):
         content = value["content"]
         if len(content) != 1 or content[0].get("type") != "text":
             raise RuntimeError(f"Unexpected tool content: {value!r}")
-        value = json.loads(content[0]["text"])
+        value = decode_json(content[0]["text"], "tool content")
     if value != {"token": token, "payload": "x" * size}:
         raise RuntimeError(f"Incorrect output for token {token}: {value!r}")
 
@@ -108,7 +115,7 @@ class Runtime:
             for name in ("h", "x", "d", "k", "s", "r", "t", "m"):
                 (self.root / name).mkdir(mode=0o700)
             self.events.write_text("")
-            definition = {"protocolVersion": "legacy" if self.protocol == "legacy" else "2026-07-28",
+            definition: dict[str, object] = {"protocolVersion": "legacy" if self.protocol == "legacy" else "2026-07-28",
                           "lifecycle": "keep-alive"}
             command = [sys.executable, str(HERE / "fixture.py"), "--events", str(self.events),
                        "--protocol", self.protocol]
@@ -126,7 +133,7 @@ class Runtime:
             self.close()
             raise
 
-    def __exit__(self, *_):
+    def __exit__(self, exception_type, exception, traceback):
         self.close()
 
     def spawn(self, command, suffix, pipes=True):
@@ -149,7 +156,7 @@ class Runtime:
         except BaseException:
             self.terminate(process)
             raise
-        row = {"wall_ns": time.perf_counter_ns() - started}
+        row: dict[str, int | float] = {"wall_ns": time.perf_counter_ns() - started}
         if before is not None:
             after = resource.getrusage(resource.RUSAGE_CHILDREN)
             row["client_waited_cpu_s"] = (
@@ -168,14 +175,15 @@ class Runtime:
                 raise RuntimeError("Owned foreground daemon exited before readiness")
             try:
                 stdout, _ = self.command(["daemon", "status", "--json"], timeout=5)
-                status = json.loads(stdout)
+            except RuntimeError:
+                pass
+            else:
+                status = decode_json(stdout, "daemon status output")
                 ready = isinstance(status, dict) and (
                     status.get("running") is True
                     if self.product == "mcp-cli" else isinstance(status.get("pid"), int))
                 if ready:
                     return
-            except (RuntimeError, json.JSONDecodeError):
-                pass
             time.sleep(0.05)
         raise RuntimeError("Owned foreground daemon did not become ready")
 
@@ -190,19 +198,19 @@ class Runtime:
                 "token": token, "delayMs": delay, "payloadBytes": size}),
             "--output", "json", "--timeout", "10000", "--no-oauth",
         ], cpu=cpu)
-        validate_output(json.loads(stdout), token, size)
+        validate_output(decode_json(stdout, "CLI call output"), token, size)
         return {**row, "token": token}
 
     def discover(self):
         stdout, row = self.command(["list", "fixture", "--json", "--timeout", "10000", "--no-oauth"],
                                    cpu=True)
-        tools = json.loads(stdout).get("tools")
+        tools = decode_json(stdout, "CLI discovery output").get("tools")
         if not isinstance(tools, list) or len(tools) != 25 or not any(tool.get("name") == "echo" for tool in tools):
             raise RuntimeError(f"Incorrect discovery: {stdout}")
         return row
 
     def records(self):
-        return [json.loads(line) for line in self.events.read_text().splitlines()]
+        return [decode_json(line, self.events.name) for line in self.events.read_text().splitlines()]
 
     def verify(self):
         records = self.records()

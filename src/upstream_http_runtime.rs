@@ -12,8 +12,8 @@ pub(super) async fn run(
     workers: &mut JoinSet<()>,
     options: &Options,
     fallback: &mut Option<UpstreamHandle>,
-) -> Result<(), String> {
-    let mut first_request = true;
+) -> Result<(), HttpFailure> {
+    let mut negotiation = Negotiation::default();
     loop {
         tokio::select! {
             biased;
@@ -33,15 +33,12 @@ pub(super) async fn run(
                     Err((line, error)) => {
                         let value = serde_json::from_str::<Value>(&line).ok();
                         let identifier = value.as_ref().and_then(|value| value.get("id"));
-                        send_error(&response_tx, identifier, &error).await;
+                        send_failure(&response_tx, identifier, &error, &options.log).await;
                         continue;
                     }
                 };
-                let allow_fallback = first_request && request.initialize && workers.is_empty();
-                if !request.discover {
-                    first_request = false;
-                }
-                let established_modern_refresh = if request.discover && request.modern {
+                let mode = negotiation.admit(request.kind, workers.is_empty());
+                let established_modern_refresh = if request.kind.is_discovery() && request.kind.is_modern() {
                     matches!(
                         &*session.lock().await,
                         Session::Ready { identifier: None, protocol }
@@ -50,8 +47,8 @@ pub(super) async fn run(
                 } else {
                     false
                 };
-                if request.initialization_barrier && !established_modern_refresh {
-                    if request.initialize || request.discover {
+                if request.kind.is_barrier() && !established_modern_refresh {
+                    if request.kind.is_handshake() {
                         let worker_client = client.clone();
                         let worker_url = url.clone();
                         let worker_responses = response_tx.clone();
@@ -60,20 +57,20 @@ pub(super) async fn run(
                         let (established, establishment) = oneshot::channel();
                         workers.spawn(async move {
                             execute(
-                                &worker_client, &worker_url, request, &worker_responses, &worker_session, Some(established), &worker_options, allow_fallback,
+                                &worker_client, &worker_url, request, &worker_responses, &worker_session, Some(established), &worker_options, mode,
                             ).await;
                         });
                         if let Some(request) = establishment.await.map_err(|_| "HTTP initialization worker stopped")? {
-                            let handle = match legacy::spawn(client.clone(), url.clone(), response_tx.clone(), options.clone(), Some(request.budget.clone())).await {
+                            let identifier = request.identifier.clone();
+                            let handle = match legacy::spawn(client.clone(), url.clone(), response_tx.clone(), options.clone(), Some(request)).await {
                                 Ok(handle) => handle,
                                 Err(_) => {
-                                    send_error(&response_tx, request.identifier.as_ref(), "Legacy SSE fallback setup failed; initialize was not replayed").await;
+                                    send_failure(&response_tx, identifier.as_ref(), &HttpFailure::from("Legacy SSE fallback setup failed; initialize was not replayed"), &options.log).await;
                                     return Err("Legacy SSE fallback setup failed".into());
                                 }
                             };
                             let sender = handle.request_tx.clone();
                             *fallback = Some(handle);
-                            sender.send(request.forwarded()?).await.map_err(|_| "Legacy SSE fallback stopped")?;
                             let handle = fallback.as_mut().ok_or("Legacy SSE fallback owner missing")?;
                             loop {
                                 tokio::select! {
@@ -87,7 +84,7 @@ pub(super) async fn run(
                             }
                         }
                     } else {
-                        execute(&client, &url, request, &response_tx, &session, None, options, false).await;
+                        execute(&client, &url, request, &response_tx, &session, None, options, ExchangeMode::Standard).await;
                     }
                 } else {
                     let client = client.clone();
@@ -96,7 +93,7 @@ pub(super) async fn run(
                     let session = session.clone();
                     let options = options.clone();
                     workers.spawn(async move {
-                        execute(&client, &url, request, &response_tx, &session, None, &options, false).await;
+                        execute(&client, &url, request, &response_tx, &session, None, &options, ExchangeMode::Standard).await;
                     });
                 }
             }

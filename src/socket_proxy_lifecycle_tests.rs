@@ -6,20 +6,14 @@ mod shutdown_tests;
 
 static NEXT_SOCKET: AtomicU32 = AtomicU32::new(0);
 
-pub(super) fn proxy() -> Arc<SocketProxy> {
+pub(super) fn proxy() -> io::Result<Arc<SocketProxy>> {
     let identity = format!(
         "{}-{}",
         std::process::id(),
         NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
     );
-    #[cfg(windows)]
-    let socket = PathBuf::from(format!(r"\\.\pipe\mcp-cli-lifecycle-{identity}"));
-    #[cfg(unix)]
-    let socket = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join(format!(".mcp-cli-lifecycle-{identity}.sock"));
-    Arc::new(SocketProxy::new(
+    SocketProxy::fixture(
         identity,
-        socket,
         UpstreamSpec::Stdio {
             command: "unused-test-backend".to_string(),
             args: Vec::new(),
@@ -27,13 +21,11 @@ pub(super) fn proxy() -> Arc<SocketProxy> {
             cwd: None,
             clear_env: false,
         },
-        true,
-        None,
-    ))
+    )
 }
 
 pub(super) struct Backend {
-    pub(super) setup: oneshot::Sender<io::Result<UpstreamHandle>>,
+    pub(super) setup: oneshot::Sender<Result<UpstreamHandle, crate::upstream::SetupFailure>>,
     pub(super) handle: UpstreamHandle,
     pub(super) shutdown: oneshot::Receiver<()>,
     pub(super) retired: watch::Sender<Completion>,
@@ -77,7 +69,7 @@ async fn finish(task: tokio::task::JoinHandle<io::Result<()>>) -> io::Result<()>
 
 #[tokio::test]
 async fn concurrent_start_is_idempotent_and_readiness_is_genuine() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -126,7 +118,7 @@ async fn concurrent_start_is_idempotent_and_readiness_is_genuine() -> io::Result
 
 #[tokio::test]
 async fn stop_during_setup_retires_backend_before_completion() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -171,7 +163,7 @@ async fn stop_during_setup_retires_backend_before_completion() -> io::Result<()>
 
 #[tokio::test]
 async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -189,9 +181,28 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
         .lock()
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
-    previous.handshake_cache.lock().complete(
-        CacheableMethod::Initialize,
-        &serde_json::json!({"result":{"version":"old"}}),
+    let RouteAdmission::Leader(pool_id) = previous.routes.admit(
+        PendingRequestInfo {
+            client_id: "old".into(),
+            original_id: Value::from("old-initialize"),
+            method: Some("initialize".into()),
+            cache_key: Some(CacheableMethod::Initialize),
+            tool: None,
+            inserted_at: Instant::now(),
+            expires_after: Duration::from_secs(30),
+        },
+        Instant::now() + Duration::from_secs(30),
+    ) else {
+        return Err(io::Error::other("expected initialization leader"));
+    };
+    assert!(
+        previous
+            .routes
+            .complete(
+                &Value::from(pool_id),
+                &serde_json::json!({"result":{"version":"old"}}),
+            )
+            .is_some()
     );
     previous.client_capabilities.lock().insert(
         "old".to_string(),
@@ -230,8 +241,8 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     assert!(!Arc::ptr_eq(&previous, &current));
-    assert!(current.handshake_cache.lock().get("initialize").is_none());
-    assert!(current.request_map.lock().is_empty());
+    assert!(current.routes.cached_result("initialize").is_none());
+    assert_eq!(current.routes.pending_count(), 0);
     assert!(current.client_capabilities.lock().is_empty());
     assert!(current.last_active_client.lock().is_none());
     let stop = {
@@ -247,7 +258,7 @@ async fn restart_waits_for_retirement_and_discards_generation_state() -> io::Res
 
 #[tokio::test]
 async fn retirement_error_prohibits_start_and_restart() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -283,12 +294,12 @@ async fn retirement_error_prohibits_start_and_restart() -> io::Result<()> {
 
 #[tokio::test]
 async fn startup_failure_is_reported_and_socket_is_retired() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup, responses, ..
     } = backend(&proxy);
     setup
-        .send(Err(io::Error::other("setup rejected")))
+        .send(Err(io::Error::other("setup rejected").into()))
         .map_err(|_| io::Error::other("setup lost"))?;
     assert_eq!(
         proxy.start().await.err().map(|error| error.to_string()),
@@ -307,7 +318,7 @@ async fn startup_failure_is_reported_and_socket_is_retired() -> io::Result<()> {
 
 #[tokio::test]
 async fn bind_conflict_retains_startup_error_without_retiring_other_owner() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let listener = crate::transport::bind(&proxy.socket_path())?;
     let error = proxy
         .start()
@@ -350,7 +361,7 @@ async fn bind_conflict_retains_startup_error_without_retiring_other_owner() -> i
 
 #[tokio::test]
 async fn first_client_request_queues_through_startup() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -372,7 +383,7 @@ async fn first_client_request_queues_through_startup() -> io::Result<()> {
                 .generation
                 .lock()
                 .as_ref()
-                .is_some_and(|generation| !generation.request_map.lock().is_empty())
+                .is_some_and(|generation| generation.routes.pending_count() != 0)
             {
                 break;
             }
@@ -425,7 +436,7 @@ async fn first_client_request_queues_through_startup() -> io::Result<()> {
 
 #[tokio::test]
 async fn natural_completion_retires_local_tasks_and_clears_readiness() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -455,14 +466,13 @@ async fn natural_completion_retires_local_tasks_and_clears_readiness() -> io::Re
 
 #[tokio::test]
 async fn unverified_startup_retirement_prohibits_replacement() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup, responses, ..
     } = backend(&proxy);
     setup
-        .send(Err(io::Error::new(
-            io::ErrorKind::ResourceBusy,
-            "setup retirement unverified",
+        .send(Err(crate::upstream::SetupFailure::RetirementUnverified(
+            io::Error::other("setup retirement unverified"),
         )))
         .map_err(|_| io::Error::other("setup lost"))?;
     assert!(proxy.start().await.is_err());
@@ -479,7 +489,7 @@ async fn unverified_startup_retirement_prohibits_replacement() -> io::Result<()>
 
 #[tokio::test]
 async fn pool_concurrent_start_is_idempotent_and_stop_waits_for_retirement() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,
@@ -521,7 +531,7 @@ async fn pool_concurrent_start_is_idempotent_and_stop_waits_for_retirement() -> 
 
 #[tokio::test]
 async fn stop_before_generation_publication_does_not_launch_backend() -> io::Result<()> {
-    let proxy = proxy();
+    let proxy = proxy()?;
     let Backend {
         setup,
         handle,

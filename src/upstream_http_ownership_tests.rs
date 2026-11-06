@@ -6,8 +6,8 @@ use crate::request_deadline::{SharedDeadline, TIMEOUT_FIELD};
 use crate::upstream::UpstreamRequest;
 
 #[test]
-fn parsed_and_forwarded_bodies_keep_private_deadlines_and_original_shared_budget() -> TestResult {
-    let options = Options::new(BTreeMap::new(), Some(600), None)?;
+fn prepared_bodies_strip_private_deadlines_and_retain_original_shared_budget() -> TestResult {
+    let options = Options::new(BTreeMap::new(), Some(600), None, ServerLog::default())?;
     let text = "x".repeat(512 * 1024);
     let raw = format!(
         " {{ \"jsonrpc\" : \"2.0\", \"id\" : 7, \"method\" : \"tools/call\", \"params\" : {{\"name\":\"echo\",\"arguments\":{{\"text\":\"{text}\"}}}} }} \n"
@@ -34,33 +34,27 @@ fn parsed_and_forwarded_bodies_keep_private_deadlines_and_original_shared_budget
     let body: Value = serde_json::from_str(&request.line)?;
     assert_eq!(body.get(TIMEOUT_FIELD), None);
     assert_eq!(body.get("params"), original.get("params"));
-    let forwarded = request.forwarded()?;
-    assert_eq!(serde_json::from_str::<Value>(&forwarded.line)?, original);
     let extended = deadline + Duration::from_secs(1);
     budget.extend(extended);
     assert_eq!(request.budget.current(), extended);
-    assert_eq!(
-        forwarded.deadline.ok_or("missing budget")?.current(),
-        extended
-    );
     Ok(())
 }
 
 #[test]
 fn parse_failures_return_the_original_envelope_for_error_correlation() -> TestResult {
-    let options = Options::new(BTreeMap::new(), None, None)?;
+    let options = Options::new(BTreeMap::new(), None, None, ServerLog::default())?;
     for (line, expected) in [
         ("not-json".to_owned(), "HTTP request is not valid JSON"),
         ("[1,2,3]".to_owned(), "HTTP transport requires a JSON-RPC object"),
         (r#" {"jsonrpc":"2.0","id":"client","method":"tools/call","_mcp_pool_timeout_ms":null} "#.to_owned(), "Pool request timeout must be positive u64 milliseconds"),
-        (format!(r#"{{"id":-1,"text":"{}"}}"#, "x".repeat(sse_parser::FRAME_LIMIT)), "HTTP request exceeds size limit"),
+        (format!(r#"{{"id":-1,"text":"{}"}}"#, "x".repeat(1024 * 1024)), "HTTP request exceeds size limit"),
     ] {
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
         let parsed = Request::parse(UpstreamRequest {
             line: line.clone(), deadline: Some(SharedDeadline::new(deadline))
         }, &options);
         let (envelope, error) = parsed.err().ok_or("expected parsing error")?;
-        assert_eq!(error, expected);
+        assert_eq!(error.to_string(), expected);
         assert_eq!(envelope.line, line);
         assert_eq!(envelope.deadline.ok_or("missing original budget")?.current(), deadline);
     }

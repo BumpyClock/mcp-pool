@@ -99,7 +99,7 @@ async fn exchange(
 pub(crate) async fn existing_control_request(
     request: &ControlRequest,
 ) -> anyhow::Result<Option<ControlResponse>> {
-    let path = config::control_socket_path();
+    let path = config::control_socket_path()?;
     existing_request_with(
         request,
         || transport::connect(&path),
@@ -151,7 +151,7 @@ pub(crate) fn endpoint_busy(error: &std::io::Error) -> bool {
 }
 
 async fn ensure_daemon() -> anyhow::Result<transport::LocalStream> {
-    let socket_path = config::control_socket_path();
+    let socket_path = config::control_socket_path()?;
     match transport::connect(&socket_path).await {
         Ok(stream) => Ok(stream),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Err(error.into()),

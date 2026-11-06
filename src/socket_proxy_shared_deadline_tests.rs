@@ -144,10 +144,8 @@ impl HttpFixture {
             }
             Ok(())
         });
-        let identity = super::super::lifecycle_tests::proxy();
-        let proxy = Arc::new(SocketProxy::new(
+        let proxy = SocketProxy::fixture(
             format!("shared-budget-{target}"),
-            identity.socket_path(),
             UpstreamSpec::Http {
                 url: format!("http://{address}/mcp"),
                 sse: false,
@@ -155,9 +153,7 @@ impl HttpFixture {
                 timeout_ms: Some(floor_ms),
                 auth: None,
             },
-            true,
-            None,
-        ));
+        )?;
         proxy.start().await?;
         Ok(Self {
             proxy,
@@ -203,8 +199,8 @@ async fn wait_for_shared_follower(proxy: &SocketProxy, target: &str) -> io::Resu
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let queued = {
-                let cache = generation.handshake_cache.lock();
-                cache.waiter_count(if target == "initialize" {
+                let routes = &generation.routes;
+                routes.waiter_count(if target == "initialize" {
                     CacheableMethod::Initialize
                 } else {
                     CacheableMethod::ToolsList
@@ -377,13 +373,17 @@ async fn unanswered_shared_operations_expire_and_release_routes_without_replay()
             .lock()
             .clone()
             .ok_or_else(|| io::Error::other("missing generation"))?;
-        assert!(generation.request_map.lock().is_empty());
+        assert_eq!(generation.routes.pending_count(), 0);
         {
-            let cache = generation.handshake_cache.lock();
-            assert!(!cache.initialization_ready());
-            assert!(cache.deadline(CacheableMethod::Initialize).is_none());
-            assert!(cache.deadline(CacheableMethod::ToolsList).is_none());
-            assert_eq!(cache.waiter_count(CacheableMethod::ToolsList), 0);
+            let routes = &generation.routes;
+            assert!(!routes.initialization_ready());
+            assert!(
+                routes
+                    .shared_deadline(CacheableMethod::Initialize)
+                    .is_none()
+            );
+            assert!(routes.shared_deadline(CacheableMethod::ToolsList).is_none());
+            assert_eq!(routes.waiter_count(CacheableMethod::ToolsList), 0);
         }
         assert_eq!(fixture.count.load(Ordering::SeqCst), 1);
         assert!(fixture.requests.try_recv().is_err());

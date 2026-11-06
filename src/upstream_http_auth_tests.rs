@@ -76,6 +76,17 @@ fn static_headers() -> BTreeMap<String, String> {
     ])
 }
 
+#[test]
+fn http_diagnostics_redact_oauth_identity() -> TestResult {
+    let store = Store::new()?;
+    let definition = store.server("https://example.test/mcp?key=synthetic-secret");
+    let auth = crate::oauth::context(&definition)?;
+    let diagnostic = format!("{} {}", auth.server_url, auth.identity_key);
+    let options = Options::new(BTreeMap::new(), None, Some(auth), ServerLog::default())?;
+    assert_eq!(options.log.redact(&diagnostic), "[redacted] [redacted]");
+    Ok(())
+}
+
 #[tokio::test]
 async fn dynamic_authorization_overrides_static_and_rereads_tokens_for_post_and_delete()
 -> TestResult {
@@ -111,8 +122,16 @@ async fn dynamic_authorization_overrides_static_and_rereads_tokens_for_post_and_
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, false, static_headers(), None, prepared.auth, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        static_headers(),
+        None,
+        prepared.auth,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle.request_tx.send(initialize(1)).await?;
     message(&mut receiver).await?;
     save(&definition, "synthetic-generation-two")?;
@@ -151,8 +170,16 @@ async fn legacy_get_and_post_obtain_current_dynamic_authorization() -> TestResul
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(4);
-    let mut handle =
-        spawn_configured(url, true, static_headers(), None, prepared.auth, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        true,
+        static_headers(),
+        None,
+        prepared.auth,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     save(&definition, "synthetic-generation-two")?;
     handle.request_tx.send(initialize(1)).await?;
     message(&mut receiver).await?;
@@ -175,6 +202,7 @@ async fn auth_origin_mismatch_and_missing_credentials_fail_without_secret_leakag
         None,
         Some(auth.clone()),
         responses.clone(),
+        ServerLog::default(),
     )
     .await?;
     handle.request_tx.send(initialize(1)).await?;
@@ -197,6 +225,7 @@ async fn auth_origin_mismatch_and_missing_credentials_fail_without_secret_leakag
         None,
         Some(auth),
         responses,
+        ServerLog::default(),
     )
     .await
     .err()
@@ -272,9 +301,16 @@ async fn serialized_auth_policy_errors_are_actionable_after_tokens_expire() -> T
                 Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
             });
             let (responses, mut receiver) = mpsc::channel(4);
-            let mut handle =
-                spawn_configured(url, legacy, static_headers(), None, Some(auth), responses)
-                    .await?;
+            let mut handle = spawn_configured(
+                url,
+                legacy,
+                static_headers(),
+                None,
+                Some(auth),
+                responses,
+                ServerLog::default(),
+            )
+            .await?;
             handle
                 .request_tx
                 .send(r#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#.into())
@@ -297,6 +333,10 @@ async fn serialized_auth_policy_errors_are_actionable_after_tokens_expire() -> T
             assert_eq!(
                 response.pointer("/error/message").and_then(Value::as_str),
                 Some(expected)
+            );
+            assert_eq!(
+                response.pointer("/error/data/mcpCliFailure"),
+                Some(&serde_json::json!({"kind":"auth"}))
             );
             assert!(!response.to_string().contains("synthetic"));
             save(&definition, "synthetic-generation-two")?;
@@ -326,10 +366,18 @@ async fn legacy_discovery_preserves_safe_auth_policy_guidance() -> TestResult {
         auth.read_only = !cached_only;
         auth.cached_only = cached_only;
         let (responses, _receiver) = mpsc::channel(4);
-        let error = spawn_configured(url, true, static_headers(), None, Some(auth), responses)
-            .await
-            .err()
-            .ok_or("expired guarded credentials allowed SSE discovery")?;
+        let error = spawn_configured(
+            url,
+            true,
+            static_headers(),
+            None,
+            Some(auth),
+            responses,
+            ServerLog::default(),
+        )
+        .await
+        .err()
+        .ok_or("expired guarded credentials allowed SSE discovery")?;
         let message = error.to_string();
         let expected = if cached_only {
             "--no-oauth permits valid cached credentials only"

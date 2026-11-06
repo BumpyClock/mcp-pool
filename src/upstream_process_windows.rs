@@ -29,7 +29,10 @@ pub(super) struct Ownership {
 
 impl Ownership {
     /// Starts the upstream suspended so it can be assigned to the kill-on-close job first.
-    pub(super) fn prepare(command: &mut Command) -> io::Result<Self> {
+    pub(super) fn prepare(
+        command: &mut Command,
+        _log: &crate::diagnostics::ServerLog,
+    ) -> io::Result<Self> {
         command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
         let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
         if job.is_null() {
@@ -55,7 +58,6 @@ impl Ownership {
         Ok(ownership)
     }
 
-    /// Assigns the suspended child to the job before resuming it.
     pub(super) fn attach(self, child: &Child) -> io::Result<Self> {
         let process_handle = child
             .raw_handle()

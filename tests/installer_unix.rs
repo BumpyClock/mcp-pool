@@ -18,7 +18,7 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
-async fn installer_atomically_replaces_an_executable_and_preserves_it_on_build_failure()
+async fn installer_atomically_replaces_an_executable_and_preserves_it_on_verification_failure()
 -> io::Result<()> {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let nonce = SystemTime::now()
@@ -72,7 +72,27 @@ set -eu
 [ "$8" = --release ] && [ "$9" = --locked ]
 "#,
     )?;
-    for tool in ["rustc", "cargo"] {
+    let real_hash = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .flat_map(|directory| [directory.join("sha256sum"), directory.join("shasum")])
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| io::Error::other("Prepare sha256sum or shasum for installer fixtures"))?;
+    std::fs::write(
+        tools.join("sha256sum"),
+        r#"#!/bin/sh
+set -eu
+case "$MCP_INSTALLER_HASH_FAILURE" in
+    source) case "$1" in */release/mcp-cli) exit 37 ;; esac ;;
+    staged) case "$1" in */.mcp-cli.install.*) exit 37 ;; esac ;;
+    malformed) printf '%s\n' invalid; exit 0 ;;
+    empty) exit 0 ;;
+esac
+case "$MCP_INSTALLER_REAL_HASH" in
+    */shasum) exec "$MCP_INSTALLER_REAL_HASH" -a 256 "$@" ;;
+    *) exec "$MCP_INSTALLER_REAL_HASH" "$@" ;;
+esac
+"#,
+    )?;
+    for tool in ["rustc", "cargo", "sha256sum"] {
         std::fs::set_permissions(tools.join(tool), std::fs::Permissions::from_mode(0o755))?;
     }
     let mut paths = vec![tools];
@@ -80,7 +100,17 @@ set -eu
         &std::env::var_os("PATH").unwrap_or_default(),
     ));
     let path = std::env::join_paths(paths).map_err(io::Error::other)?;
-    for failure in ["0", "1"] {
+    let original_source = std::fs::read(&source)?;
+    for (build_failure, hash_failure) in [
+        ("1", "none"),
+        ("0", "source"),
+        ("0", "staged"),
+        ("0", "malformed"),
+        ("0", "empty"),
+        ("0", "none"),
+    ] {
+        std::fs::write(&destination, b"previous executable, not the new build")?;
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o711))?;
         let output = Command::new("sh")
             .arg(fixture.0.join("install.sh"))
             .arg("--bin-dir")
@@ -90,21 +120,30 @@ set -eu
                     .ok_or_else(|| io::Error::other("bin directory"))?,
             )
             .env("MCP_INSTALLER_FIXTURE", &fixture.0)
-            .env("MCP_INSTALLER_BUILD_FAILURE", failure)
+            .env("MCP_INSTALLER_BUILD_FAILURE", build_failure)
+            .env("MCP_INSTALLER_HASH_FAILURE", hash_failure)
+            .env("MCP_INSTALLER_REAL_HASH", &real_hash)
             .env("PATH", &path)
             .current_dir(&other_directory)
             .output()
             .await?;
+        let succeeds = build_failure == "0" && hash_failure == "none";
         assert_eq!(
             output.status.success(),
-            failure == "0",
-            "Installer output: {}",
+            succeeds,
+            "build={build_failure}, hash={hash_failure}, installer output: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(std::fs::read(&destination)?, std::fs::read(&source)?);
+        let expected = if succeeds {
+            original_source.as_slice()
+        } else {
+            b"previous executable, not the new build"
+        };
+        assert_eq!(std::fs::read(&destination)?, expected);
+        assert_eq!(std::fs::read(&source)?, original_source);
         assert_eq!(
             std::fs::metadata(&destination)?.permissions().mode() & 0o777,
-            0o751
+            if succeeds { 0o751 } else { 0o711 }
         );
         assert_eq!(
             std::fs::read_dir(fixture.0.join("bin"))?

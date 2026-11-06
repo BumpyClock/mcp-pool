@@ -14,7 +14,7 @@ pub(super) struct Fixture {
 
 impl Fixture {
     pub(super) async fn start() -> io::Result<Self> {
-        let proxy = proxy();
+        let proxy = proxy()?;
         let Backend {
             setup,
             handle,
@@ -76,11 +76,7 @@ pub(super) async fn follower_queued(proxy: &SocketProxy) -> io::Result<()> {
         loop {
             let state = proxy.generation.lock().clone();
             if let Some(state) = state
-                && state
-                    .handshake_cache
-                    .lock()
-                    .waiter_count(CacheableMethod::Initialize)
-                    == 1
+                && state.routes.waiter_count(CacheableMethod::Initialize) == 1
             {
                 break;
             }
@@ -294,15 +290,14 @@ async fn stop_disconnects_initialize_waiters_before_confirming_retirement() -> i
     assert!(!stop.is_finished());
     fixture.retired.send_replace(Some(Ok(())));
     stop.await.map_err(io::Error::other)??;
-    assert!(!generation.handshake_cache.lock().initialization_ready());
+    assert!(!generation.routes.initialization_ready());
     assert!(
         generation
-            .handshake_cache
-            .lock()
-            .deadline(CacheableMethod::Initialize)
+            .routes
+            .shared_deadline(CacheableMethod::Initialize)
             .is_none()
     );
-    assert!(generation.request_map.lock().is_empty());
+    assert_eq!(generation.routes.pending_count(), 0);
     Ok(())
 }
 

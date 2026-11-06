@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn shared_http_routes_keep_the_configured_deadline_floor() -> io::Result<()> {
-    let mut proxy = proxy();
+    let mut proxy = proxy()?;
     Arc::get_mut(&mut proxy)
         .ok_or_else(|| io::Error::other("unexpected shared test proxy"))?
         .spec = UpstreamSpec::Http {
@@ -51,13 +51,8 @@ async fn shared_http_routes_keep_the_configured_deadline_floor() -> io::Result<(
         .lock()
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
-    for request in generation.request_map.lock().values_mut() {
-        assert_eq!(request.expires_after, Duration::from_secs(700));
-        request.inserted_at = Instant::now() - Duration::from_secs(301);
-    }
-    assert!(
-        expire_pending_requests(&generation.request_map, &generation.handshake_cache).is_empty()
-    );
+    generation.routes.elapse_requests(Duration::from_secs(301));
+    assert!(generation.routes.expire(Instant::now()).is_empty());
     fixture.stop().await
 }
 
@@ -87,14 +82,8 @@ async fn long_requests_remain_routable_beyond_the_default_ttl() -> io::Result<()
             .lock()
             .clone()
             .ok_or_else(|| io::Error::other("missing generation"))?;
-        for request in generation.request_map.lock().values_mut() {
-            assert_eq!(request.expires_after, Duration::from_secs(600));
-            request.inserted_at = Instant::now() - Duration::from_secs(301);
-        }
-        assert!(
-            expire_pending_requests(&generation.request_map, &generation.handshake_cache)
-                .is_empty()
-        );
+        generation.routes.elapse_requests(Duration::from_secs(301));
+        assert!(generation.routes.expire(Instant::now()).is_empty());
         fixture
             .responses
             .send(
@@ -135,34 +124,17 @@ async fn long_discovery_followers_keep_their_routing_budget() -> io::Result<()> 
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while generation
-            .handshake_cache
-            .lock()
-            .waiter_count(CacheableMethod::ToolsList)
-            != 1
-        {
+        while generation.routes.waiter_count(CacheableMethod::ToolsList) != 1 {
             tokio::task::yield_now().await;
         }
     })
     .await
     .map_err(io::Error::other)?;
-    for pending in generation.request_map.lock().values_mut() {
-        pending.inserted_at = Instant::now() - Duration::from_secs(301);
-    }
+    generation.routes.elapse_requests(Duration::from_secs(301));
     generation
-        .handshake_cache
-        .lock()
+        .routes
         .elapse_waiters(CacheableMethod::ToolsList, Duration::from_secs(301));
-    assert!(
-        generation
-            .handshake_cache
-            .lock()
-            .next_deadline(std::iter::empty())
-            .is_some_and(|deadline| deadline > Instant::now() + Duration::from_secs(298))
-    );
-    assert!(
-        expire_pending_requests(&generation.request_map, &generation.handshake_cache).is_empty()
-    );
+    assert!(generation.routes.expire(Instant::now()).is_empty());
     fixture
         .responses
         .send(json!({"jsonrpc":"2.0","id":forwarded.get("id"),"result":{"tools":[]}}).to_string())
@@ -196,9 +168,7 @@ async fn long_requests_expire_at_their_own_budget_without_replay() -> io::Result
         .lock()
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
-    for request in generation.request_map.lock().values_mut() {
-        request.inserted_at = Instant::now() - Duration::from_secs(601);
-    }
+    generation.routes.elapse_requests(Duration::from_secs(601));
     generation.expiration_changed.notify_one();
     let response = read(&mut client).await?;
     assert_eq!(response.get("id"), Some(&json!("expired")));
@@ -206,7 +176,7 @@ async fn long_requests_expire_at_their_own_budget_without_replay() -> io::Result
         response.get("error").and_then(|error| error.get("code")),
         Some(&json!(-32001))
     );
-    assert!(generation.request_map.lock().is_empty());
+    assert_eq!(generation.routes.pending_count(), 0);
     assert!(
         fixture.requests.try_recv().is_err(),
         "expiration must not replay"

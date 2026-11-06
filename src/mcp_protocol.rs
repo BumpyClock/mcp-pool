@@ -5,8 +5,15 @@ use serde_json::{Value, json};
 pub(crate) const MODERN_VERSION: &str = "2026-07-28";
 pub(crate) const LEGACY_VERSION: &str = "2025-11-25";
 pub(crate) const VERSION_META_KEY: &str = "io.modelcontextprotocol/protocolVersion";
+pub(crate) const SUBSCRIPTION_ID_META_KEY: &str = "io.modelcontextprotocol/subscriptionId";
+pub(crate) const SERVER_INFO_META_KEY: &str = "io.modelcontextprotocol/serverInfo";
+pub(crate) const PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
+pub(crate) const SESSION_ID_HEADER: &str = "mcp-session-id";
+pub(crate) const METHOD_HEADER: &str = "mcp-method";
+pub(crate) const NAME_HEADER: &str = "mcp-name";
 pub(crate) const DISCOVERY_UNSUPPORTED: i64 = -32004;
-const LEGACY_VERSIONS: &[&str] = &[LEGACY_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
+pub(crate) const LEGACY_VERSIONS: &[&str] =
+    &[LEGACY_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
 
 pub(crate) fn discovery_unsupported(code: i64, data: Option<&Value>) -> bool {
     code == -32601
@@ -14,7 +21,65 @@ pub(crate) fn discovery_unsupported(code: i64, data: Option<&Value>) -> bool {
             && data
                 .and_then(|data| data.get("httpStatus"))
                 .and_then(Value::as_u64)
-                .is_some_and(|status| matches!(status, 400 | 404 | 405 | 415)))
+                .is_some_and(discovery_http_rejection))
+}
+
+pub(crate) fn discovery_http_rejection(status: u64) -> bool {
+    matches!(status, 400 | 404 | 405 | 415)
+}
+
+pub(crate) fn discovery_rejection_data(status: u16) -> Value {
+    json!({"httpStatus":status,"mcpCliFailure":TransportFailure {
+        kind: FailureKind::Http, status_code: Some(status)
+    }})
+}
+
+pub(crate) fn legacy_http_rejection(status: u16) -> bool {
+    matches!(status, 404 | 405)
+}
+
+pub(crate) fn supports_version(version: &str) -> bool {
+    version == MODERN_VERSION || LEGACY_VERSIONS.contains(&version)
+}
+
+pub(crate) fn negotiate_legacy_version(requested: &str) -> &str {
+    if LEGACY_VERSIONS.contains(&requested) {
+        requested
+    } else {
+        LEGACY_VERSION
+    }
+}
+
+pub(crate) fn protocol_metadata(parameters: &Value) -> Option<&str> {
+    parameters.get("_meta")?.get(VERSION_META_KEY)?.as_str()
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum FailureKind {
+    Auth,
+    Offline,
+    Timeout,
+    Http,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TransportFailure {
+    pub(crate) kind: FailureKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) status_code: Option<u16>,
+}
+
+impl TransportFailure {
+    pub(crate) fn data(self) -> Value {
+        json!({"mcpCliFailure":self})
+    }
+
+    pub(crate) fn from_data(data: &Value) -> Option<Self> {
+        serde_json::from_value(data.get("mcpCliFailure")?.clone()).ok()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -64,11 +129,7 @@ pub(crate) fn stamp(parameters: &mut Value) -> Result<()> {
 }
 
 pub(crate) fn is_modern(parameters: &Value) -> bool {
-    parameters
-        .get("_meta")
-        .and_then(|metadata| metadata.get(VERSION_META_KEY))
-        .and_then(Value::as_str)
-        == Some(MODERN_VERSION)
+    protocol_metadata(parameters) == Some(MODERN_VERSION)
 }
 
 pub(crate) fn discovery_offers_modern(result: &Value) -> Result<bool> {
@@ -124,6 +185,65 @@ pub(crate) fn connection_info(result: &Value, era: Era) -> Result<ConnectionInfo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_failure_metadata_preserves_the_wire_contract() {
+        for (kind, name) in [
+            (FailureKind::Auth, "auth"),
+            (FailureKind::Offline, "offline"),
+            (FailureKind::Timeout, "timeout"),
+            (FailureKind::Http, "http"),
+            (FailureKind::Error, "error"),
+        ] {
+            let metadata = TransportFailure {
+                kind,
+                status_code: None,
+            };
+            assert_eq!(metadata.data(), json!({"mcpCliFailure":{"kind":name}}));
+            assert_eq!(
+                TransportFailure::from_data(&metadata.data()),
+                Some(metadata)
+            );
+        }
+        let metadata = TransportFailure {
+            kind: FailureKind::Auth,
+            status_code: Some(401),
+        };
+        assert_eq!(
+            metadata.data(),
+            json!({"mcpCliFailure":{"kind":"auth","statusCode":401}})
+        );
+        assert_eq!(
+            TransportFailure::from_data(&metadata.data()),
+            Some(metadata)
+        );
+        assert_eq!(
+            TransportFailure::from_data(&json!({"httpStatus":401})),
+            None
+        );
+        assert_eq!(
+            TransportFailure::from_data(&json!({"mcpCliFailure":{"kind":"unknown"}})),
+            None
+        );
+    }
+
+    #[test]
+    fn only_definitive_discovery_rejections_allow_fallback() {
+        for status in [400, 404, 405, 415] {
+            assert!(discovery_unsupported(
+                DISCOVERY_UNSUPPORTED,
+                Some(&json!({"httpStatus":status}))
+            ));
+        }
+        for status in [401, 403, 408, 429, 500, 503] {
+            assert!(!discovery_unsupported(
+                DISCOVERY_UNSUPPORTED,
+                Some(&json!({"httpStatus":status}))
+            ));
+        }
+        assert!(discovery_unsupported(-32601, None));
+        assert!(!discovery_unsupported(DISCOVERY_UNSUPPORTED, None));
+    }
 
     #[test]
     fn modern_metadata_preserves_existing_request_metadata() -> Result<()> {

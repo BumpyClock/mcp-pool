@@ -11,10 +11,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::{
-    AuthOptions, HttpAuth, checked_url, context_with_settings, ensure_writable, files, protocol,
+    AuthOptions, HttpAuth, checked_url, context_with_settings, ensure_writable, protocol,
     read_snapshot, store, string,
 };
-use crate::server_config::{ConfiguredServer, OAuthSettings};
+use crate::server_config::ConfiguredServer;
 
 pub(super) async fn authorize(
     server: &ConfiguredServer,
@@ -51,10 +51,9 @@ where
     let settings = server.oauth_settings();
     let authentication = context_with_settings(server, &settings)?;
     ensure_writable(&authentication)?;
-    let transaction = files::AsyncLocks::new(store::transaction_async(&authentication).await?);
+    let transaction = store::transaction_async(&authentication).await?;
     let snapshot = if options.reset {
-        let clone = authentication.clone();
-        tokio::task::spawn_blocking(move || store::clear(&clone)).await??;
+        transaction.clear().await?;
         json!({})
     } else {
         let snapshot = read_snapshot(&authentication).await?;
@@ -68,7 +67,7 @@ where
     };
     let duration = Duration::from_millis(timeout_ms.unwrap_or(authentication.timeout_ms));
     let result = tokio::select! {
-        result = tokio::time::timeout(duration, exchange(server, &settings, &authentication, snapshot, observer)) => {
+        result = tokio::time::timeout(duration, exchange(server, &authentication, &transaction, snapshot, observer)) => {
             result.map_err(|_| anyhow::anyhow!("OAuth authorization timed out; rerun explicit auth"))?
         }
         result = tokio::signal::ctrl_c() => {
@@ -82,8 +81,8 @@ where
 
 async fn exchange<F, Fut>(
     server: &ConfiguredServer,
-    settings: &OAuthSettings<'_>,
     authentication: &HttpAuth,
+    transaction: &store::AsyncTransaction,
     snapshot: Value,
     observer: F,
 ) -> Result<Value>
@@ -105,15 +104,7 @@ where
     let issuer =
         string(metadata, "issuer").ok_or_else(|| anyhow::anyhow!("OAuth issuer missing"))?;
     let (listener, redirect) = listener(authentication, &snapshot).await?;
-    let client_info = registration(
-        server,
-        settings,
-        authentication,
-        &snapshot,
-        &discovery,
-        &redirect,
-    )
-    .await?;
+    let client_info = registration(authentication, &snapshot, &discovery, &redirect).await?;
     let client = protocol::client(authentication, &client_info, &discovery)?.set_redirect_uri(
         RedirectUrl::new(redirect.to_string())
             .map_err(|_| anyhow::anyhow!("invalid OAuth redirect"))?,
@@ -162,7 +153,7 @@ where
         "resourceUrl":resource,
         "clientInfo":pending_client,"state":state.secret(),"codeVerifier":verifier.secret(),
     });
-    store::save_async(authentication, pending, Some(snapshot)).await?;
+    transaction.save(pending, Some(snapshot)).await?;
     let pending_snapshot = read_snapshot(authentication).await?;
     observer(url, redirect.clone()).await?;
     let require_issuer = metadata
@@ -183,7 +174,7 @@ where
     })?;
     let tokens = protocol::stored_tokens(response, issuer, None)?;
     let patch = json!({"tokens":tokens,"clientInfo":client_info,"state":null,"codeVerifier":null});
-    store::save_async(authentication, patch, Some(pending_snapshot)).await?;
+    transaction.save(patch, Some(pending_snapshot)).await?;
     Ok(json!({"server":server.name,"status":"authenticated","reused":false}))
 }
 
@@ -218,8 +209,6 @@ async fn listener(authentication: &HttpAuth, snapshot: &Value) -> Result<(TcpLis
 }
 
 async fn registration(
-    server: &ConfiguredServer,
-    settings: &OAuthSettings<'_>,
     authentication: &HttpAuth,
     snapshot: &Value,
     discovery: &Value,
@@ -245,7 +234,7 @@ async fn registration(
             bail!("OAuth registered redirect differs; explicitly reset registration");
         }
         let mut info = info.clone();
-        configured_secret(server, settings, authentication, &mut info)?;
+        configured_secret(authentication, &mut info)?;
         return Ok(info);
     }
     if let Some(identifier) = authentication
@@ -269,10 +258,10 @@ async fn registration(
         }
         let mut info = json!({"client_id":identifier,"issuer":issuer,"redirect_uris":[redirect.as_str()],
             "token_endpoint_auth_method":authentication.token_auth_method.as_deref().unwrap_or(
-                if authentication.client_secret_env.is_some() || settings.client_secret.is_some() {
+                if authentication.client_secret_env.is_some() || authentication.execution.client_secret.is_some() {
                     "client_secret_basic"
                 } else { "none" })});
-        configured_secret(server, settings, authentication, &mut info)?;
+        configured_secret(authentication, &mut info)?;
         return Ok(info);
     }
     let metadata = discovery
@@ -316,28 +305,8 @@ async fn registration(
     Ok(info)
 }
 
-fn configured_secret(
-    server: &ConfiguredServer,
-    settings: &OAuthSettings<'_>,
-    authentication: &HttpAuth,
-    info: &mut Value,
-) -> Result<()> {
-    let secret = if let Some(variable) = &authentication.client_secret_env {
-        Some(
-            server
-                .definition
-                .env
-                .get(variable)
-                .cloned()
-                .or_else(|| std::env::var(variable).ok())
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("configured OAuth client-secret environment variable missing")
-                })?,
-        )
-    } else {
-        settings.client_secret.map(str::to_owned)
-    };
+fn configured_secret(authentication: &HttpAuth, info: &mut Value) -> Result<()> {
+    let secret = authentication.client_secret(info)?.map(str::to_owned);
     if let Some(secret) = secret
         && let Some(object) = info.as_object_mut()
     {
@@ -412,7 +381,7 @@ pub(super) async fn callback(
         } else {
             Err(anyhow::anyhow!("invalid OAuth callback URL"))
         };
-        let valid = result.is_ok();
+        let valid = matches!(result, Ok(CallbackOutcome::Code(_)));
         let response = if valid {
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nAuthorization received. You may close this."
         } else {
@@ -420,25 +389,19 @@ pub(super) async fn callback(
         };
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
-        if valid {
-            return result;
-        }
-        if parsed_query_error(target, expected_state) {
-            return Err(anyhow::anyhow!(
-                "OAuth consent denied by authorization server"
-            ));
+        match result {
+            Ok(CallbackOutcome::Code(code)) => return Ok(code),
+            Ok(CallbackOutcome::Denied) => {
+                bail!("OAuth consent denied by authorization server");
+            }
+            Err(_) => {}
         }
     }
 }
 
-fn parsed_query_error(target: &str, expected_state: &str) -> bool {
-    Url::parse(&format!("http://127.0.0.1{target}"))
-        .ok()
-        .is_some_and(|url| {
-            url.query_pairs()
-                .any(|(key, value)| key == "state" && value == expected_state)
-                && url.query_pairs().any(|(key, _)| key == "error")
-        })
+pub(super) enum CallbackOutcome {
+    Code(String),
+    Denied,
 }
 
 pub(super) fn callback_query(
@@ -446,7 +409,7 @@ pub(super) fn callback_query(
     expected_state: &str,
     issuer: &str,
     require_issuer: bool,
-) -> Result<String> {
+) -> Result<CallbackOutcome> {
     let pairs: Vec<_> = url.query_pairs().collect();
     let single = |name: &str| -> Result<Option<String>> {
         let mut values = pairs
@@ -470,10 +433,12 @@ pub(super) fn callback_query(
     } else if require_issuer {
         bail!("OAuth callback missing required issuer");
     }
-    if single("error")?.is_some() {
-        bail!("OAuth authorization denied");
+    let error = single("error")?;
+    let code = single("code")?;
+    if error.is_some() {
+        return Ok(CallbackOutcome::Denied);
     }
-    single("code")?
-        .filter(|code| !code.is_empty())
+    code.filter(|code| !code.is_empty())
+        .map(CallbackOutcome::Code)
         .ok_or_else(|| anyhow::anyhow!("OAuth callback missing authorization code"))
 }

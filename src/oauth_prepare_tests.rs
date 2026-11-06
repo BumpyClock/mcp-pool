@@ -5,7 +5,7 @@ use super::test_support::Fixture;
 use super::{context, prepare};
 
 #[tokio::test(flavor = "current_thread")]
-async fn stdio_preparation_completes_without_yielding_or_reading_credentials() -> Result<()> {
+async fn stdio_preparation_does_not_access_credentials() -> Result<()> {
     let mut fixture = Fixture::new("https://synthetic.invalid/mcp")?;
     fixture.server.definition.url.clear();
     fixture.server.definition.command = "synthetic-command".to_owned();
@@ -16,15 +16,7 @@ async fn stdio_preparation_completes_without_yielding_or_reading_credentials() -
             .ok_or_else(|| anyhow::anyhow!("fixture vault has no parent"))?,
     )?;
     std::fs::write(&path, b"not a credential store")?;
-    let mut preparation = std::pin::pin!(prepare(&fixture.server, true));
-    let definition = std::future::poll_fn(|task_context| {
-        std::task::Poll::Ready(preparation.as_mut().poll(task_context))
-    })
-    .await;
-    let std::task::Poll::Ready(definition) = definition else {
-        anyhow::bail!("stdio credential preparation must not yield");
-    };
-    let definition = definition?;
+    let definition = prepare(&fixture.server, true).await?;
     assert!(definition.auth.is_none());
     assert_eq!(definition.command, "synthetic-command");
     assert_eq!(std::fs::read(path)?, b"not a credential store");

@@ -1,3 +1,6 @@
+#[path = "common/fixture_lifecycle.rs"]
+mod fixture_lifecycle;
+
 use std::io;
 
 use serde_json::json;
@@ -27,7 +30,11 @@ async fn nested_help_is_specific_and_never_loads_configuration() -> io::Result<(
         ("daemon", "restart", "--log-file"),
         ("daemon", "migrate", "--confirmed-drained"),
         ("vault", "set", "--tokens-file"),
-        ("vault", "clear", "Remove the active OAuth vault entry"),
+        (
+            "vault",
+            "clear",
+            "Remove the OAuth vault entry owned by the server's defining config",
+        ),
     ] {
         let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_mcp-cli"))
             .args([

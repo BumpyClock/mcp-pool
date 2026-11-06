@@ -1,17 +1,21 @@
 use super::*;
 
-/// Registers readiness before rechecking the sender to prevent a lost wakeup.
 pub(super) async fn acquire_request_sender(
-    request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
-    upstream_ready: &Notify,
-    shutdown: &AtomicBool,
+    generation: &Generation,
     client_id: &str,
 ) -> Option<mpsc::Sender<crate::upstream::UpstreamRequest>> {
+    let Generation {
+        request_tx,
+        upstream_ready,
+        shutdown,
+        diagnostics: log,
+        ..
+    } = generation;
     if let Some(sender) = request_tx.lock().clone() {
         return Some(sender);
     }
 
-    diagnostics::log(format!("pool_upstream_wait client_id={}", client_id));
+    log.log(format!("pool_upstream_wait client_id={}", client_id));
     loop {
         let ready = upstream_ready.notified();
         tokio::pin!(ready);
@@ -31,15 +35,10 @@ pub(super) async fn acquire_request_sender(
 mod tests {
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn deferred_sender_waits_until_publication_or_shutdown() -> io::Result<()> {
-        let generation = Generation::new();
-        let waiting = acquire_request_sender(
-            &generation.request_tx,
-            &generation.upstream_ready,
-            &generation.shutdown,
-            "deferred",
-        );
+        let generation = Generation::new(diagnostics::ServerLog::default());
+        let waiting = acquire_request_sender(&generation, "deferred");
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(Duration::from_millis(40), &mut waiting)
@@ -59,13 +58,8 @@ mod tests {
             .map_err(io::Error::other)?;
         assert_eq!(receiver.recv().await.as_deref(), Some("initialize"));
 
-        let stopped = Generation::new();
-        let waiting = acquire_request_sender(
-            &stopped.request_tx,
-            &stopped.upstream_ready,
-            &stopped.shutdown,
-            "stopped",
-        );
+        let stopped = Generation::new(diagnostics::ServerLog::default());
+        let waiting = acquire_request_sender(&stopped, "stopped");
         tokio::pin!(waiting);
         assert!(
             tokio::time::timeout(Duration::from_millis(40), &mut waiting)

@@ -9,12 +9,16 @@ use tokio::time::{Instant, timeout, timeout_at};
 use crate::mcp_protocol::{self, ConnectionInfo, Era, ProtocolPreference};
 use crate::transport::LocalStream;
 
+#[path = "mcp_client_endpoint.rs"]
+mod endpoint;
 #[path = "mcp_client_wire.rs"]
 mod wire;
+pub(crate) use endpoint::{PreparedEndpoint, pool_name};
 
 /// A sequential MCP session over one shared pool connection.
-/// Cancellation closes the local connection because the pool does not translate
-/// request IDs, so cancellation could target another client's upstream request.
+/// Cancellation closes the local connection. The pool translates request-envelope
+/// IDs, but leaves cancellation payload `requestId` values untranslated, so a
+/// cancellation notification could target another client's upstream request.
 pub struct McpClient {
     reader: Option<BufReader<LocalStream>>,
     next_id: u64,
@@ -52,7 +56,7 @@ impl McpClient {
         };
         timeout_at(expires, async {
             crate::daemon_client::ensure_definition_started(name, definition).await?;
-            let socket_path = crate::config::server_socket_path(name);
+            let socket_path = crate::config::server_socket_path(name)?;
             let stream = loop {
                 match crate::transport::connect(&socket_path).await {
                     Ok(stream) => break stream,
@@ -115,9 +119,14 @@ impl McpClient {
                         mcp_protocol::MODERN_VERSION
                     );
                 }
-                Err(error) => return Err(error).context(
-                    "MCP protocol discovery failed; no upstream or operation was replayed. For a legacy server that cannot handle discovery, set protocolVersion to legacy",
-                ),
+                Err(error) => {
+                    let context = if error.downcast_ref::<McpRpcError>().is_some() {
+                        "MCP protocol discovery failed; no upstream or operation was replayed"
+                    } else {
+                        "MCP protocol discovery failed; no upstream or operation was replayed. For a legacy server that cannot handle discovery, set protocolVersion to legacy"
+                    };
+                    return Err(error).context(context);
+                }
             }
         }
         let result = client
@@ -248,7 +257,7 @@ impl McpClient {
                 .get_mut(field)
                 .and_then(Value::as_array_mut)
                 .with_context(|| format!("MCP {method} result omitted {field} array"))?;
-            if page.iter().any(|entry| !entry.is_object()) {
+            if field != "tools" && page.iter().any(|entry| !entry.is_object()) {
                 bail!("MCP {method} returned a non-object {field} entry");
             }
             entries.append(page);

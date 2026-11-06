@@ -1,10 +1,17 @@
-use std::collections::BTreeSet;
 use std::fs;
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use super::{HttpAuth, files, string};
+
+#[path = "oauth_store_import.rs"]
+mod import;
+#[path = "oauth_store_transaction.rs"]
+mod transaction;
+
+pub(super) use import::{ImportDestination, import_content};
+pub(super) use transaction::{AsyncTransaction, clear, save, transaction, transaction_async};
 
 pub(super) const DIRECTORY_FIELDS: &[(&str, &str, bool)] = &[
     ("tokens", "tokens.json", true),
@@ -20,7 +27,7 @@ pub(super) const DIRECTORY_FIELDS: &[(&str, &str, bool)] = &[
     ("codeVerifier", "code_verifier.txt", false),
 ];
 
-pub(super) fn vault(authentication: &HttpAuth) -> Result<Value> {
+fn vault(authentication: &HttpAuth) -> Result<Value> {
     let value = files::read_json(&authentication.vault_path)?
         .unwrap_or_else(|| json!({"version":2,"entries":{},"serverUrls":{}}));
     if !matches!(value.get("version").and_then(Value::as_u64), Some(1 | 2))
@@ -31,10 +38,7 @@ pub(super) fn vault(authentication: &HttpAuth) -> Result<Value> {
     Ok(value)
 }
 
-pub(super) fn matching<'a>(
-    authentication: &HttpAuth,
-    vault: &'a Value,
-) -> Vec<(String, &'a Value)> {
+fn matching<'a>(authentication: &HttpAuth, vault: &'a Value) -> Vec<(String, &'a Value)> {
     let marker = vault
         .get("serverUrls")
         .and_then(|urls| string(urls, &authentication.server_name));
@@ -107,79 +111,6 @@ pub(super) fn read(authentication: &HttpAuth) -> Result<Value> {
     let selected = super::reconcile::select(&snapshots(authentication)?)?;
     validate_binding(authentication, &selected)?;
     Ok(selected)
-}
-
-pub(super) fn present(authentication: &HttpAuth) -> Result<bool> {
-    Ok(snapshots(authentication)?.iter().any(|snapshot| {
-        snapshot
-            .as_object()
-            .is_some_and(|object| !object.is_empty())
-    }))
-}
-
-fn filename_safe_label(label: &str) -> String {
-    let mut safe = String::new();
-    let mut unsafe_run = false;
-    for character in label.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
-            safe.push(character);
-            unsafe_run = false;
-        } else if !unsafe_run {
-            safe.push('_');
-            unsafe_run = true;
-        }
-    }
-    safe.trim_start_matches(['.', '_', '-'])
-        .chars()
-        .take(40)
-        .collect()
-}
-
-/// Shared directory caches need one refresh lock even when their vaults differ.
-pub(super) fn transaction(authentication: &HttpAuth) -> Result<Vec<files::Lock>> {
-    let vault = vault(authentication)?;
-    let mut identities = vec![(
-        authentication
-            .identity_key
-            .split('|')
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-        format!("vault:{}", authentication.identity_key),
-    )];
-    for (key, _) in matching(authentication, &vault) {
-        let name = key.split('|').next().unwrap_or_default().to_owned();
-        identities.push((name, format!("vault:{key}")));
-    }
-    let root = authentication
-        .vault_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("vault has no parent"))?
-        .join("refresh-locks");
-    let mut paths = BTreeSet::new();
-    if authentication.directory_primary {
-        for directory in &authentication.directory_stores {
-            paths.insert(files::canonical(&directory.join(".mcp-refresh"))?);
-        }
-    }
-    for (label, identity) in identities {
-        let label = filename_safe_label(&label);
-        let name = if label.is_empty() {
-            files::digest(&identity)
-        } else {
-            format!("{label}-{}", files::digest(&identity))
-        };
-        paths.insert(root.join(name));
-    }
-    paths
-        .into_iter()
-        .map(|path| files::Lock::acquire(&path))
-        .collect()
-}
-
-pub(super) async fn transaction_async(authentication: &HttpAuth) -> Result<Vec<files::Lock>> {
-    let authentication = authentication.clone();
-    tokio::task::spawn_blocking(move || transaction(&authentication)).await?
 }
 
 pub(super) fn validate_tokens(tokens: &Value) -> Result<()> {
@@ -300,11 +231,7 @@ pub(super) fn validate_resource(server: &str, resource: &str) -> Result<()> {
 }
 
 /// Writes the vault first so reconciliation can recover if a secondary store fails.
-pub(super) fn save(
-    authentication: &HttpAuth,
-    patch: &Value,
-    expected: Option<&Value>,
-) -> Result<()> {
+fn save_locked(authentication: &HttpAuth, patch: &Value, expected: Option<&Value>) -> Result<()> {
     super::ensure_writable(authentication)?;
     if let Some(expected) = expected {
         let latest = read(authentication)?;
@@ -323,7 +250,7 @@ pub(super) fn save(
     save_entry(authentication, &mut vault, patch, &previous, &candidates)
 }
 
-pub(super) fn save_entry(
+fn save_entry(
     authentication: &HttpAuth,
     vault: &mut Value,
     patch: &Value,
@@ -398,16 +325,7 @@ pub(super) fn save_entry(
     Ok(())
 }
 
-pub(super) async fn save_async(
-    authentication: &HttpAuth,
-    patch: Value,
-    expected: Option<Value>,
-) -> Result<()> {
-    let authentication = authentication.clone();
-    tokio::task::spawn_blocking(move || save(&authentication, &patch, expected.as_ref())).await?
-}
-
-pub(super) fn clear(authentication: &HttpAuth) -> Result<()> {
+fn clear_locked(authentication: &HttpAuth) -> Result<()> {
     super::ensure_writable(authentication)?;
     let _vault_lock = files::Lock::acquire(&authentication.vault_path)?;
     let mut vault = vault(authentication)?;

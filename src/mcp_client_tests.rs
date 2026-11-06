@@ -200,19 +200,23 @@ async fn delayed_reply_retires_socket_without_unsafe_cancellation() -> Result<()
 
 #[tokio::test]
 async fn dropped_request_future_retires_socket() -> Result<()> {
-    let (mut client, mut server) = fixture(Duration::from_secs(1)).await?;
+    let (mut client, mut server) = fixture(Duration::from_secs(30)).await?;
+    let (observed, request_seen) = tokio::sync::oneshot::channel();
     let client_work = async {
         tokio::select! {
             result = client.request("tools/call", json!({})) => {
                 anyhow::bail!("request unexpectedly completed: {result:?}");
             }
-            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+            result = request_seen => result.context("request observation channel closed")?,
         }
         assert!(client.request("ping", json!({})).await.is_err());
         Ok::<(), anyhow::Error>(())
     };
     let server_work = async {
         read(&mut server).await?;
+        observed
+            .send(())
+            .map_err(|_| anyhow::anyhow!("cancelled request observer disappeared"))?;
         let mut extra = String::new();
         assert_eq!(server.read_line(&mut extra).await?, 0);
         Ok::<(), anyhow::Error>(())

@@ -27,10 +27,7 @@ const MAX_NOTIFICATION_LISTENERS: usize = 64;
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const REQUEST_BODY_TIMEOUT: Duration = Duration::from_millis(50);
-const PROTOCOL_VERSION_HEADER: &str = "mcp-protocol-version";
-const SESSION_ID_HEADER: &str = "mcp-session-id";
-const METHOD_HEADER: &str = "mcp-method";
-const NAME_HEADER: &str = "mcp-name";
+use crate::mcp_protocol::{METHOD_HEADER, NAME_HEADER, PROTOCOL_VERSION_HEADER, SESSION_ID_HEADER};
 
 #[cfg(test)]
 #[path = "mcp_bridge_http_tests.rs"]

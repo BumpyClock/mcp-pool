@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use crate::config_commands::AddOperation;
@@ -37,16 +37,14 @@ pub(super) fn build_add_operation(
             ));
         }
         (Some(url), false) => {
+            if url.is_empty() {
+                anyhow::bail!("--url must not be empty");
+            }
             let transport = transport
                 .map(|value| normalize_transport(&value))
                 .transpose()?
                 .unwrap_or_else(|| "http".to_string());
-            if url.is_empty() {
-                // An empty URL previously became an empty stdio command in the native adapter.
-                json!({"transport":"stdio","command":"","args":[]})
-            } else {
-                json!({"transport":transport,"baseUrl":url})
-            }
+            json!({"transport":transport,"baseUrl":url})
         }
         (None, true) => json!({"transport":"stdio","command":stdio_command,"args":args}),
     };
@@ -69,7 +67,14 @@ pub(super) async fn remove_server(
     path: Option<std::path::PathBuf>,
     root: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    if !yes && io::stdin().is_terminal() && !confirm(&format!("remove server '{name}'?")) {
+    if !yes
+        && io::stdin().is_terminal()
+        && !confirm(
+            &format!("remove server '{name}'?"),
+            &mut io::stdin().lock(),
+            &mut io::stdout().lock(),
+        )?
+    {
         println!("aborted");
         return Ok(());
     }
@@ -77,14 +82,56 @@ pub(super) async fn remove_server(
     crate::config_commands::remove(path, root, name).await
 }
 
-fn confirm(prompt: &str) -> bool {
-    print!("{prompt} [y/N] ");
-    if io::stdout().flush().is_err() {
-        return false;
-    }
+fn confirm(prompt: &str, input: &mut impl BufRead, output: &mut impl Write) -> io::Result<bool> {
+    write!(output, "{prompt} [y/N] ")?;
+    output.flush()?;
     let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
-        return false;
+    input.read_line(&mut line)?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmation_distinguishes_declining_from_io_failures() -> io::Result<()> {
+        struct FlushFailure;
+        impl Write for FlushFailure {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        let mut output = Vec::new();
+        assert!(confirm("remove?", &mut &b"YES\n"[..], &mut output)?);
+        assert!(!confirm("remove?", &mut &b"no\n"[..], &mut output)?);
+        let mut invalid_utf8 = &b"\xff\n"[..];
+        assert_eq!(
+            confirm("remove?", &mut invalid_utf8, &mut output)
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidData)
+        );
+        assert_eq!(
+            confirm("remove?", &mut &b"yes\n"[..], &mut &mut [][..])
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::WriteZero)
+        );
+        assert_eq!(
+            confirm("remove?", &mut &b"yes\n"[..], &mut FlushFailure)
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::BrokenPipe)
+        );
+        Ok(())
     }
-    matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }

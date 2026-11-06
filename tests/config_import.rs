@@ -1,9 +1,11 @@
-use std::sync::atomic::Ordering;
+#[path = "common/fixture_lifecycle.rs"]
+mod fixture_lifecycle;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 #[path = "mcp_cli_fixtures/http.rs"]
+#[allow(dead_code)]
 mod http;
 #[path = "config_import_fixtures/support.rs"]
 mod support;
@@ -295,143 +297,5 @@ async fn start_all_reports_failure_and_project_native_starts_use_the_callers_con
             .stdout,
     )?;
     assert_eq!(status.pointer("/servers/0/transport"), Some(&json!("http")));
-    fixture.finish().await
-}
-
-#[tokio::test]
-async fn inherited_servers_use_project_auth_and_never_mix_pooled_credentials() -> Result<()> {
-    let fixture = Fixture::new()?;
-    let remote = http::HttpFixture::new().await?;
-    let second = fixture.directory.join("second");
-    std::fs::create_dir(&second)?;
-    fixture.write(
-        &fixture.home_config(),
-        &json!({"mcpServers":{"protected":{"url":remote.url,"auth":"oauth"}}}),
-    )?;
-    let tokens = fixture.directory.join("tokens.json");
-    fixture.write(&tokens, &json!({"access_token":"home-fixture-token","token_type":"Bearer","expires_at":4102444800u64}))?;
-    fixture
-        .success(&[
-            "--config",
-            fixture.home_config().to_str().context("path")?,
-            "vault",
-            "set",
-            "protected",
-            "--tokens-file",
-            tokens.to_str().context("tokens")?,
-        ])
-        .await?;
-    let call = ["call", "protected.headers", "--output", "json"];
-    let inherited: Value = serde_json::from_slice(&fixture.success(&call).await?.stdout)?;
-    assert_eq!(
-        inherited.pointer("/headers/authorization"),
-        Some(&json!("Bearer home-fixture-token"))
-    );
-    fixture.write(&tokens, &json!({"access_token":"project-fixture-token","token_type":"Bearer","expires_at":4102444800u64}))?;
-    fixture
-        .success(&[
-            "vault",
-            "set",
-            "protected",
-            "--tokens-file",
-            tokens.to_str().context("tokens")?,
-        ])
-        .await?;
-    assert!(!fixture.project.join(".mcp").join("config.json").exists());
-    assert!(
-        fixture
-            .project
-            .join(".mcp")
-            .join("credentials.json")
-            .is_file()
-    );
-    let local: Value = serde_json::from_slice(&fixture.success(&call).await?.stdout)?;
-    assert_eq!(
-        local.pointer("/headers/authorization"),
-        Some(&json!("Bearer project-fixture-token"))
-    );
-    let output = fixture.command(&second).args(call).output().await?;
-    anyhow::ensure!(
-        output.status.success(),
-        "Second-project call failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let inherited: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(
-        inherited.pointer("/headers/authorization"),
-        Some(&json!("Bearer home-fixture-token"))
-    );
-    assert_eq!(remote.initializations.load(Ordering::SeqCst), 3);
-    assert!(!remote.headers.lock().await.is_empty());
-    let listing: Value =
-        serde_json::from_slice(&fixture.success(&["pool", "list", "--json"]).await?.stdout)?;
-    let status: Value = serde_json::from_slice(
-        &fixture
-            .success(&["status", "protected", "--json"])
-            .await?
-            .stdout,
-    )?;
-    assert_eq!(
-        listing.pointer("/0/socket_path"),
-        status.pointer("/servers/0/socket_path")
-    );
-    let nested = fixture.project.join("nested");
-    std::fs::create_dir(&nested)?;
-    let nested_call = fixture.command(&nested).args(call).output().await?;
-    anyhow::ensure!(nested_call.status.success(), "Nested project call failed");
-    let nested_call: Value = serde_json::from_slice(&nested_call.stdout)?;
-    assert_eq!(
-        nested_call.pointer("/headers/authorization"),
-        Some(&json!("Bearer project-fixture-token"))
-    );
-    fixture.write(&tokens, &json!({"access_token":"updated-home-fixture-token","token_type":"Bearer","expires_at":4102444800u64}))?;
-    fixture
-        .success(&[
-            "--config",
-            fixture.home_config().to_str().context("home config")?,
-            "vault",
-            "set",
-            "protected",
-            "--tokens-file",
-            tokens.to_str().context("tokens")?,
-        ])
-        .await?;
-    let independent: Value = serde_json::from_slice(&fixture.success(&call).await?.stdout)?;
-    assert_eq!(
-        independent.pointer("/headers/authorization"),
-        Some(&json!("Bearer project-fixture-token"))
-    );
-    assert_eq!(remote.initializations.load(Ordering::SeqCst), 3);
-    let refreshed = fixture.command(&second).args(call).output().await?;
-    anyhow::ensure!(refreshed.status.success(), "Updated home auth call failed");
-    let refreshed: Value = serde_json::from_slice(&refreshed.stdout)?;
-    assert_eq!(
-        refreshed.pointer("/headers/authorization"),
-        Some(&json!("Bearer updated-home-fixture-token"))
-    );
-    assert_eq!(remote.initializations.load(Ordering::SeqCst), 4);
-    fixture.write(
-        &tokens,
-        &json!({"access_token":"expired-project-token","token_type":"Bearer","expires_at":1}),
-    )?;
-    fixture
-        .success(&[
-            "vault",
-            "set",
-            "protected",
-            "--tokens-file",
-            tokens.to_str().context("tokens")?,
-        ])
-        .await?;
-    let expired = fixture
-        .run(&["call", "protected.headers", "--no-oauth"])
-        .await?;
-    assert!(!expired.status.success());
-    fixture.success(&["vault", "clear", "protected"]).await?;
-    let restored: Value = serde_json::from_slice(&fixture.success(&call).await?.stdout)?;
-    assert_eq!(
-        restored.pointer("/headers/authorization"),
-        Some(&json!("Bearer updated-home-fixture-token"))
-    );
     fixture.finish().await
 }

@@ -66,6 +66,20 @@ impl<'a> ConfiguredEnvironment<'a> {
 }
 
 impl<'a> OAuthSettings<'a> {
+    pub(crate) fn projection(&self) -> [(&'static str, Option<&'a str>); 9] {
+        [
+            ("auth", self.auth),
+            ("tokenCacheDir", self.token_cache_directory),
+            ("clientName", self.client_name),
+            ("oauthClientId", self.client_id),
+            ("oauthClientSecretEnv", self.client_secret_env),
+            ("oauthTokenEndpointAuthMethod", self.token_auth_method),
+            ("oauthRedirectUrl", self.redirect_url),
+            ("oauthClientMetadataUrl", self.client_metadata_url),
+            ("oauthRequestedScope", self.scope),
+        ]
+    }
+
     pub(crate) fn from_raw(raw: &'a Value) -> Self {
         Self {
             auth: nonempty_string(raw, "auth"),

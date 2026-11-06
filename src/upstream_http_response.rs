@@ -9,13 +9,14 @@ pub(super) async fn deliver(
     response_tx: &mpsc::Sender<String>,
     answered: &mut bool,
     established: &mut Option<oneshot::Sender<Option<Request>>>,
-) -> Result<(), String> {
+    log: &ServerLog,
+) -> Result<(), HttpFailure> {
     let value = parse_message(body)?;
     let matches = request.identifier.as_ref().is_some_and(|identifier| {
         value.get("id") == Some(identifier)
             && (value.get("result").is_some() || value.get("error").is_some())
     });
-    if matches && request.initialize && value.get("result").is_some() {
+    if matches && request.kind.is_initialize() && value.get("result").is_some() {
         if session_identifier.as_ref().is_some_and(|identifier| {
             identifier.is_empty()
                 || !identifier
@@ -39,7 +40,7 @@ pub(super) async fn deliver(
             protocol,
         };
     } else if matches
-        && request.discover
+        && request.kind.is_discovery()
         && let Some(result) = value.get("result")
         && crate::mcp_protocol::discovery_offers_modern(result)
             .map_err(|_| "MCP server/discover returned invalid supportedVersions")?
@@ -55,7 +56,7 @@ pub(super) async fn deliver(
         .map_err(|_| "HTTP response receiver closed")?;
     *answered |= matches;
     if matches {
-        release_initialization(established);
+        release_initialization(established, log);
     }
     Ok(())
 }

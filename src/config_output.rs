@@ -14,20 +14,13 @@ pub(crate) fn serialize(server: &ConfiguredServer) -> Value {
         if !definition.description.is_empty() {
             object.insert("description".to_owned(), json!(definition.description));
         }
-        for key in [
-            "auth",
-            "clientName",
-            "tokenCacheDir",
-            "oauthClientId",
-            "oauthClientSecretEnv",
-            "oauthTokenEndpointAuthMethod",
-            "oauthRedirectUrl",
-            "oauthRequestedScope",
-            "lifecycle",
-        ] {
-            if let Some(value) = server.raw.get(key) {
-                object.insert(key.to_owned(), value.clone());
+        for (key, value) in server.oauth_settings().projection() {
+            if let Some(value) = value {
+                object.insert(key.to_owned(), json!(value));
             }
+        }
+        if let Some(value) = server.raw.get("lifecycle") {
+            object.insert("lifecycle".to_owned(), value.clone());
         }
         if let Some(value) = server
             .raw
@@ -103,9 +96,7 @@ pub(super) fn credential_summary(
 ) -> String {
     let flag = |key| credentials.get(key).and_then(Value::as_bool) == Some(true);
     let refreshable = flag("refreshable") && flag("hasClientRegistration");
-    let status = if !flag("bindingValid") {
-        "credential binding mismatch"
-    } else if flag("authenticated") {
+    let status = if flag("authenticated") {
         "cached OAuth credentials valid"
     } else if flag("expired") && refreshable {
         "cached OAuth credentials expired (refresh available on use)"
@@ -117,10 +108,7 @@ pub(super) fn credential_summary(
         "OAuth not configured (no usable cached credentials)"
     };
     let mut report = format!("  {}: {status}", escape_text(name));
-    if !flag("bindingValid")
-        || (flag("expired") && !refreshable)
-        || (oauth_configured && !flag("hasTokens"))
-    {
+    if (flag("expired") && !refreshable) || (oauth_configured && !flag("hasTokens")) {
         // Other aliases require shell-specific quoting, so do not interpolate them into commands.
         let portable_name = !name.is_empty()
             && !name.starts_with('-')

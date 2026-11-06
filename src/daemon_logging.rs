@@ -69,14 +69,28 @@ pub(crate) fn register_identity(runtime: &str, configured: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn write(message: &str) -> Option<std::io::Result<()>> {
+pub(super) fn logical_name(runtime: &str) -> String {
+    SINK.get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()
+        .and_then(|sink| {
+            sink.as_ref()
+                .and_then(|sink| sink.identities.get(runtime).cloned())
+        })
+        .unwrap_or_else(|| runtime.to_owned())
+}
+
+pub(crate) fn write(server: Option<&str>, message: &str) -> Option<std::io::Result<()>> {
     let mut sink = match SINK.get_or_init(|| Mutex::new(None)).lock() {
         Ok(sink) => sink,
         Err(_) => return Some(Err(std::io::Error::other("Daemon logging lock poisoned"))),
     };
     let sink = sink.as_mut()?;
-    if !selected(message, &sink.servers, &sink.identities) {
+    if !selected(server, &sink.servers) {
         return Some(Ok(()));
+    }
+    if super::STDERR.load(std::sync::atomic::Ordering::SeqCst) {
+        eprintln!("{message}");
     }
     Some(append_bounded(
         &mut sink.file,
@@ -84,39 +98,8 @@ pub(crate) fn write(message: &str) -> Option<std::io::Result<()>> {
     ))
 }
 
-fn selected(
-    message: &str,
-    servers: &BTreeSet<String>,
-    identities: &BTreeMap<String, String>,
-) -> bool {
-    if servers.is_empty() {
-        return true;
-    }
-    let client = message
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix("client_id="));
-    let runtime = client
-        .and_then(|client| {
-            client
-                .rsplit_once("-client-")
-                .filter(|(_, counter)| {
-                    !counter.is_empty()
-                        && counter.chars().all(|character| character.is_ascii_digit())
-                })
-                .map(|(runtime, _)| runtime)
-        })
-        .or_else(|| {
-            message
-                .split_whitespace()
-                .find_map(|field| field.strip_prefix("name="))
-        });
-    if let Some(runtime) = runtime {
-        return servers.contains(runtime)
-            || identities
-                .get(runtime)
-                .is_some_and(|logical| servers.contains(logical));
-    }
-    !message.starts_with("pool_") && !message.starts_with("upstream_") && client.is_none()
+fn selected(server: Option<&str>, servers: &BTreeSet<String>) -> bool {
+    servers.is_empty() || server.is_none_or(|server| servers.contains(server))
 }
 
 fn append_bounded(file: &mut std::fs::File, message: &str) -> std::io::Result<()> {
@@ -166,43 +149,11 @@ mod tests {
     }
 
     #[test]
-    fn filters_use_exact_registered_names_for_runtime_and_client_records() {
+    fn filters_select_exact_identity_and_keep_generic_records() {
         let servers = ["a-long-configured-name".to_owned()].into();
-        let identities = [
-            (
-                "mcp-a-long-0123456789".to_owned(),
-                "a-long-configured-name".to_owned(),
-            ),
-            (
-                "mcp-a-long-9876543210".to_owned(),
-                "a-long-configured-other".to_owned(),
-            ),
-        ]
-        .into();
-        assert!(selected(
-            "pool_proxy_starting name=mcp-a-long-0123456789 transport=stdio",
-            &servers,
-            &identities
-        ));
-        assert!(selected(
-            "pool_request_received client_id=mcp-a-long-0123456789-client-2 method=tools/call",
-            &servers,
-            &identities
-        ));
-        assert!(!selected(
-            "pool_request_received client_id=mcp-a-long-9876543210-client-2 method=tools/call",
-            &servers,
-            &identities
-        ));
-        assert!(!selected(
-            "pool_cache_hit method=initialize",
-            &servers,
-            &identities
-        ));
-        assert!(selected(
-            "daemon starting; discovered 0 existing sockets",
-            &servers,
-            &identities
-        ));
+        assert!(selected(Some("a-long-configured-name"), &servers));
+        assert!(!selected(Some("a-long-configured-name-extra"), &servers));
+        assert!(!selected(Some("mcp-a-long-0123456789"), &servers));
+        assert!(selected(None, &servers));
     }
 }

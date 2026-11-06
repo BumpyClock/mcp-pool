@@ -1,4 +1,7 @@
 /target
 /.test-artifacts/
+/.mcp/credentials.json
+/.mcp/credentials.json.lock
+/.mcp/refresh-locks/
 __pycache__/
 .clawpatch

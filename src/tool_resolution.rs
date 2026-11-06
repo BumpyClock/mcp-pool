@@ -1,8 +1,8 @@
-use std::collections::HashSet;
-
-use anyhow::{Result, bail};
+use crate::tool_filter::ToolSelectionError;
+use anyhow::Result;
 use serde_json::Value;
 
+/// Callers normalize catalogs before filtering or resolving names.
 pub(crate) fn resolve_tool<F>(
     server_name: &str,
     tools: &[Value],
@@ -12,7 +12,10 @@ pub(crate) fn resolve_tool<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let names = tool_names(tools);
+    let names: Vec<_> = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect();
     let mut visible = Vec::new();
     for &name in &names {
         if allowed(name) {
@@ -23,10 +26,14 @@ where
     let Some(requested) = requested else {
         return match visible.as_slice() {
             [name] => Ok((*name).to_owned()),
-            [] => bail!("Server '{server_name}' exposes no available tools"),
-            _ => bail!(
+            [] => Err(ToolSelectionError(format!(
+                "Server '{server_name}' exposes no available tools"
+            ))
+            .into()),
+            _ => Err(ToolSelectionError(format!(
                 "Missing tool: '{server_name}' exposes multiple tools; use call {server_name}.TOOL"
-            ),
+            ))
+            .into()),
         };
     };
 
@@ -34,7 +41,10 @@ where
         if visible.contains(&requested) {
             return Ok(requested.to_owned());
         }
-        bail!("Tool '{requested}' is excluded by the configuration for '{server_name}'");
+        return Err(ToolSelectionError(format!(
+            "Tool '{requested}' is excluded by the configuration for '{server_name}'"
+        ))
+        .into());
     }
 
     let requested_key = normalize(requested);
@@ -47,20 +57,27 @@ where
         [name] => return Ok((*name).to_owned()),
         [] => {}
         _ => {
-            bail!(
+            return Err(ToolSelectionError(format!(
                 "Tool '{requested}' is ambiguous on '{server_name}'; matches: {}",
                 aliases.join(", ")
-            );
+            ))
+            .into());
         }
     }
     if names.iter().any(|name| normalize(name) == requested_key) {
-        bail!("Tool '{requested}' is excluded by the configuration for '{server_name}'");
+        return Err(ToolSelectionError(format!(
+            "Tool '{requested}' is excluded by the configuration for '{server_name}'"
+        ))
+        .into());
     }
 
     if let Some(suggestion) = suggestion(requested, &visible) {
-        bail!("Unknown tool '{requested}' on '{server_name}'. Did you mean '{suggestion}'?");
+        return Err(ToolSelectionError(format!(
+            "Unknown tool '{requested}' on '{server_name}'. Did you mean '{suggestion}'?"
+        ))
+        .into());
     }
-    bail!("Unknown tool '{requested}' on '{server_name}'")
+    Err(ToolSelectionError(format!("Unknown tool '{requested}' on '{server_name}'")).into())
 }
 
 pub(crate) fn has_real_tool(tools: &[Value], requested: &str) -> bool {
@@ -83,21 +100,6 @@ pub(crate) fn normalize(name: &str) -> String {
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-fn tool_names(tools: &[Value]) -> Vec<&str> {
-    let mut names = Vec::new();
-    let mut seen = HashSet::new();
-    for name in tools
-        .iter()
-        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
-        .filter(|name| !name.is_empty())
-    {
-        if seen.insert(name) {
-            names.push(name);
-        }
-    }
-    names
 }
 
 fn suggestion<'a>(requested: &str, visible: &[&'a str]) -> Option<&'a str> {
@@ -152,7 +154,9 @@ mod tests {
     use serde_json::json;
 
     fn tools(names: &[&str]) -> Vec<Value> {
-        names.iter().map(|name| json!({"name":name})).collect()
+        let mut catalog = names.iter().map(|name| json!({"name":name})).collect();
+        crate::tool_filter::normalize_catalog(&mut catalog);
+        catalog
     }
 
     fn allow_all(_: &str) -> bool {
@@ -252,18 +256,14 @@ mod tests {
             json!({"name":["echo"]}),
             json!({"name":""}),
         ];
-        let mut inspected = Vec::new();
-        let error = resolve_tool("fixture", &catalog, None, |name| {
-            inspected.push(name.to_owned());
-            true
-        })
-        .err()
-        .context("invalid names must not produce a tool")?;
+        crate::tool_filter::normalize_catalog(&mut catalog);
+        let error = resolve_tool("fixture", &catalog, None, allow_all)
+            .err()
+            .context("invalid names must not produce a tool")?;
         assert_eq!(
             error.to_string(),
             "Server 'fixture' exposes no available tools"
         );
-        assert!(inspected.is_empty());
         assert!(!has_real_tool(&catalog, ""));
         assert!(!has_real_tool(&catalog, "echo"));
 
@@ -274,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn allowed_predicate_runs_once_per_unique_name_in_first_seen_order() -> Result<()> {
+    fn policy_filters_exact_names_and_aliases_consistently() -> Result<()> {
         let catalog = tools(&[
             "first",
             "second_alias",
@@ -290,20 +290,17 @@ mod tests {
             Some("second-alias"),
             Some("unknown"),
         ] {
-            let mut inspected = Vec::new();
             let resolved = resolve_tool("fixture", &catalog, requested, |name| {
-                inspected.push(name.to_owned());
-                inspected.len() == 2
+                name == "second_alias"
             });
-            assert_eq!(inspected, ["first", "second_alias", "third"]);
             match requested {
                 None | Some("second_alias") | Some("second-alias") => {
-                    assert_eq!(resolved?, "second_alias");
+                    assert_eq!(resolved?, "second_alias")
                 }
                 Some("first") => assert_eq!(
                     resolved
                         .err()
-                        .context("first tool must be excluded")?
+                        .context("excluded tool must fail")?
                         .to_string(),
                     "Tool 'first' is excluded by the configuration for 'fixture'"
                 ),

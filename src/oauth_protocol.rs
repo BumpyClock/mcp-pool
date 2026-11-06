@@ -251,15 +251,7 @@ pub(super) fn client(
             )
             .map_err(|_| anyhow::anyhow!("invalid token endpoint"))?,
         );
-    let secret = if let Some(secret) = string(info, "client_secret") {
-        Some(secret.to_owned())
-    } else if let Some(variable) = &authentication.client_secret_env {
-        Some(std::env::var(variable).map_err(|_| {
-            anyhow::anyhow!("configured OAuth client-secret environment variable missing")
-        })?)
-    } else {
-        None
-    };
+    let secret = authentication.client_secret(info)?;
     let method = authentication
         .token_auth_method
         .as_deref()
@@ -287,7 +279,7 @@ pub(super) fn client(
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| anyhow::anyhow!("OAuth client secret missing"))?;
             client = client
-                .set_client_secret(ClientSecret::new(secret))
+                .set_client_secret(ClientSecret::new(secret.to_owned()))
                 .set_auth_type(if method == "client_secret_post" {
                     AuthType::RequestBody
                 } else {
@@ -338,7 +330,7 @@ pub(super) async fn refresh(authentication: &HttpAuth) -> Result<String> {
             "--no-oauth permits only valid cached tokens; explicitly authorize or retry without --no-oauth"
         );
     }
-    let transaction = files::AsyncLocks::new(store::transaction_async(authentication).await?);
+    let transaction = store::transaction_async(authentication).await?;
     let snapshot = read_snapshot(authentication).await?;
     let tokens = snapshot
         .get("tokens")
@@ -386,12 +378,12 @@ pub(super) async fn refresh(authentication: &HttpAuth) -> Result<String> {
     let access_token = string(&refreshed, "access_token")
         .ok_or_else(|| missing(authentication))?
         .to_owned();
-    store::save_async(
-        authentication,
-        json!({"tokens":refreshed,"discoveryState":discovery}),
-        Some(snapshot),
-    )
-    .await?;
+    transaction
+        .save(
+            json!({"tokens":refreshed,"discoveryState":discovery}),
+            Some(snapshot),
+        )
+        .await?;
     transaction.release().await?;
     Ok(access_token)
 }

@@ -156,16 +156,8 @@ async fn definitive_legacy_disconnect_allows_same_proxy_restart_without_replay()
         );
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
-    #[cfg(windows)]
-    let path = std::path::PathBuf::from(format!(
-        r"\\.\pipe\mcp-cli-http-retirement-{}-{port}",
-        std::process::id(),
-    ));
-    #[cfg(unix)]
-    let path = std::env::temp_dir().join(format!("pool-http-{}-{port}.sock", std::process::id(),));
-    let proxy = Arc::new(crate::socket_proxy::SocketProxy::new(
+    let proxy = crate::socket_proxy::SocketProxy::fixture(
         format!("http-retirement-{port}"),
-        path.clone(),
         crate::upstream::UpstreamSpec::Http {
             url,
             sse: true,
@@ -173,9 +165,8 @@ async fn definitive_legacy_disconnect_allows_same_proxy_restart_without_replay()
             timeout_ms: None,
             auth: None,
         },
-        true,
-        None,
-    ));
+    )?;
+    let path = proxy.socket_path();
     proxy.start().await?;
     let mut first = crate::transport::connect(&path).await?;
     first
@@ -200,7 +191,8 @@ async fn definitive_legacy_disconnect_allows_same_proxy_restart_without_replay()
             "id": "before",
             "error": {
                 "code": -32000,
-                "message": "Legacy SSE connection failed; request was not replayed"
+                "message": "Legacy SSE connection failed; request was not replayed",
+                "data":{"mcpCliFailure":{"kind":"offline"}}
             }
         })
     );

@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<std::path::PathBuf>,
 
-    /// Project directory for project config and credential selection.
+    /// Project directory for project config; credentials follow each definition's source.
     #[arg(long, global = true)]
     pub root: Option<std::path::PathBuf>,
     /// Enable diagnostic logging (also via MCP_CLI_DEBUG=1).
@@ -173,10 +173,7 @@ pub async fn run(mut arguments: Vec<String>) -> anyhow::Result<()> {
         && command_position
             .and_then(|position| arguments.get(position + 1))
             .is_some_and(|argument| argument == "list")
-        && arguments
-            .iter()
-            .skip(command_position.unwrap_or_default() + 2)
-            .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+        && crate::cli_syntax::CommandSyntax::parse(arguments.get(1..).unwrap_or_default()).help
     {
         println!(
             "Usage: mcp-cli pool list [--json|--plain]\nList configured native pool entries without connecting to MCP servers."
@@ -359,7 +356,7 @@ fn list_servers(
                 config::server_socket_path(&crate::mcp_cli::pool_name(
                     server,
                     &crate::oauth::identity_definition(server)?,
-                )?)
+                )?)?
                 .to_string_lossy()
                 .to_string(),
             ))

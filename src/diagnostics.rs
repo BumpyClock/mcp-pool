@@ -8,11 +8,59 @@ use crate::config;
 #[path = "daemon_logging.rs"]
 pub(crate) mod logging;
 
+#[derive(Clone, Default)]
+pub(crate) struct ServerLog {
+    server: Option<std::sync::Arc<str>>,
+    redactions: std::sync::Arc<[String]>,
+}
+
+impl ServerLog {
+    pub(crate) fn new(server: &str) -> Self {
+        Self {
+            server: Some(server.into()),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn for_runtime(runtime: &str) -> Self {
+        Self::new(&logging::logical_name(runtime))
+    }
+
+    pub(crate) fn with_redactions(mut self, values: impl IntoIterator<Item = String>) -> Self {
+        let mut redactions: Vec<_> = self
+            .redactions
+            .iter()
+            .cloned()
+            .chain(values)
+            .filter(|value| !value.is_empty())
+            .collect();
+        redactions.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        redactions.dedup();
+        self.redactions = redactions.into();
+        self
+    }
+
+    pub(crate) fn redact(&self, message: &str) -> String {
+        let mut message = message.to_owned();
+        for value in self.redactions.iter() {
+            message = message.replace(value, "[redacted]");
+        }
+        message
+    }
+
+    pub(crate) fn log(&self, message: impl AsRef<str>) {
+        if !is_enabled() {
+            return;
+        }
+        write_record(self.server.as_deref(), &self.redact(message.as_ref()));
+    }
+}
+
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
 const MAX_LOG_LINE_LEN: usize = 2000;
 
-static STDERR: AtomicBool = AtomicBool::new(false);
+pub(super) static STDERR: AtomicBool = AtomicBool::new(false);
 
 pub fn set_enabled(enabled: bool) {
     ENABLED.store(enabled, Ordering::SeqCst);
@@ -33,11 +81,10 @@ pub fn init_from_env() {
     }
 }
 
-pub fn log_dir() -> Option<PathBuf> {
-    config::state_dir().ok().map(|dir| dir.join("logs"))
+pub fn log_dir() -> std::io::Result<PathBuf> {
+    Ok(config::state_dir()?.join("logs"))
 }
 
-/// Truncates oversized lines at a UTF-8 boundary.
 pub fn summarize_log_line(line: &str) -> String {
     let len = line.len();
     if len <= MAX_LOG_LINE_LEN {
@@ -53,21 +100,28 @@ pub fn summarize_log_line(line: &str) -> String {
 
 /// Writes diagnostics to the log file and optional stderr, never stdout.
 pub fn log(message: impl AsRef<str>) {
+    write_record(None, message.as_ref());
+}
+
+fn write_record(server: Option<&str>, message: &str) {
     if !is_enabled() {
         return;
     }
-    let message = message.as_ref();
-    if STDERR.load(Ordering::SeqCst) {
-        eprintln!("{message}");
-    }
-    if let Some(result) = logging::write(message) {
+    if let Some(result) = logging::write(server, message) {
         if let Err(error) = result {
             eprintln!("mcp-cli: daemon log write failed: {error}");
         }
         return;
     }
-    let Some(dir) = log_dir() else {
-        return;
+    if STDERR.load(Ordering::SeqCst) {
+        eprintln!("{message}");
+    }
+    let dir = match log_dir() {
+        Ok(directory) => directory,
+        Err(error) => {
+            eprintln!("mcp-cli: diagnostic state directory unavailable: {error}");
+            return;
+        }
     };
     if let Err(error) = std::fs::create_dir_all(&dir) {
         eprintln!("mcp-cli: diagnostic log directory unavailable: {error}");

@@ -36,7 +36,7 @@ fn ad_hoc_tokens_and_final_metadata_reach_the_shared_normalizer() -> Result<()> 
         Some(crate::config::ConfigurationEntry {
             source: selected.source.clone(),
             name: "final-name".to_owned(),
-            scope: None,
+            scope: selected.source.parent().map(std::path::Path::to_path_buf),
             credential_store: None,
         })
     );

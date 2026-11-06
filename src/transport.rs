@@ -95,7 +95,7 @@ mod tests {
 
     static SEQ: AtomicUsize = AtomicUsize::new(0);
 
-    fn unique_endpoint() -> std::path::PathBuf {
+    fn unique_endpoint() -> io::Result<std::path::PathBuf> {
         let n = SEQ.fetch_add(1, Ordering::SeqCst);
         let name = format!("test-{}-{n}", std::process::id());
         crate::config::server_socket_path(&name)
@@ -103,7 +103,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_live_listener_keeps_singleton_bind_ownership() -> io::Result<()> {
-        let path = unique_endpoint();
+        let path = unique_endpoint()?;
         let listener = bind(&path)?;
         let duplicate = bind(&path);
         #[cfg(unix)]
@@ -124,7 +124,7 @@ mod tests {
     async fn cancelled_accept_preserves_the_pending_endpoint() -> io::Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let path = unique_endpoint();
+        let path = unique_endpoint()?;
         let listener = bind(&path)?;
         assert!(
             tokio::time::timeout(Duration::from_millis(20), listener.accept())
@@ -148,7 +148,7 @@ mod tests {
     async fn abandoned_client_does_not_poison_later_accepts() -> io::Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let path = unique_endpoint();
+        let path = unique_endpoint()?;
         let listener = bind(&path)?;
         let abandoned = connect(&path).await?;
         drop(abandoned);

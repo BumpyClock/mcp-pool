@@ -3,11 +3,10 @@ use super::*;
 pub(super) struct Generation {
     pub request_tx: Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
     pub clients: Mutex<HashMap<String, ClientSender>>,
-    pub request_map: RequestMap,
-    pub handshake_cache: Mutex<HandshakeCache>,
+    pub routes: SessionRoutes,
+    pub diagnostics: diagnostics::ServerLog,
     pub client_capabilities: Mutex<HashMap<String, ClientCapabilities>>,
     pub last_active_client: Mutex<Option<String>>,
-    pub id_allocator: IdAllocator,
     pub shutdown: AtomicBool,
     pub explicit_stop: AtomicBool,
     pub shutdown_notify: Notify,
@@ -21,17 +20,16 @@ pub(super) struct Generation {
 }
 
 impl Generation {
-    pub fn new() -> Self {
+    pub fn new(diagnostics: diagnostics::ServerLog) -> Self {
         let (startup_tx, startup) = watch::channel(None);
         let (completion_tx, completion) = watch::channel(None);
         Self {
             request_tx: Mutex::new(None),
             clients: Mutex::new(HashMap::new()),
-            request_map: Mutex::new(HashMap::new()),
-            handshake_cache: Mutex::new(HandshakeCache::default()),
+            routes: SessionRoutes::new(diagnostics.clone()),
+            diagnostics,
             client_capabilities: Mutex::new(HashMap::new()),
             last_active_client: Mutex::new(None),
-            id_allocator: IdAllocator::new(),
             shutdown: AtomicBool::new(false),
             explicit_stop: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
@@ -66,28 +64,13 @@ impl Generation {
     fn clear(&self) {
         self.request_tx.lock().take();
         self.clients.lock().clear();
-        {
-            let mut requests = self.request_map.lock();
-            let mut cache = self.handshake_cache.lock();
-            requests.clear();
-            cache.clear_all();
-        }
+        self.routes.clear();
         self.client_capabilities.lock().clear();
         *self.last_active_client.lock() = None;
     }
 
     async fn route(&self, message: &str, recovery_tx: &mpsc::Sender<RecoveryReason>) {
-        route_response(
-            message,
-            &self.clients,
-            &self.request_map,
-            &self.handshake_cache,
-            &self.last_active_client,
-            &self.client_capabilities,
-            &self.request_tx,
-            recovery_tx,
-        )
-        .await;
+        route_response(message, self, recovery_tx).await;
     }
 }
 
@@ -108,34 +91,41 @@ pub(super) fn spawn_owner(
     listener: Arc<LocalListener>,
 ) {
     let spec = proxy.spec.clone();
+    let log = proxy.diagnostics.clone();
     #[cfg(test)]
     if let Some((setup, response_rx)) = proxy.test_setup.lock().take() {
         spawn_owner_with(proxy, generation, listener, response_rx, async move {
-            setup.await.map_err(io::Error::other)?
+            setup
+                .await
+                .map_err(io::Error::other)
+                .map_err(crate::upstream::SetupFailure::from)?
         });
         return;
     }
     let (response_tx, response_rx) = mpsc::channel(1024);
     spawn_owner_with(proxy, generation, listener, response_rx, async move {
-        UpstreamHandle::spawn(spec, response_tx).await
+        UpstreamHandle::spawn(spec, response_tx, log).await
     });
 }
 
 #[cfg(test)]
 pub(super) type TestSetup = (
-    tokio::sync::oneshot::Receiver<io::Result<UpstreamHandle>>,
+    tokio::sync::oneshot::Receiver<Result<UpstreamHandle, crate::upstream::SetupFailure>>,
     mpsc::Receiver<String>,
 );
 
 /// Owns setup through retirement, including children created before shutdown.
-/// `ResourceBusy` leaves retirement unverified; shutdown can cancel slow client delivery.
+/// Unverified startup retirement prohibits replacement; shutdown can cancel client delivery.
 fn spawn_owner_with(
     proxy: &Arc<SocketProxy>,
     generation: Arc<Generation>,
     listener: Arc<LocalListener>,
     mut response_rx: mpsc::Receiver<String>,
-    setup: impl std::future::Future<Output = io::Result<UpstreamHandle>> + Send + 'static,
+    setup: impl std::future::Future<Output = Result<UpstreamHandle, crate::upstream::SetupFailure>>
+    + Send
+    + 'static,
 ) {
+    let log = proxy.diagnostics.clone();
     let status = proxy.status.clone();
     let started_at = proxy.started_at.clone();
     let name = proxy.name.clone();
@@ -161,7 +151,9 @@ fn spawn_owner_with(
         let backend_status = status.clone();
         let backend_started_at = started_at.clone();
         let backend_name = name.clone();
+        let backend_log = log.clone();
         let owner = tokio::spawn(async move {
+            let log = backend_log;
             let generation = backend_generation;
             let status = backend_status;
             let started_at = backend_started_at;
@@ -193,7 +185,7 @@ fn spawn_owner_with(
                             _ = &mut shutdown => break,
                             result = handle.wait_for_exit() => {
                                 if let Err(error) = result {
-                                    diagnostics::log(format!(
+                                    log.log(format!(
                                         "pool_upstream_exit_failed name={name} error={error}"
                                     ));
                                 }
@@ -207,7 +199,7 @@ fn spawn_owner_with(
                                         }
                                     }) => {
                                         if drained.is_err() {
-                                            diagnostics::log(format!("pool_terminal_response_drain_timed_out name={name}"));
+                                            log.log(format!("pool_terminal_response_drain_timed_out name={name}"));
                                         }
                                     }
                                 }
@@ -216,7 +208,7 @@ fn spawn_owner_with(
                             }
                             reason = recovery_rx.recv() => {
                                 if let Some(reason) = reason {
-                                    diagnostics::log(format!(
+                                    log.log(format!(
                                         "pool_recovery_start name={name} reason={}",
                                         recovery_reason_label(reason)
                                     ));
@@ -238,14 +230,14 @@ fn spawn_owner_with(
                     handle.shutdown().await.map_err(|error| error.to_string())
                 }
                 Err(error) => {
-                    diagnostics::log(format!(
+                    log.log(format!(
                         "pool_upstream_spawn_failed name={name} error={error}"
                     ));
                     generation
                         .startup_tx
                         .send_replace(Some(Err(error.to_string())));
                     generation.close();
-                    if error.kind() == io::ErrorKind::ResourceBusy {
+                    if error.retirement_unverified() {
                         Err(error.to_string())
                     } else {
                         Ok(())
@@ -288,7 +280,7 @@ fn spawn_owner_with(
         } else {
             ServerStatus::Failed
         };
-        diagnostics::log(format!(
+        log.log(format!(
             "pool_upstream_retired name={name} verified={}",
             retirement.is_ok()
         ));
@@ -324,7 +316,7 @@ async fn accept_loop(
             _ = &mut shutdown => break,
             result = tasks.join_next(), if !tasks.is_empty() => {
                 if let Some(Err(error)) = result {
-                    diagnostics::log(format!("pool_client_task_failed name={name} error={error}"));
+                    generation.diagnostics.log(format!("pool_client_task_failed name={name} error={error}"));
                 }
             }
             accepted = listener.accept() => match accepted {
@@ -339,7 +331,7 @@ async fn accept_loop(
                     });
                 }
                 Err(error) => {
-                    diagnostics::log(format!("pool_accept_error name={name} error={error}"));
+                    generation.diagnostics.log(format!("pool_accept_error name={name} error={error}"));
                     tokio::select! {
                         _ = &mut shutdown => break,
                         _ = sleep(Duration::from_millis(50)) => {}
@@ -350,17 +342,17 @@ async fn accept_loop(
     }
     if tokio::time::timeout(
         Duration::from_millis(250),
-        drain_client_tasks(&mut tasks, &name),
+        drain_client_tasks(&mut tasks, &name, &generation.diagnostics),
     )
     .await
     .is_err()
     {
-        diagnostics::log(format!(
+        generation.diagnostics.log(format!(
             "pool_client_drain_timed_out name={name} pending_clients={}",
             tasks.len()
         ));
         tasks.abort_all();
-        drain_client_tasks(&mut tasks, &name).await;
+        drain_client_tasks(&mut tasks, &name, &generation.diagnostics).await;
     }
 }
 
@@ -375,11 +367,7 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
         if generation.shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let deadline = {
-            let requests = generation.request_map.lock();
-            let cache = generation.handshake_cache.lock();
-            cache.next_deadline(requests.values())
-        };
+        let deadline = generation.routes.next_deadline();
         let wait_deadline = async {
             match deadline {
                 Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
@@ -390,18 +378,16 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
             _ = &mut shutdown => break,
             _ = &mut changed => continue,
             _ = wait_deadline => {
-                let responses = expire_pending_requests(
-                    &generation.request_map, &generation.handshake_cache,
-                );
-                for (client_id, payload) in sweep_recipients(responses, &generation.clients) {
+                let responses = generation.routes.expire(Instant::now());
+                for (client_id, payload) in sweep_recipients(responses, &generation.clients, &generation.diagnostics) {
                     tokio::select! {
                         _ = &mut shutdown => return,
                         result = tokio::time::timeout(
                             Duration::from_millis(250),
-                            send_to_client(&client_id, payload, &generation.clients),
+                            send_to_client(&client_id, payload, &generation.clients, &generation.diagnostics),
                         ) => {
                             if result.is_err() {
-                                diagnostics::log(format!("pool_timeout_delivery_failed client_id={client_id}"));
+                                generation.diagnostics.log(format!("pool_timeout_delivery_failed client_id={client_id}"));
                             }
                         }
                     }
@@ -411,12 +397,16 @@ pub(super) async fn expiration_loop(generation: Arc<Generation>) {
     }
 }
 
-async fn drain_client_tasks(tasks: &mut tokio::task::JoinSet<()>, name: &str) {
+async fn drain_client_tasks(
+    tasks: &mut tokio::task::JoinSet<()>,
+    name: &str,
+    log: &diagnostics::ServerLog,
+) {
     while let Some(result) = tasks.join_next().await {
         if let Err(error) = result
             && !error.is_cancelled()
         {
-            diagnostics::log(format!("pool_client_task_failed name={name} error={error}"));
+            log.log(format!("pool_client_task_failed name={name} error={error}"));
         }
     }
 }

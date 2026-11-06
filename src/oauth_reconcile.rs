@@ -10,11 +10,15 @@ fn fingerprint(value: &Value) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?)))
 }
 
-fn token_identity(tokens: &Value) -> Result<String> {
-    let mut value = tokens.clone();
-    if let Some(object) = value.as_object_mut() {
+pub(super) fn strip_commit_metadata(tokens: &mut Value) {
+    if let Some(object) = tokens.as_object_mut() {
         object.remove(COMMIT);
     }
+}
+
+fn token_identity(tokens: &Value) -> Result<String> {
+    let mut value = tokens.clone();
+    strip_commit_metadata(&mut value);
     fingerprint(&value)
 }
 

@@ -1,7 +1,9 @@
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::errors::attach_error;
+use super::errors::{Failure, attach_error};
 use crate::mcp_protocol::ConnectionInfo;
 use crate::server_config::ConfiguredServer;
 use crate::tool_documentation::Style;
@@ -20,10 +22,10 @@ pub(super) enum Outcome {
     /// The server answered, so its connection metadata is still reported.
     ToolSelectionFailed {
         connection: Option<ConnectionInfo>,
-        error: String,
+        error: Failure,
     },
     DiscoveryFailed {
-        error: String,
+        error: Failure,
     },
 }
 
@@ -36,6 +38,10 @@ pub(super) struct View {
 }
 
 impl ServerReport {
+    fn status(&self) -> &'static str {
+        self.error().map_or("ok", Failure::status)
+    }
+
     pub(super) fn is_failure(&self) -> bool {
         !matches!(self.outcome, Outcome::Listed { .. })
     }
@@ -60,7 +66,7 @@ impl ServerReport {
         }
     }
 
-    fn error(&self) -> Option<&str> {
+    fn error(&self) -> Option<&Failure> {
         match &self.outcome {
             Outcome::Listed { .. } => None,
             Outcome::ToolSelectionFailed { error, .. } | Outcome::DiscoveryFailed { error } => {
@@ -99,22 +105,64 @@ impl ServerReport {
     }
 
     pub(super) fn print_text(&self, view: &View, style: &Style) -> Result<()> {
+        if !view.detailed {
+            self.print_row(style);
+            return Ok(());
+        }
         if let Some(tools) = self.tools() {
-            if view.detailed {
-                self.print_detailed(tools, view, style)?;
-            } else {
-                println!(
-                    "{} ({} tools; {}ms)",
-                    self.server.name,
-                    tools.len(),
-                    self.duration
-                );
-            }
+            self.print_detailed(tools, view, style)?;
         }
         if let Some(error) = self.error() {
+            let error = super::errors::user_message(&self.server.name, error);
             println!("{} — {error}", self.server.name);
         }
         Ok(())
+    }
+
+    fn print_row(&self, style: &Style) {
+        let name = style.heading(&self.server.name);
+        let duration = format_duration(self.duration);
+        let description = self
+            .server
+            .definition
+            .description
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let description = if description.is_empty() || self.is_failure() {
+            String::new()
+        } else {
+            style.muted(&format!(" - {description}"))
+        };
+        let details = match self.status() {
+            "ok" => {
+                let count = self.tools().map_or(0, <[Value]>::len);
+                let unit = if count == 1 { "tool" } else { "tools" };
+                style.muted(&format!("{count} {unit}, {duration}"))
+            }
+            "auth" => {
+                let forbidden = self.error().and_then(Failure::status_code) == Some(403);
+                let label = if forbidden {
+                    "access denied - check permissions or run"
+                } else {
+                    "auth required - run"
+                };
+                style.warning(&format!(
+                    "{label} 'mcp-cli auth {}', {duration}",
+                    self.server.name
+                ))
+            }
+            status => {
+                let error = self.error().map_or("", Failure::raw);
+                let label = match status {
+                    "offline" => "offline",
+                    "http" => "HTTP error",
+                    _ => "error",
+                };
+                style.error(&format!("{label} - {error}, {duration}"))
+            }
+        };
+        println!("- {name}{description} ({details})");
     }
 
     fn print_detailed(&self, tools: &[Value], view: &View, style: &Style) -> Result<()> {
@@ -175,6 +223,61 @@ impl ServerReport {
             ))
         );
         Ok(())
+    }
+}
+
+pub(super) fn print_header(count: usize, style: &Style) {
+    let unit = if count == 1 { "server" } else { "servers" };
+    println!(
+        "{} {}",
+        style.heading(&format!("mcp-cli {}", env!("CARGO_PKG_VERSION"))),
+        style.muted(&format!("- Listing {count} {unit}"))
+    );
+}
+
+pub(super) fn print_summary(reports: &[ServerReport], style: &Style) {
+    let mut counts = BTreeMap::new();
+    for report in reports {
+        *counts.entry(report.status()).or_insert(0usize) += 1;
+    }
+    let labels = [
+        ("ok", "healthy"),
+        ("auth", "auth required"),
+        ("offline", "offline"),
+        ("http", "HTTP error"),
+        ("error", "error"),
+    ];
+    let details = labels
+        .into_iter()
+        .filter_map(|(status, label)| {
+            let count = counts.get(status).copied().unwrap_or_default();
+            let plural = if count != 1 && matches!(status, "http" | "error") {
+                "s"
+            } else {
+                ""
+            };
+            (count > 0 || status == "ok").then(|| format!("{count} {label}{plural}"))
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let unit = if reports.len() == 1 {
+        "server"
+    } else {
+        "servers"
+    };
+    let summary = format!("Listed {} {unit} ({details}).", reports.len());
+    if reports.iter().any(ServerReport::is_failure) {
+        println!("{}", style.warning(&format!("! {summary}")));
+    } else {
+        println!("{}", style.success(&format!("✓ {summary}")));
+    }
+}
+
+fn format_duration(milliseconds: u64) -> String {
+    if milliseconds < 1_000 {
+        format!("{milliseconds}ms")
+    } else {
+        format!("{:.1}s", milliseconds as f64 / 1_000.0)
     }
 }
 
@@ -254,6 +357,14 @@ fn display_transport(server: &ConfiguredServer) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duration_format_switches_units_at_one_second() {
+        assert_eq!(format_duration(0), "0ms");
+        assert_eq!(format_duration(999), "999ms");
+        assert_eq!(format_duration(1_000), "1.0s");
+        assert_eq!(format_duration(12_300), "12.3s");
+    }
 
     #[test]
     fn human_transport_preserves_sse_without_changing_json_metadata() {

@@ -8,13 +8,17 @@ use crate::tool_arguments::value;
 
 #[path = "config_writer.rs"]
 pub(crate) mod write;
-use write::{WritePolicy, write_checked_mutation};
+use write::{WritePolicy, write_checked_mutation, write_planned_mutation};
 #[path = "config_commands_copy.rs"]
 mod copy;
 #[path = "config_doctor.rs"]
 mod doctor;
 #[path = "config_commands_input.rs"]
 mod input;
+#[path = "config_commands_plan.rs"]
+mod mutation;
+use mutation::AddPolicy;
+pub(crate) use mutation::EntryMutation;
 #[path = "config_output.rs"]
 mod output;
 pub(crate) use output::serialize;
@@ -201,12 +205,6 @@ pub(crate) struct AddOperation {
     policy: AddPolicy,
 }
 
-#[derive(Clone, Copy)]
-enum AddPolicy {
-    Regular,
-    Copy { replace: bool },
-}
-
 impl AddOperation {
     pub(crate) fn native(
         name: String,
@@ -235,11 +233,9 @@ pub(crate) async fn add(operation: AddOperation, root: Option<&std::path::Path>)
         dry_run,
         policy,
     } = operation;
-    let copying = matches!(policy, AddPolicy::Copy { .. });
-    let replace = matches!(policy, AddPolicy::Copy { replace: true });
     let destination = crate::config_paths::destination(destination, root)?;
-    if copying {
-        crate::server_config::validate_document(&json!({"mcpServers":{&name:&entry}}))?;
+    if let AddPolicy::Copy { .. } = policy {
+        crate::server_config::validate_new_entries(&json!({"mcpServers":{&name:&entry}}))?;
     } else {
         let validation = crate::server_config::parse_document(
             &destination,
@@ -256,60 +252,23 @@ pub(crate) async fn add(operation: AddOperation, root: Option<&std::path::Path>)
             return Ok(());
         }
     }
+    let mutation = EntryMutation::new(serde_json::Map::from_iter([(name.clone(), entry)]), policy);
     if dry_run {
         let mut document = write::read_document(&destination)?;
-        insert_entry(&mut document, &name, &entry, true, replace, &destination)?;
+        mutation.apply(&mut document, &destination)?;
         crate::server_config::validate_document(&document)?;
         println!("Would add '{name}' to {}", destination.display());
         return Ok(());
     }
     let source = destination.clone();
-    let prior_name = name.clone();
-    let changed = entry.clone();
-    write_checked_mutation(
+    write_planned_mutation(
         &destination,
-        if copying {
-            WritePolicy::PreserveUnchanged
-        } else {
-            WritePolicy::Replace
-        },
-        |document| insert_entry(document, &name, &entry, copying, replace, &destination),
-        move |document| async move {
-            if !copying
-                || document
-                    .get("mcpServers")
-                    .and_then(|servers| servers.get(&prior_name))
-                    .is_some_and(|previous| previous != &changed)
-            {
-                retire_previous(&source, &document, &prior_name).await?;
-            }
-            Ok(())
-        },
+        mutation.write_policy(),
+        |document| mutation.apply(document, &destination),
+        move |_, retirements| async move { retirements.retire(&source).await },
     )
     .await?;
     println!("Added '{name}' to {}", destination.display());
-    Ok(())
-}
-
-fn insert_entry(
-    document: &mut Value,
-    name: &str,
-    entry: &Value,
-    copying: bool,
-    replace: bool,
-    destination: &std::path::Path,
-) -> Result<()> {
-    let servers = document
-        .get_mut("mcpServers")
-        .and_then(Value::as_object_mut)
-        .context("mcpServers must be an object")?;
-    if copying && servers.get(name).is_some_and(|previous| previous != entry) && !replace {
-        bail!(
-            "Server '{name}' already exists in {}; use --replace to overwrite it. No changes made.",
-            destination.display()
-        );
-    }
-    servers.insert(name.to_owned(), entry.clone());
     Ok(())
 }
 

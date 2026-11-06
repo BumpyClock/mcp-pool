@@ -5,20 +5,25 @@ pub(super) async fn route_server_request(
     line: &str,
     value: &Value,
     server_id: &Value,
-    clients: &Mutex<HashMap<String, ClientSender>>,
-    last_active_client: &Mutex<Option<String>>,
-    client_capabilities: &Mutex<HashMap<String, ClientCapabilities>>,
-    request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
+    generation: &Generation,
 ) {
+    let Generation {
+        clients,
+        last_active_client,
+        client_capabilities,
+        request_tx,
+        diagnostics: log,
+        ..
+    } = generation;
     let method = value.get("method").and_then(Value::as_str).unwrap_or("?");
     if let Some(required) = required_capability(method) {
         let target = capable_client(clients, client_capabilities, last_active_client, required);
         if let Some(client_id) = target {
-            diagnostics::log(format!(
+            log.log(format!(
                 "pool_server_request_routed client_id={} method={}",
                 client_id, method
             ));
-            send_to_client(&client_id, line.to_string(), clients).await;
+            send_to_client(&client_id, line.to_string(), clients, log).await;
             return;
         }
 
@@ -27,11 +32,11 @@ pub(super) async fn route_server_request(
             -32001,
             &format!("no capable downstream client connected for {method}"),
         );
-        send_to_upstream(response, request_tx, method).await;
+        send_to_upstream(response, request_tx, method, log).await;
         return;
     }
 
-    diagnostics::log(format!("pool_server_request_fallback method={}", method));
+    log.log(format!("pool_server_request_fallback method={}", method));
     let last_active = last_active_client.lock().clone();
     let target = {
         let clients_guard = clients.lock();
@@ -42,17 +47,17 @@ pub(super) async fn route_server_request(
     };
 
     let Some(client_id) = target else {
-        diagnostics::log(format!(
+        log.log(format!(
             "pool_server_request_dropped bytes={} reason=no_clients",
             line.len()
         ));
         return;
     };
-    diagnostics::log(format!(
+    log.log(format!(
         "pool_server_request_routed client_id={}",
         client_id
     ));
-    send_to_client(&client_id, line.to_string(), clients).await;
+    send_to_client(&client_id, line.to_string(), clients, log).await;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,17 +120,18 @@ async fn send_to_upstream(
     payload: String,
     request_tx: &Mutex<Option<mpsc::Sender<crate::upstream::UpstreamRequest>>>,
     method: &str,
+    log: &diagnostics::ServerLog,
 ) {
     let sender = request_tx.lock().clone();
     let Some(sender) = sender else {
-        diagnostics::log(format!(
+        log.log(format!(
             "pool_server_request_error_send_failed method={} reason=upstream_unavailable",
             method
         ));
         return;
     };
     if sender.send(payload.into()).await.is_err() {
-        diagnostics::log(format!(
+        log.log(format!(
             "pool_server_request_error_send_failed method={} reason=upstream_closed",
             method
         ));
@@ -137,44 +143,46 @@ pub(super) async fn send_to_client(
     client_id: &str,
     payload: String,
     clients: &Mutex<HashMap<String, ClientSender>>,
+    log: &diagnostics::ServerLog,
 ) {
     let sender = clients.lock().get(client_id).cloned();
     let Some(sender) = sender else {
-        diagnostics::log(format!("pool_response_orphaned client_id={}", client_id));
+        log.log(format!("pool_response_orphaned client_id={}", client_id));
         return;
     };
 
     let byte_len = payload.len();
     match sender.try_send(payload) {
-        Ok(()) => diagnostics::log(format!(
+        Ok(()) => log.log(format!(
             "pool_response_routed client_id={} bytes={}",
             client_id, byte_len
         )),
         Err(mpsc::error::TrySendError::Full(payload)) => {
             let blocked_since = Instant::now();
-            diagnostics::log(format!(
+            log.log(format!(
                 "pool_router_blocked client_id={} reason=client_channel_full",
                 client_id
             ));
             if sender.send(payload).await.is_ok() {
-                diagnostics::log(format!(
+                log.log(format!(
                     "pool_response_routed client_id={} bytes={} blocked_ms={}",
                     client_id,
                     byte_len,
                     blocked_since.elapsed().as_millis()
                 ));
             } else {
-                diagnostics::log(format!("pool_response_send_failed client_id={}", client_id));
+                log.log(format!("pool_response_send_failed client_id={}", client_id));
             }
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
-            diagnostics::log(format!("pool_response_send_failed client_id={}", client_id));
+            log.log(format!("pool_response_send_failed client_id={}", client_id));
         }
     }
 }
 pub(super) fn sweep_recipients(
     responses: Vec<(String, String)>,
     clients: &Mutex<HashMap<String, ClientSender>>,
+    log: &diagnostics::ServerLog,
 ) -> Vec<(String, String)> {
     let mut blocked = std::collections::HashSet::new();
     let mut deferred = Vec::new();
@@ -185,12 +193,12 @@ pub(super) fn sweep_recipients(
         }
         let sender = clients.lock().get(&client_id).cloned();
         let Some(sender) = sender else {
-            diagnostics::log(format!("pool_response_orphaned client_id={client_id}"));
+            log.log(format!("pool_response_orphaned client_id={client_id}"));
             continue;
         };
         let bytes = payload.len();
         match sender.try_send(payload) {
-            Ok(()) => diagnostics::log(format!(
+            Ok(()) => log.log(format!(
                 "pool_response_routed client_id={client_id} bytes={bytes}"
             )),
             Err(mpsc::error::TrySendError::Full(payload)) => {
@@ -198,31 +206,33 @@ pub(super) fn sweep_recipients(
                 deferred.push((client_id, payload));
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                diagnostics::log(format!("pool_response_send_failed client_id={client_id}"));
+                log.log(format!("pool_response_send_failed client_id={client_id}"));
             }
         }
     }
     deferred
 }
 
-pub(super) async fn broadcast_to_all(line: &str, clients: &Mutex<HashMap<String, ClientSender>>) {
+pub(super) async fn broadcast_to_all(
+    line: &str,
+    clients: &Mutex<HashMap<String, ClientSender>>,
+    log: &diagnostics::ServerLog,
+) {
     let senders: Vec<ClientSender> = clients.lock().values().cloned().collect();
     let mut deferred = Vec::new();
     for sender in &senders {
         match sender.try_send(line.to_string()) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(payload)) => deferred.push((sender, payload)),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                diagnostics::log("pool_broadcast_client_closed")
-            }
+            Err(mpsc::error::TrySendError::Closed(_)) => log.log("pool_broadcast_client_closed"),
         }
     }
     for (sender, payload) in deferred {
         if sender.send(payload).await.is_err() {
-            diagnostics::log("pool_broadcast_client_closed");
+            log.log("pool_broadcast_client_closed");
         }
     }
-    diagnostics::log(format!(
+    log.log(format!(
         "pool_response_broadcast bytes={} clients={}",
         line.len(),
         senders.len()

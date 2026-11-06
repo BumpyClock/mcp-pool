@@ -1,6 +1,7 @@
 use std::io;
 use std::time::Duration;
 
+use crate::upstream::SetupFailure;
 use tokio::process::{Child, Command};
 
 #[cfg(unix)]
@@ -13,30 +14,36 @@ mod platform;
 pub(crate) struct OwnedProcess {
     pub(crate) child: Child,
     ownership: platform::Ownership,
+    log: crate::diagnostics::ServerLog,
 }
 
 impl OwnedProcess {
-    pub(crate) async fn spawn(mut command: Command) -> io::Result<Self> {
-        let ownership = platform::Ownership::prepare(&mut command)?;
+    pub(crate) async fn spawn(
+        mut command: Command,
+        log: crate::diagnostics::ServerLog,
+    ) -> Result<Self, SetupFailure> {
+        let ownership = platform::Ownership::prepare(&mut command, &log)?;
         let mut child = command.kill_on_drop(true).spawn()?;
         match ownership.attach(&child) {
-            Ok(ownership) => Ok(Self { child, ownership }),
+            Ok(ownership) => Ok(Self {
+                child,
+                ownership,
+                log,
+            }),
             Err(error) => {
                 if let Err(kill_error) = child.start_kill() {
-                    crate::diagnostics::log(format!(
-                        "upstream_setup_kill_error error={kill_error}"
-                    ));
+                    log.log(format!("upstream_setup_kill_error error={kill_error}"));
                 }
                 match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                    Ok(Ok(_)) => Err(error),
-                    Ok(Err(wait_error)) => Err(io::Error::new(
-                        io::ErrorKind::ResourceBusy,
-                        format!("process setup failed: {error}; cleanup failed: {wait_error}"),
-                    )),
-                    Err(_) => Err(io::Error::new(
-                        io::ErrorKind::ResourceBusy,
+                    Ok(Ok(_)) => Err(error.into()),
+                    Ok(Err(wait_error)) => {
+                        Err(SetupFailure::RetirementUnverified(io::Error::other(
+                            format!("process setup failed: {error}; cleanup failed: {wait_error}"),
+                        )))
+                    }
+                    Err(_) => Err(SetupFailure::RetirementUnverified(io::Error::other(
                         format!("process setup failed: {error}; cleanup was not confirmed"),
-                    )),
+                    ))),
                 }
             }
         }
@@ -60,7 +67,7 @@ impl OwnedProcess {
             if !cfg!(target_os = "macos") || error.kind() != io::ErrorKind::PermissionDenied {
                 return Err(error);
             }
-            crate::diagnostics::log(format!(
+            self.log.log(format!(
                 "upstream_group_signal_denied awaiting_verified_retirement error={error}"
             ));
         }

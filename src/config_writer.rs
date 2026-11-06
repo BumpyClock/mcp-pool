@@ -57,6 +57,19 @@ where
     F: FnOnce(Value) -> Before,
     Before: std::future::Future<Output = Result<()>>,
 {
+    write_planned_mutation(path, policy, mutate, |previous, ()| before(previous)).await
+}
+
+pub(crate) async fn write_planned_mutation<Mutation, F, Before>(
+    path: &Path,
+    policy: WritePolicy,
+    mutate: impl FnOnce(&mut Value) -> Result<Mutation>,
+    before: F,
+) -> Result<()>
+where
+    F: FnOnce(Value, Mutation) -> Before,
+    Before: std::future::Future<Output = Result<()>>,
+{
     let directory = path.parent().context("Config path has no directory")?;
     crate::oauth::files::create_directory(directory)?;
     if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
@@ -101,7 +114,7 @@ where
         json!({"mcpServers":{}})
     };
     let previous = document.clone();
-    mutate(&mut document)?;
+    let mutation = mutate(&mut document)?;
     crate::server_config::validate_document(&document)?;
     let staging_guard = if matches!(policy, WritePolicy::PreserveUnchanged)
         && original.is_some()
@@ -128,7 +141,7 @@ where
     };
     #[cfg(windows)]
     drop(permissions);
-    before(previous).await?;
+    before(previous, mutation).await?;
     let outcome = (|| {
         let current = match std::fs::read_to_string(path) {
             Ok(contents) => Some(contents),

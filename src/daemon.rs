@@ -30,12 +30,12 @@ pub async fn serve() -> anyhow::Result<()> {
     }
 
     let pool = Arc::new(Pool::new());
-    let discovered = pool.discover_existing_sockets();
+    let discovered = pool.discover_existing_sockets()?;
     diagnostics::log(format!(
         "daemon starting; discovered {discovered} existing socket(s)"
     ));
 
-    let control_path = control_socket_path();
+    let control_path = control_socket_path()?;
 
     let listener = transport::bind(&control_path)?;
     diagnostics::log(format!(

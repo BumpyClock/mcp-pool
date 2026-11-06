@@ -9,16 +9,14 @@ use tokio::process::{Child, Command};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_mcp-cli");
 
-#[path = "../common/fixture_home.rs"]
-mod fixture_home;
+use crate::fixture_lifecycle::{FixtureLifecycle, fixture_environment, fixture_home};
 
 pub struct Fixture {
     pub home: PathBuf,
     pub config: PathBuf,
     pub working_directory: PathBuf,
     pub counter: PathBuf,
-    daemon: Child,
-    finished: bool,
+    lifecycle: FixtureLifecycle,
 }
 
 impl Fixture {
@@ -48,51 +46,24 @@ impl Fixture {
                 "env":environment, "cwd":working_directory}
         }});
         tokio::fs::write(&config, contents.to_string()).await?;
-        let daemon = isolated_command(&home, &config)
-            .args(["pool", "serve"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let fixture = Self {
+        let mut lifecycle = FixtureLifecycle::new(
+            std::path::Path::new(BINARY),
+            &home,
+            &home,
+            &home,
+            Some(&config),
+        );
+        let mut command = isolated_std_command(&home, &config);
+        command.args(["pool", "serve"]);
+        lifecycle.start(command)?;
+        lifecycle.ready(Duration::from_secs(10)).await?;
+        Ok(Self {
             home,
             config,
             working_directory,
             counter,
-            daemon,
-            finished: false,
-        };
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if fixture.control_is_live().await {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+            lifecycle,
         })
-        .await
-        .map_err(io::Error::other)?;
-        Ok(fixture)
-    }
-
-    async fn control_is_live(&self) -> bool {
-        #[cfg(unix)]
-        {
-            tokio::net::UnixStream::connect(self.home.join("state").join("mcp-cli-control.sock"))
-                .await
-                .is_ok()
-        }
-        #[cfg(windows)]
-        {
-            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for byte in self.home.to_string_lossy().as_bytes() {
-                hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-            tokio::net::windows::named_pipe::ClientOptions::new()
-                .open(format!(r"\\.\pipe\mcp-cli-{:08x}-control", hash as u32))
-                .is_ok()
-        }
     }
 
     pub fn spawn(&self, arguments: &[&str]) -> io::Result<Child> {
@@ -228,47 +199,20 @@ impl Fixture {
         proxy.finish().await
     }
 
-    pub async fn finish(mut self) -> io::Result<()> {
-        self.success(&["shutdown"]).await?;
-        let status = tokio::time::timeout(Duration::from_secs(5), self.daemon.wait())
-            .await
-            .map_err(io::Error::other)??;
-        assert!(status.success(), "{status}");
-        self.finished = true;
-        tokio::fs::remove_dir_all(&self.home).await
-    }
-}
-
-impl Drop for Fixture {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "Emergency cleanup must finish synchronously; normal cleanup uses async finish"
-    )]
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        match std::process::Command::new(BINARY)
-            .args(["daemon", "stop"])
-            .env("MCP_CLI_HOME", &self.home)
-            .env("MCP_CLI_CONFIG", &self.config)
-            .output()
-        {
-            Ok(output) if output.status.success() => {}
-            Ok(output) => eprintln!("fixture cleanup shutdown failed: {output:?}"),
-            Err(error) => eprintln!("fixture cleanup shutdown failed: {error}"),
-        }
-        if let Err(error) = std::fs::remove_dir_all(&self.home) {
-            eprintln!(
-                "fixture cleanup could not remove {}: {error}",
-                self.home.display()
-            );
-        }
+    pub async fn finish(self) -> io::Result<()> {
+        self.lifecycle.finish().await
     }
 }
 
 pub(super) fn isolated_command(home: &std::path::Path, config: &std::path::Path) -> Command {
-    let mut command = Command::new(BINARY);
+    let mut command = Command::from(isolated_std_command(home, config));
+    command.kill_on_drop(true);
+    command
+}
+
+fn isolated_std_command(home: &std::path::Path, config: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new(BINARY);
+    fixture_environment::isolate(&mut command);
     command
         .env("MCP_CLI_HOME", home)
         .env("MCP_CLI_CONFIG", config)
@@ -288,9 +232,7 @@ pub(super) fn isolated_command(home: &std::path::Path, config: &std::path::Path)
         .env_remove("MCPORTER_DAEMON_CHILD")
         .env_remove("MCPORTER_DAEMON_LOG")
         .env_remove("MCPORTER_DAEMON_LOG_PATH")
-        .env_remove("MCPORTER_DAEMON_LOG_SERVERS")
-        .env_remove("MCP_CLI_CREDENTIALS_READ_ONLY")
-        .kill_on_drop(true);
+        .env_remove("MCPORTER_DAEMON_LOG_SERVERS");
     command
 }
 

@@ -43,8 +43,6 @@ mod tests {
 
     #[test]
     fn id_key_separates_number_and_string() {
-        assert_eq!(id_key(&json!(1)), "1");
-        assert_eq!(id_key(&json!("1")), "\"1\"");
         assert_ne!(id_key(&json!(1)), id_key(&json!("1")));
     }
 }

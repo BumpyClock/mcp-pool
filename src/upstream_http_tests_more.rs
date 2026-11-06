@@ -352,7 +352,7 @@ async fn oversized_json_response_is_bounded_and_correlated() -> TestResult {
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await?;
         incoming(&mut stream).await?;
-        let body = " ".repeat(sse_parser::FRAME_LIMIT + 1);
+        let body = " ".repeat(16 * 1024 * 1024 + 1);
         let result = reply(
             &mut stream,
             200,

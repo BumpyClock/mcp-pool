@@ -9,8 +9,13 @@ use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+use crate::diagnostics::ServerLog;
+use crate::mcp_protocol::{FailureKind, TransportFailure};
 use crate::upstream::UpstreamHandle;
 
+#[path = "upstream_http_exchange.rs"]
+mod exchange;
+use exchange::execute;
 #[path = "upstream_http_legacy.rs"]
 mod legacy;
 #[path = "upstream_http_options.rs"]
@@ -18,7 +23,7 @@ mod options;
 use options::Options;
 #[path = "upstream_http_request.rs"]
 mod request;
-use request::Request;
+use request::{ExchangeMode, Negotiation, Request};
 #[path = "upstream_http_response.rs"]
 mod response;
 use response::deliver;
@@ -41,6 +46,9 @@ mod protocol_tests;
 mod retire;
 #[path = "upstream_http_runtime.rs"]
 mod runtime;
+#[cfg(test)]
+#[path = "upstream_http_size_tests.rs"]
+mod size_tests;
 #[path = "upstream_http_sse.rs"]
 mod sse_parser;
 #[cfg(test)]
@@ -62,11 +70,58 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 const READ_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_CONCURRENT_REQUESTS: usize = 32;
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) fn configured_request_timeout(timeout_ms: Option<u64>) -> Duration {
     timeout_ms
         .map(Duration::from_millis)
         .unwrap_or(REQUEST_TIMEOUT)
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(super) struct HttpFailure {
+    pub(super) metadata: TransportFailure,
+    message: String,
+}
+
+impl HttpFailure {
+    pub(super) fn new(kind: FailureKind, message: impl Into<String>) -> Self {
+        Self {
+            metadata: TransportFailure {
+                kind,
+                status_code: None,
+            },
+            message: message.into(),
+        }
+    }
+
+    pub(super) fn status(status: u16, message: impl Into<String>) -> Self {
+        let kind = if matches!(status, 401 | 403) {
+            FailureKind::Auth
+        } else {
+            FailureKind::Http
+        };
+        Self {
+            metadata: TransportFailure {
+                kind,
+                status_code: Some(status),
+            },
+            message: message.into(),
+        }
+    }
+}
+
+impl From<&str> for HttpFailure {
+    fn from(message: &str) -> Self {
+        Self::new(FailureKind::Error, message)
+    }
+}
+
+impl From<String> for HttpFailure {
+    fn from(message: String) -> Self {
+        Self::new(FailureKind::Error, message)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -92,7 +147,16 @@ pub async fn spawn(
     sse: bool,
     response_tx: mpsc::Sender<String>,
 ) -> io::Result<UpstreamHandle> {
-    spawn_configured(url, sse, BTreeMap::new(), None, None, response_tx).await
+    spawn_configured(
+        url,
+        sse,
+        BTreeMap::new(),
+        None,
+        None,
+        response_tx,
+        ServerLog::default(),
+    )
+    .await
 }
 
 /// Private caller deadlines include authorization refresh; shared requests retain the configured floor.
@@ -104,8 +168,9 @@ pub async fn spawn_configured(
     timeout_ms: Option<u64>,
     auth: Option<crate::oauth::HttpAuth>,
     response_tx: mpsc::Sender<String>,
+    log: ServerLog,
 ) -> io::Result<UpstreamHandle> {
-    let options = Options::new(headers, timeout_ms, auth)?;
+    let options = Options::new(headers, timeout_ms, auth, log)?;
     let url = reqwest::Url::parse(&url)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid HTTP upstream URL"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -133,6 +198,7 @@ pub async fn spawn_configured(
     let (request_tx, request_rx) = mpsc::channel(1024);
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (completion_tx, completion) = watch::channel(None);
+    let log = options.log.clone();
     tokio::spawn(async move {
         let mut workers = JoinSet::new();
         let mut fallback = None;
@@ -162,7 +228,7 @@ pub async fn spawn_configured(
             Ok(())
         };
         if result.is_err() {
-            crate::diagnostics::log("upstream_http_transport_stopped");
+            options.log.log("upstream_http_transport_stopped");
         }
         if deliberate {
             retire::terminate_session(&client, &url, &session, &options).await;
@@ -170,239 +236,21 @@ pub async fn spawn_configured(
         drop(client);
         completion_tx.send_replace(Some(retirement));
     });
-    Ok(UpstreamHandle::new(request_tx, shutdown_tx, completion))
+    Ok(UpstreamHandle::new(request_tx, shutdown_tx, completion).with_log(log))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn execute(
-    client: &reqwest::Client,
-    url: &reqwest::Url,
-    mut request: Request,
-    response_tx: &mpsc::Sender<String>,
-    session: &Arc<Mutex<Session>>,
-    mut established: Option<oneshot::Sender<Option<Request>>>,
-    options: &Options,
-    allow_fallback: bool,
-) {
-    let mut answered = false;
-    let budget = request.budget.clone();
-    let result = budget
-        .wait(post(
-            client,
-            url,
-            &mut request,
-            response_tx,
-            session,
-            &mut answered,
-            &mut established,
-            options,
-            allow_fallback,
-        ))
-        .await
-        .unwrap_or_else(|_| Err("HTTP request deadline exceeded; request was not replayed".into()));
-    if let Ok(PostOutcome::DiscoveryUnsupported(status)) = result {
-        if let Some(identifier) = request.identifier {
-            let payload = serde_json::json!({
-                "jsonrpc":"2.0",
-                "id":identifier,
-                "error":{
-                    "code":crate::mcp_protocol::DISCOVERY_UNSUPPORTED,
-                    "message":"HTTP endpoint does not support modern MCP discovery",
-                    "data":{"httpStatus":status}
-                }
-            });
-            if response_tx.send(payload.to_string()).await.is_err() {
-                crate::diagnostics::log("upstream_http_response_receiver_closed");
-            }
-        }
-    } else if matches!(result, Ok(PostOutcome::LegacyMismatch)) {
-        if let Some(established) = established.take()
-            && established.send(Some(request)).is_err()
-        {
-            crate::diagnostics::log("upstream_http_fallback_waiter_closed");
-        }
-    } else if let Err(error) = result {
-        crate::diagnostics::log(format!("upstream_http_request_failed: {error}"));
-        if !answered {
-            send_error(response_tx, request.identifier.as_ref(), &error).await;
-        }
-    }
-    release_initialization(&mut established);
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn post(
-    client: &reqwest::Client,
-    url: &reqwest::Url,
-    request: &mut Request,
-    response_tx: &mpsc::Sender<String>,
-    session: &Arc<Mutex<Session>>,
-    answered: &mut bool,
+fn release_initialization(
     established: &mut Option<oneshot::Sender<Option<Request>>>,
-    options: &Options,
-    allow_fallback: bool,
-) -> Result<PostOutcome, String> {
-    let state = session.lock().await.clone();
-    let fresh = matches!(state, Session::Fresh);
-    let mut builder =
-        options
-            .authorize(client.post(url.clone()))
-            .await?
-            .headers(HeaderMap::from_iter([
-                (CONTENT_TYPE, HeaderValue::from_static("application/json")),
-                (
-                    ACCEPT,
-                    HeaderValue::from_static("application/json, text/event-stream"),
-                ),
-            ]));
-    match state {
-        Session::Expired => {
-            return Err(
-                "MCP HTTP session expired; restart the upstream before sending requests".into(),
-            );
-        }
-        Session::Ready {
-            identifier,
-            protocol,
-        } => {
-            if request.initialize {
-                return Err("MCP HTTP upstream is already initialized".into());
-            }
-            if (protocol == crate::mcp_protocol::MODERN_VERSION) != request.modern {
-                return Err("MCP request protocol does not match the shared upstream".into());
-            }
-            builder = builder.header("MCP-Protocol-Version", protocol);
-            if let Some(identifier) = identifier {
-                builder = builder.header("Mcp-Session-Id", identifier);
-            }
-        }
-        Session::Fresh => {}
-    }
-    if request.modern {
-        builder = builder.header("MCP-Protocol-Version", crate::mcp_protocol::MODERN_VERSION);
-        if let Some(method) = &request.method {
-            builder = builder.header("MCP-Method", method);
-        }
-        if let Some(name) = &request.name {
-            builder = builder.header("MCP-Name", name);
-        }
-    }
-    let body = if allow_fallback && fresh {
-        request.line.clone()
-    } else {
-        std::mem::take(&mut request.line)
-    };
-    let mut response = builder
-        .body(body)
-        .send()
-        .await
-        .map_err(|_| "HTTP request failed; request was not replayed")?;
-    let status = response.status();
-    if request.discover && fresh && matches!(status.as_u16(), 400 | 404 | 405 | 415) {
-        return Ok(PostOutcome::DiscoveryUnsupported(status.as_u16()));
-    }
-    if allow_fallback
-        && fresh
-        && matches!(
-            status,
-            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED
-        )
-    {
-        return Ok(PostOutcome::LegacyMismatch);
-    }
-    if status == reqwest::StatusCode::NOT_FOUND
-        && matches!(
-            &*session.lock().await,
-            Session::Ready {
-                identifier: Some(_),
-                ..
-            }
-        )
-    {
-        *session.lock().await = Session::Expired;
-        return Err("MCP HTTP session expired (HTTP 404); request was not replayed".into());
-    }
-    if !status.is_success() {
-        return Err(format!(
-            "HTTP upstream returned status {}; request was not replayed",
-            status.as_u16()
-        ));
-    }
-    if status == reqwest::StatusCode::ACCEPTED || status == reqwest::StatusCode::NO_CONTENT {
-        return if request.identifier.is_none() {
-            Ok(PostOutcome::Complete)
-        } else {
-            Err("HTTP upstream returned no JSON-RPC response".into())
-        };
-    }
-    let session_identifier = response.headers().get("Mcp-Session-Id").cloned();
-    match content_type(&response).as_str() {
-        "text/event-stream" => {
-            let mut decoder = sse_parser::Decoder::new();
-            while let Some(chunk) = request.read_chunk(&mut response, options).await? {
-                let feed = decoder.feed(&chunk);
-                for event in feed.events {
-                    if event.name.is_empty() || event.name == "message" {
-                        deliver(
-                            &event.data,
-                            request,
-                            session_identifier.clone(),
-                            session,
-                            response_tx,
-                            answered,
-                            established,
-                        )
-                        .await?;
-                    }
-                }
-                if let Some(error) = feed.error {
-                    return Err(error);
-                }
-            }
-            if request.identifier.is_some() && !*answered {
-                Err("HTTP SSE ended before the JSON-RPC response".into())
-            } else {
-                Ok(PostOutcome::Complete)
-            }
-        }
-        "application/json" => {
-            let mut body = Vec::new();
-            while let Some(chunk) = request.read_chunk(&mut response, options).await? {
-                if body.len() + chunk.len() > sse_parser::FRAME_LIMIT {
-                    return Err("HTTP JSON response exceeds size limit".into());
-                }
-                body.extend_from_slice(&chunk);
-            }
-            let body =
-                std::str::from_utf8(&body).map_err(|_| "HTTP response contains invalid UTF-8")?;
-            deliver(
-                body,
-                request,
-                session_identifier,
-                session,
-                response_tx,
-                answered,
-                established,
-            )
-            .await?;
-            if request.identifier.is_some() && !*answered {
-                return Err("HTTP response did not match the JSON-RPC request ID".into());
-            }
-            Ok(PostOutcome::Complete)
-        }
-        _ => Err("HTTP upstream returned an unsupported content type".into()),
-    }
-}
-
-fn release_initialization(established: &mut Option<oneshot::Sender<Option<Request>>>) {
+    log: &ServerLog,
+) {
     if let Some(established) = established.take()
         && established.send(None).is_err()
     {
-        crate::diagnostics::log("upstream_http_initialization_waiter_closed");
+        log.log("upstream_http_initialization_waiter_closed");
     }
 }
 
-fn parse_message(body: &str) -> Result<Value, String> {
+fn parse_message(body: &str) -> Result<Value, HttpFailure> {
     let value: Value =
         serde_json::from_str(body).map_err(|_| "HTTP upstream returned invalid JSON")?;
     if !value.is_object()
@@ -416,18 +264,23 @@ fn parse_message(body: &str) -> Result<Value, String> {
     Ok(value)
 }
 
-async fn send_error(response_tx: &mpsc::Sender<String>, identifier: Option<&Value>, error: &str) {
+async fn send_failure(
+    response_tx: &mpsc::Sender<String>,
+    identifier: Option<&Value>,
+    error: &HttpFailure,
+    log: &ServerLog,
+) {
     if let Some(identifier) = identifier {
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": identifier,
-            "error": {"code": -32000, "message": error}
+            "error": {"code": -32000, "message": error.to_string(), "data": error.metadata.data()}
         });
         if response_tx.send(payload.to_string()).await.is_err() {
-            crate::diagnostics::log("upstream_http_response_receiver_closed");
+            log.log("upstream_http_response_receiver_closed");
         }
     } else {
-        crate::diagnostics::log("upstream_http_notification_failed");
+        log.log("upstream_http_notification_failed");
     }
 }
 
@@ -445,22 +298,36 @@ fn content_type(response: &reqwest::Response) -> String {
 async fn read_chunk_with_timeout(
     response: &mut reqwest::Response,
     deadline: Duration,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Vec<u8>>, HttpFailure> {
     timeout(deadline, response.chunk())
         .await
-        .map_err(|_| "HTTP response read deadline exceeded")?
+        .map_err(|_| {
+            HttpFailure::new(FailureKind::Timeout, "HTTP response read deadline exceeded")
+        })?
         .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
-        .map_err(|_| "HTTP response read failed; request was not replayed".into())
+        .map_err(|_| {
+            HttpFailure::new(
+                FailureKind::Offline,
+                "HTTP response read failed; request was not replayed",
+            )
+        })
 }
 
 async fn read_chunk_with_deadline(
     response: &mut reqwest::Response,
     deadline: &crate::request_deadline::SharedDeadline,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Vec<u8>>, HttpFailure> {
     deadline
         .wait(response.chunk())
         .await
-        .map_err(|_| "HTTP response read deadline exceeded")?
+        .map_err(|_| {
+            HttpFailure::new(FailureKind::Timeout, "HTTP response read deadline exceeded")
+        })?
         .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
-        .map_err(|_| "HTTP response read failed; request was not replayed".into())
+        .map_err(|_| {
+            HttpFailure::new(
+                FailureKind::Offline,
+                "HTTP response read failed; request was not replayed",
+            )
+        })
 }

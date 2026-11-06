@@ -1,3 +1,6 @@
+#[path = "common/fixture_lifecycle.rs"]
+mod fixture_lifecycle;
+
 use std::io;
 
 use serde_json::{Value, json};
@@ -446,14 +449,20 @@ mod synthetic {
                     }
                 }
                 *listed = true;
+                let catalog = match std::env::var("MCP_CLI_SYNTHETIC_CATALOG") {
+                    Ok(catalog) => {
+                        serde_json::from_str::<Value>(&catalog).map_err(io::Error::other)?
+                    }
+                    Err(_) => json!(names.iter().map(|name| tool(name)).collect::<Vec<_>>()),
+                };
                 json!({"resultType":"complete","ttlMs":if modern_once {0} else {60_000},
-                    "tools":names.iter().map(|name| tool(name)).collect::<Vec<_>>()})
+                    "tools":catalog})
             }
             "tools/call" => {
                 record("tools/call")?;
                 json!({
                     "content":[{"type":"text","text":"synthetic call"}],
-                    "structuredContent":{"called":request.pointer("/params/name")}
+                    "structuredContent":{"called":request.pointer("/params/name"), "arguments":request.pointer("/params/arguments")}
                 })
             }
             _ => {

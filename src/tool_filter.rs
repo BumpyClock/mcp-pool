@@ -1,7 +1,11 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Result, bail};
 use serde_json::Value;
+
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub(crate) struct ToolSelectionError(pub(crate) String);
 
 #[derive(Clone, Default)]
 pub(crate) struct ToolFilter {
@@ -48,3 +52,16 @@ fn parse_names(
     }
     Ok(Some(names))
 }
+
+pub(crate) fn normalize_catalog(tools: &mut Vec<Value>) {
+    let mut seen = HashSet::new();
+    tools.retain(|tool| {
+        tool.get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.is_empty() && seen.insert(name.to_owned()))
+    });
+}
+
+#[cfg(test)]
+#[path = "tool_filter_tests.rs"]
+mod tests;

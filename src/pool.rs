@@ -1,4 +1,4 @@
-#[cfg(any(unix, test))]
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 #[cfg(any(unix, test))]
@@ -13,8 +13,12 @@ use crate::socket_proxy::SocketProxy;
 use crate::types::PoolStatusResponse;
 use crate::upstream::UpstreamSpec;
 
+#[path = "pool_endpoint.rs"]
+mod endpoint;
+use endpoint::Endpoint;
+
 pub struct Pool {
-    proxies: RwLock<HashMap<String, Arc<SocketProxy>>>,
+    proxies: RwLock<HashMap<String, Endpoint>>,
     operations: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     shutdown_gate: tokio::sync::RwLock<()>,
     shutting_down: AtomicBool,
@@ -75,12 +79,13 @@ impl Pool {
         }
         let proxy = Arc::new(SocketProxy::new(
             name.to_string(),
-            crate::config::server_socket_path(name),
+            crate::config::server_socket_path(name)?,
             spec,
-            true,
             configuration_entry,
         ));
-        self.proxies.write().insert(name.to_string(), proxy.clone());
+        self.proxies
+            .write()
+            .insert(name.to_string(), Endpoint::Owned(proxy.clone()));
         if self.shutting_down.load(Ordering::SeqCst) {
             self.proxies.write().remove(name);
             return Err(std::io::Error::other("pool is shutting down"));
@@ -149,9 +154,8 @@ impl Pool {
                     self.proxies.write().remove(&name);
                 }
                 Err(error) => {
-                    crate::diagnostics::log(format!(
-                        "pool_shutdown_failed name={name} error={error}"
-                    ));
+                    crate::diagnostics::ServerLog::for_runtime(&name)
+                        .log(format!("pool_shutdown_failed error={error}"));
                     failure = Some(error);
                 }
             }
@@ -168,73 +172,42 @@ impl Pool {
     /// Registers live Unix sockets without taking upstream ownership.
     /// Windows named pipes cannot be enumerated.
     #[cfg(unix)]
-    pub fn discover_existing_sockets(&self) -> usize {
-        let run_dir = match crate::config::run_dir() {
-            Ok(dir) => dir,
-            Err(_) => return 0,
-        };
+    pub fn discover_existing_sockets(&self) -> std::io::Result<usize> {
+        self.discover_sockets_in(&crate::config::run_dir()?)
+    }
 
-        let entries = match std::fs::read_dir(&run_dir) {
+    #[cfg(unix)]
+    fn discover_sockets_in(&self, directory: &Path) -> std::io::Result<usize> {
+        let entries = match std::fs::read_dir(directory) {
             Ok(entries) => entries,
-            Err(_) => return 0,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
         };
-
         let mut discovered = 0;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = socket_name_from_path(&path) else {
+        for entry in entries {
+            let path = entry?.path();
+            let Some(name) = crate::config::server_name_from_socket_path(&path) else {
                 continue;
             };
-
-            if self.proxies.read().contains_key(&name) {
+            if self.proxies.read().contains_key(&name) || !socket_alive(&path) {
                 continue;
             }
-
-            if !socket_alive(&path) {
-                continue;
-            }
-
-            let placeholder = UpstreamSpec::Stdio {
-                command: String::new(),
-                args: Vec::new(),
-                env: BTreeMap::new(),
-                cwd: None,
-                clear_env: false,
-            };
-            let proxy = Arc::new(SocketProxy::new(
-                name.clone(),
-                path.clone(),
-                placeholder,
-                false,
-                None,
-            ));
-            self.proxies.write().insert(name, proxy);
+            self.proxies.write().insert(name, Endpoint::External(path));
             discovered += 1;
         }
-
-        discovered
+        Ok(discovered)
     }
 
     #[cfg(windows)]
-    pub fn discover_existing_sockets(&self) -> usize {
-        0
+    pub fn discover_existing_sockets(&self) -> std::io::Result<usize> {
+        Ok(0)
     }
 
     pub fn get_status(&self) -> PoolStatusResponse {
         let proxies = self.proxies.read();
         let servers: Vec<_> = proxies
             .iter()
-            .map(|(name, proxy)| crate::types::McpServerStatus {
-                name: name.clone(),
-                status: proxy.status(),
-                socket_path: proxy.socket_path().display().to_string(),
-                uptime_seconds: proxy.uptime_seconds(),
-                connection_count: proxy.connection_count(),
-                owned: proxy.is_owned(),
-                transport: proxy.transport().to_string(),
-                readiness: proxy.readiness(),
-                configuration_entry: proxy.configuration_entry().cloned(),
-            })
+            .map(|(name, endpoint)| endpoint.wire_status(name))
             .collect();
 
         PoolStatusResponse {
@@ -245,7 +218,9 @@ impl Pool {
 
     #[cfg(test)]
     pub(crate) fn insert_test_proxy(&self, name: &str, proxy: Arc<SocketProxy>) {
-        self.proxies.write().insert(name.to_string(), proxy);
+        self.proxies
+            .write()
+            .insert(name.to_string(), Endpoint::Owned(proxy));
     }
 }
 
@@ -280,16 +255,6 @@ pub fn socket_alive(path: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(path).is_ok()
 }
 
-#[cfg(any(unix, test))]
-pub fn socket_name_from_path(path: &Path) -> Option<String> {
-    let file_name = path.file_name()?.to_string_lossy();
-    file_name
-        .strip_prefix("mcp-cli-")?
-        .strip_suffix(".sock")
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-}
-
 #[cfg(test)]
 mod options_tests {
     use super::*;
@@ -306,7 +271,7 @@ mod options_tests {
             ("mcp-cli-echo.sock.backup", None),
         ] {
             assert_eq!(
-                socket_name_from_path(Path::new(filename)).as_deref(),
+                crate::config::server_name_from_socket_path(Path::new(filename)).as_deref(),
                 expected,
                 "{filename}"
             );
@@ -314,21 +279,21 @@ mod options_tests {
     }
 
     #[tokio::test]
-    async fn missing_and_borrowed_lifecycle_operations_remain_noops() -> std::io::Result<()> {
+    async fn missing_lifecycle_operations_remain_noops() -> std::io::Result<()> {
         let pool = Pool::new();
         pool.stop_server("missing").await?;
         pool.restart("missing").await?;
         assert_eq!(pool.get_status().server_count, 0);
+        Ok(())
+    }
 
-        pool.insert_test_proxy(
-            "borrowed",
-            Arc::new(SocketProxy::new(
-                "borrowed".into(),
-                "borrowed-endpoint".into(),
-                upstream_spec_from_def(&ServerDef::default()),
-                false,
-                None,
-            )),
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn borrowed_lifecycle_operations_remain_noops() -> std::io::Result<()> {
+        let pool = Pool::new();
+        pool.proxies.write().insert(
+            "borrowed".into(),
+            Endpoint::External("borrowed-endpoint".into()),
         );
         pool.restart("borrowed").await?;
         let status = pool.get_status();
@@ -359,7 +324,6 @@ mod options_tests {
                 "resolved-runtime".into(),
                 "unused-fixture-endpoint".into(),
                 upstream_spec_from_def(&ServerDef::default()),
-                true,
                 Some(entry.clone()),
             )),
         );
@@ -394,7 +358,6 @@ mod options_tests {
                 "resolved-runtime".into(),
                 "unused-fixture-endpoint".into(),
                 upstream_spec_from_def(&ServerDef::default()),
-                true,
                 Some(entry.clone()),
             )),
         );
@@ -419,6 +382,55 @@ mod options_tests {
                 .and_then(|server| server.configuration_entry.as_ref()),
             Some(&entry)
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn discovery_preserves_external_listener_ownership_through_lifecycle_operations()
+    -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!("mcpe-{}", std::process::id()));
+        std::fs::create_dir(&directory)?;
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))?;
+        let path = directory.join("mcp-cli-external.sock");
+        let listener = crate::transport::bind(&path)?;
+        let pool = Pool::new();
+        assert_eq!(pool.discover_sockets_in(&directory)?, 1);
+        assert_eq!(pool.discover_sockets_in(&directory)?, 0);
+        let status = pool.get_status();
+        let server = status
+            .servers
+            .first()
+            .ok_or_else(|| std::io::Error::other("missing external endpoint"))?;
+        assert!(!server.owned);
+        assert_eq!(server.transport, "stdio");
+        assert!(server.readiness.local_socket_bound);
+        assert!(!server.readiness.upstream_transport_ready);
+        assert!(server.configuration_entry.is_none());
+        pool.restart("external").await?;
+        pool.stop_server("external").await?;
+        assert_eq!(pool.get_status().server_count, 0);
+        assert!(socket_alive(&path));
+        assert_eq!(pool.discover_sockets_in(&directory)?, 1);
+        pool.shutdown().await?;
+        assert!(socket_alive(&path));
+        drop(listener);
+        std::fs::remove_file(path)?;
+        std::fs::remove_dir(directory)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_treats_only_a_missing_directory_as_empty() -> std::io::Result<()> {
+        let directory = std::env::temp_dir().join(format!("mcp-scan-{}", std::process::id()));
+        let pool = Pool::new();
+        assert_eq!(pool.discover_sockets_in(&directory)?, 0);
+        std::fs::write(&directory, b"not a directory")?;
+        let result = pool.discover_sockets_in(&directory);
+        std::fs::remove_file(directory)?;
+        assert!(result.is_err());
         Ok(())
     }
 

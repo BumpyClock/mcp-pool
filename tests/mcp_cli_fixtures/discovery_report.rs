@@ -18,7 +18,10 @@ impl Placeholders {
         for (actual, placeholder) in &self.replacements {
             text = text.replace(actual.as_str(), placeholder);
         }
-        durations(&text)
+        durations(&text).replace(
+            &format!("mcp-cli {} - Listing", env!("CARGO_PKG_VERSION")),
+            "mcp-cli <version> - Listing",
+        )
     }
 
     fn json(&self, output: &Output) -> io::Result<String> {
@@ -58,28 +61,9 @@ impl Placeholders {
     }
 }
 
-fn durations(text: &str) -> String {
-    let mut normalized = String::with_capacity(text.len());
-    let mut digits = String::new();
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character.is_ascii_digit() {
-            digits.push(character);
-            continue;
-        }
-        if !digits.is_empty() {
-            if character == 'm' && characters.peek() == Some(&'s') {
-                normalized.push('N');
-            } else {
-                normalized.push_str(&digits);
-            }
-            digits.clear();
-        }
-        normalized.push(character);
-    }
-    normalized.push_str(&digits);
-    normalized
-}
+#[path = "discovery_duration.rs"]
+mod duration;
+use duration::durations;
 
 async fn unauthorized_endpoint() -> io::Result<(String, tokio::task::JoinHandle<io::Result<()>>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -181,10 +165,10 @@ const LIST_JSON: &str = r#"{
         "kind": "local",
         "path": "<config>"
       },
-      "error": "MCP protocol discovery failed; no upstream or operation was replayed. For a legacy server that cannot handle discovery, set protocolVersion to legacy: JSON-RPC error -32000: HTTP upstream returned status 401; request was not replayed",
+      "error": "HTTP 401 Unauthorized. Check configured credentials. For OAuth, run `mcp-cli auth beta-auth`.",
       "issue": {
         "kind": "auth",
-        "rawMessage": "MCP protocol discovery failed; no upstream or operation was replayed. For a legacy server that cannot handle discovery, set protocolVersion to legacy: JSON-RPC error -32000: HTTP upstream returned status 401; request was not replayed",
+        "rawMessage": "MCP protocol discovery failed; no upstream or operation was replayed: JSON-RPC error -32000: HTTP upstream returned status 401; request was not replayed",
         "statusCode": 401
       },
       "authCommand": "mcp-cli auth beta-auth"
@@ -207,9 +191,11 @@ const LIST_JSON: &str = r#"{
   ]
 }"#;
 
-const LIST_TEXT: &str = "alpha (4 tools; Nms)
-beta-auth — MCP protocol discovery failed; no upstream or operation was replayed. For a legacy server that cannot handle discovery, set protocolVersion to legacy: JSON-RPC error -32000: HTTP upstream returned status 401; request was not replayed
-gamma-error — Server 'gamma-error' has invalid tool filters: A server cannot configure both allowedTools and blockedTools.
+const LIST_TEXT: &str = "mcp-cli <version> - Listing 3 servers
+- alpha (4 tools, Nms)
+- beta-auth (auth required - run 'mcp-cli auth beta-auth', Nms)
+- gamma-error (error - Server 'gamma-error' has invalid tool filters: A server cannot configure both allowedTools and blockedTools., Nms)
+! Listed 3 servers (1 healthy; 1 auth required; 1 error).
 ";
 
 const SERVER_JSON: &str = r#"{
@@ -328,7 +314,7 @@ const TOOL_SELECTION_JSON: &str = r#"{
   "era": "legacy",
   "error": "Unknown tool 'missing' on 'alpha'",
   "issue": {
-    "kind": "other",
+    "kind": "error",
     "rawMessage": "Unknown tool 'missing' on 'alpha'"
   },
   "tools": [],
@@ -347,8 +333,9 @@ const TOOL_SELECTION_TEXT: &str = "alpha
 alpha — Unknown tool 'missing' on 'alpha'
 ";
 
-const TOOL_SELECTION_STATUS_TEXT: &str = "alpha (0 tools; Nms)
-alpha — Unknown tool 'missing' on 'alpha'
+const TOOL_SELECTION_STATUS_TEXT: &str = "mcp-cli <version> - Listing 1 server
+- alpha (error - Unknown tool 'missing' on 'alpha', Nms)
+! Listed 1 server (0 healthy; 1 error).
 ";
 
 const DISCOVERY_FAILURE_JSON: &str = r#"{
@@ -484,6 +471,7 @@ async fn discovery_output_follows_name_order_when_completion_order_differs() -> 
     assert!(gate.try_exists()?, "beta never completed discovery");
     let lines: Vec<_> = String::from_utf8_lossy(&text.stdout)
         .lines()
+        .filter_map(|line| line.strip_prefix("- "))
         .map(|line| line.split(' ').next().unwrap_or_default().to_owned())
         .collect();
     assert_eq!(lines, ["alpha", "beta"]);

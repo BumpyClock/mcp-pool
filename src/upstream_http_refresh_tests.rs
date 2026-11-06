@@ -90,8 +90,16 @@ async fn refresh_stream_counts_toward_worker_limit_and_retires_with_calls() -> T
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     });
     let (responses, mut receiver) = mpsc::channel(64);
-    let mut handle =
-        spawn_configured(url, false, BTreeMap::new(), Some(15000), None, responses).await?;
+    let mut handle = spawn_configured(
+        url,
+        false,
+        BTreeMap::new(),
+        Some(15000),
+        None,
+        responses,
+        ServerLog::default(),
+    )
+    .await?;
     handle
         .request_tx
         .send(modern_request(1, "server/discover", json!({}))?)

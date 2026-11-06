@@ -122,10 +122,9 @@ async fn real_http_empty_id_error_fails_only_its_post_not_held_client() -> io::R
         }
         Ok::<(), io::Error>(())
     });
-    let identity = super::lifecycle_tests::proxy();
-    let proxy = Arc::new(SocketProxy::new(
+
+    let proxy = SocketProxy::fixture(
         "http-correlation".to_string(),
-        identity.socket_path(),
         UpstreamSpec::Http {
             url: format!("http://{address}/mcp"),
             sse: false,
@@ -133,9 +132,7 @@ async fn real_http_empty_id_error_fails_only_its_post_not_held_client() -> io::R
             timeout_ms: None,
             auth: None,
         },
-        true,
-        None,
-    ));
+    )?;
     proxy.start().await?;
     let mut first = BufReader::new(connect(&proxy).await?);
     let mut second = BufReader::new(connect(&proxy).await?);
@@ -164,14 +161,7 @@ async fn real_http_empty_id_error_fails_only_its_post_not_held_client() -> io::R
         .lock()
         .clone()
         .ok_or_else(|| io::Error::other("missing generation"))?;
-    assert_eq!(generation.request_map.lock().len(), 1);
-    assert!(
-        generation
-            .request_map
-            .lock()
-            .values()
-            .any(|pending| pending.original_id == json!("A"))
-    );
+    assert_eq!(generation.routes.pending_count(), 1);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), read(&mut first))
             .await
@@ -182,7 +172,7 @@ async fn real_http_empty_id_error_fails_only_its_post_not_held_client() -> io::R
         read(&mut first).await?,
         json!({"jsonrpc":"2.0","id":"A","result":{"owner":"A"}})
     );
-    assert!(generation.request_map.lock().is_empty());
+    assert_eq!(generation.routes.pending_count(), 0);
     assert!(
         tokio::time::timeout(Duration::from_millis(50), read(&mut second))
             .await
@@ -239,10 +229,8 @@ async fn real_http_backend_receives_one_initialize_from_two_concurrent_socket_cl
         Ok::<(), io::Error>(())
     });
 
-    let identity = super::lifecycle_tests::proxy();
-    let proxy = Arc::new(SocketProxy::new(
+    let proxy = SocketProxy::fixture(
         "real-http-initialize".to_string(),
-        identity.socket_path(),
         UpstreamSpec::Http {
             url: format!("http://{address}/mcp"),
             sse: false,
@@ -250,10 +238,7 @@ async fn real_http_backend_receives_one_initialize_from_two_concurrent_socket_cl
             timeout_ms: None,
             auth: None,
         },
-        true,
-        None,
-    ));
-    drop(identity);
+    )?;
     proxy.start().await?;
     let mut first = connect(&proxy).await?;
     let mut second = connect(&proxy).await?;
