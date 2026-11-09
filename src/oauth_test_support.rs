@@ -80,11 +80,16 @@ pub(super) struct Mock {
     pub registrations: Arc<AtomicUsize>,
     pub authorization: Arc<Mutex<Option<Url>>>,
     pub forms: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    auth_method: &'static str,
     task: tokio::task::JoinHandle<()>,
 }
 
 impl Mock {
     pub async fn new(reject_refresh: bool) -> Result<Self> {
+        Self::with_auth_method(reject_refresh, "none").await
+    }
+
+    pub async fn with_auth_method(reject_refresh: bool, auth_method: &'static str) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let origin = format!("http://{}", listener.local_addr()?);
         let token_requests = Arc::new(AtomicUsize::new(0));
@@ -134,19 +139,35 @@ impl Mock {
                             "/.well-known/oauth-protected-resource/mcp" => json!({
                                 "resource":format!("{origin}/mcp"),"authorization_servers":[origin],"scopes_supported":["synthetic:tools"]
                             }),
-                            "/.well-known/oauth-authorization-server" => metadata(&origin),
+                            "/.well-known/oauth-authorization-server" => metadata(&origin, auth_method),
                             "/register" => {
                                 registered.fetch_add(1, Ordering::SeqCst);
                                 let mut value: Value = serde_json::from_slice(body)?;
-                                if let Some(object) = value.as_object_mut() { object.insert("client_id".to_owned(), json!("synthetic-client")); }
-                                value
+                                if value.get("token_endpoint_auth_method").and_then(Value::as_str) != Some(auth_method) {
+                                    status = 400;
+                                    json!({"error":"invalid_client_metadata"})
+                                } else {
+                                    if let Some(object) = value.as_object_mut() {
+                                        object.insert("client_id".to_owned(), json!("synthetic-client"));
+                                        if auth_method != "none" { object.insert("client_secret".to_owned(), json!("synthetic-secret")); }
+                                    }
+                                    value
+                                }
                             }
                             "/token" => {
                                 count.fetch_add(1, Ordering::SeqCst);
                                 let text = std::str::from_utf8(body)?;
                                 let form: BTreeMap<String, String> = Url::parse(&format!("http://127.0.0.1/?{text}"))?
                                     .query_pairs().map(|(key, value)| (key.into_owned(), value.into_owned())).collect();
-                                let mut accepted = form.get("client_id").is_some_and(|value| value == "synthetic-client")
+                                let client_matches = if auth_method == "client_secret_basic" {
+                                    let expected = base64::engine::general_purpose::STANDARD.encode("synthetic-client:synthetic-secret");
+                                    header.lines().filter_map(|line| line.split_once(':')).any(|(name, value)| name.eq_ignore_ascii_case("authorization") && value.trim() == format!("Basic {expected}"))
+                                        && !form.contains_key("client_secret")
+                                } else {
+                                    form.get("client_id").is_some_and(|value| value == "synthetic-client")
+                                        && (auth_method == "none" || form.get("client_secret").is_some_and(|value| value == "synthetic-secret"))
+                                };
+                                let mut accepted = client_matches
                                     && form.get("resource").is_some_and(|value| value == &format!("{origin}/mcp"));
                                 if form.get("grant_type").is_some_and(|value| value == "authorization_code") {
                                     let verifier = form.get("code_verifier").cloned().unwrap_or_default();
@@ -183,6 +204,7 @@ impl Mock {
             registrations,
             authorization,
             forms,
+            auth_method,
             task,
         })
     }
@@ -191,7 +213,7 @@ impl Mock {
         json!({
             "authorizationServerUrl":self.origin,
             "resourceMetadata":{"resource":format!("{}/mcp",self.origin),"authorization_servers":[self.origin]},
-            "authorizationServerMetadata":metadata(&self.origin)
+            "authorizationServerMetadata":metadata(&self.origin, self.auth_method)
         })
     }
 }
@@ -202,11 +224,11 @@ impl Drop for Mock {
     }
 }
 
-fn metadata(origin: &str) -> Value {
+fn metadata(origin: &str, auth_method: &str) -> Value {
     json!({
         "issuer":origin,"authorization_endpoint":format!("{origin}/authorize"),
         "token_endpoint":format!("{origin}/token"),"registration_endpoint":format!("{origin}/register"),
-        "code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],
+        "code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":[auth_method],
         "authorization_response_iss_parameter_supported":true
     })
 }

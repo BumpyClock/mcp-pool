@@ -33,6 +33,9 @@ mod prepare_tests;
 mod protocol;
 #[path = "oauth_reconcile.rs"]
 mod reconcile;
+#[cfg(test)]
+#[path = "oauth_registration_tests.rs"]
+mod registration_tests;
 #[path = "oauth_stdio.rs"]
 mod stdio;
 #[path = "oauth_store.rs"]

@@ -555,7 +555,12 @@ callback. `--no-browser` displays the URL and still waits for that callback;
 it does not replace authorization with a token-printing operation.
 The issuer must advertise PKCE S256 support; otherwise authorization fails.
 Existing registered client information can be reused. A provider
-without dynamic client registration needs a legitimate configured
+with dynamic registration uses an advertised client authentication method,
+preferring `none`, then `client_secret_basic`, then `client_secret_post`.
+Absent an advertised method list, registration uses `client_secret_basic`.
+`oauthTokenEndpointAuthMethod` overrides this selection. Client secrets issued
+by registration are retained for code exchange and refresh.
+A provider without dynamic client registration needs a legitimate configured
 `oauthClientId` or a supported HTTPS client metadata document. Unsupported
 signed client-authentication methods fail explicitly. This does not provide
 credentials for a provider or bypass its consent and registration requirements.

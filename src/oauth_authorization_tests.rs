@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::test_support::{Fixture, Mock};
 use super::{AuthOptions, HttpAuth, authorization_header, context, files, flow, store};
 
-async fn complete(fixture: &Fixture, mock: &Mock) -> Result<Value> {
+pub(super) async fn complete(fixture: &Fixture, mock: &Mock) -> Result<Value> {
     let authorization = mock.authorization.clone();
     let issuer = mock.origin.clone();
     flow::authorize_with_observer(

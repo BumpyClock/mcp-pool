@@ -224,6 +224,40 @@ pub(super) fn validate_discovery(authentication: &HttpAuth, state: &Value) -> Re
     Ok(())
 }
 
+pub(super) fn registration_auth_method<'a>(
+    authentication: &'a HttpAuth,
+    metadata: &Value,
+) -> Result<&'a str> {
+    let methods = metadata
+        .get("token_endpoint_auth_methods_supported")
+        .and_then(Value::as_array);
+    let supported = |method: &str| {
+        methods.map_or(method == "client_secret_basic", |methods| {
+            methods.iter().any(|value| value.as_str() == Some(method))
+        })
+    };
+    if let Some(method) = authentication.token_auth_method.as_deref() {
+        if !matches!(
+            method,
+            "none" | "client_secret_basic" | "client_secret_post"
+        ) {
+            bail!(
+                "OAuth client authentication requires unsupported signing method; use a supported configured client"
+            );
+        }
+        if !supported(method) {
+            bail!("configured OAuth client authentication method is unsupported by issuer");
+        }
+        return Ok(method);
+    }
+    ["none", "client_secret_basic", "client_secret_post"]
+        .into_iter()
+        .find(|method| supported(method))
+        .ok_or_else(|| {
+            anyhow::anyhow!("OAuth issuer has no supported client authentication method")
+        })
+}
+
 pub(super) fn client(
     authentication: &HttpAuth,
     info: &Value,

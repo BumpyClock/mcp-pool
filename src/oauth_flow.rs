@@ -272,7 +272,7 @@ async fn registration(
     let payload = json!({
         "client_name":authentication.client_name,"redirect_uris":[redirect.as_str()],
         "grant_types":["authorization_code","refresh_token"],"response_types":["code"],
-        "token_endpoint_auth_method":"none",
+        "token_endpoint_auth_method":protocol::registration_auth_method(authentication, metadata)?,
     });
     let response = protocol::http()?
         .post(endpoint)
