@@ -1,5 +1,9 @@
 # Plan 001: Bring mcp-pool reliability/performance closer to mcpproxy-go while preserving per-MCP visibility
 
+This is a historical plan. Its instructions, commands, proposed behavior, and
+observations describe the plan-time context, not current operating guidance.
+See the [README](../README.md) for current behavior and safety constraints.
+
 > **Executor instructions**: Follow this plan step by step. Run every
 > verification command and confirm the expected result before moving to the
 > next step. If anything in the "STOP conditions" section occurs, stop and
