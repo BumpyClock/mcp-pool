@@ -122,9 +122,13 @@ state and disconnects proxy clients, which must reconnect.
 ## Pool identity and external endpoints
 
 Pool identities include configured name, config source, credential scope, and
-resolved definition. Status uses logical names and JSON includes internal
-`pool_name`. The same command under different names or config files can create
-separate pools.
+resolved definition. Configured `env` values distinguish identities, but inherited
+child environment variables not listed in `env` do not. Explicitly configure
+identity-sensitive child variables in `env`, or stop the affected pool before
+changing the inherited environment. Resolved environment references in other
+parts of the definition still affect identity. Status uses logical names and JSON
+includes internal `pool_name`. The same command under different names or config
+files can create separate pools.
 
 Unix daemon startup can discover live sockets owned by other processes as external
 endpoints, without acquiring child ownership; Windows named pipes cannot be

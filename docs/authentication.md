@@ -30,9 +30,14 @@ Credentials belong to the config defining the selected server:
 
 | Config source | Credential store |
 | --- | --- |
-| Home definition | `~/.mcp/credentials.json`, across projects |
+| Home definition | `~/.mcp/credentials.json` by default, shared across projects |
 | Project definition | `PROJECT/.mcp/credentials.json` |
 | `--config PATH` | Credentials beside that config |
+
+When `MCP_CLI_HOME` is set, the home store is
+`MCP_CLI_HOME/config/credentials.json`; `MCP_POOL_HOME` is its fallback alias.
+See [paths and environment](configuration.md#paths-and-environment) for locations
+and overrides.
 
 A same-named project definition replaces the home definition and never falls back
 to home credentials when missing, expired, or cleared. Removing it restores the

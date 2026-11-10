@@ -82,8 +82,12 @@ dotted server names.
 
 Tool-option flags must match schema properties or kebab-case aliases; exact names
 win, ambiguous aliases and unknown options fail before dispatch. Local schema
-references use inline-equivalent argument types. `--raw-strings`/`--no-coerce`
-preserves strings rather than coercing JSON numbers, booleans, or collections.
+references use inline-equivalent argument types. For ordinary named and positional
+values, `--raw-strings` disables numeric conversion but still converts `null`,
+`none`, booleans, and valid JSON objects and arrays. `--no-coerce` instead sends
+those values as trimmed strings. Both flags disable schema-based value hydration.
+JSON supplied through `--args`/`--params` is parsed as JSON; named `@FILE` and
+`@@text` values are literal text.
 
 ## Tool name resolution
 

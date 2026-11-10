@@ -8,9 +8,12 @@
 All commands use JSONC at `~/.mcp/config.json` and `PROJECT/.mcp/config.json`.
 Project entries replace same-named home entries; other home entries remain. Project
 lookup uses the nearest `.mcp` directory or Git root, falling back to the current
-directory. `--root DIR` selects an existing project directory and resolves relative
-config paths against it, but does not change the working directory. `--config PATH`
-or `MCP_CLI_CONFIG` selects only that file. `MCPORTER_CONFIG` is not read at runtime.
+directory. `--root DIR` selects an existing project directory and resolves a
+relative explicit `--config PATH` against it, but does not change the working
+directory. `--config PATH` or `MCP_CLI_CONFIG` (with `MCP_POOL_CONFIG` as fallback)
+selects only that file. Relative environment-selected config paths and `--persist`
+paths resolve against the current working directory, not `--root`.
+`MCPORTER_CONFIG` is not read at runtime.
 
 The reader accepts comments, trailing commas, an `mcpServers` object, stdio
 commands, HTTP/SSE URLs, environment values, headers, and working directories.
@@ -84,7 +87,8 @@ and returns the first name-ordered error without partial output or another batch
 `remove`. They write an existing project config by default, otherwise home.
 Removing a project override exposes the home entry. `--persist PATH` selects an
 add destination; `--scope home|project` selects a home or project config.
-`--dry-run` validates and prints a redacted definition without writing.
+`--dry-run` validates without writing. For `--copy-from`, it prints a `Would add`
+status rather than the definition; other adds print a redacted definition.
 
 Copying with `--copy-from SOURCE:NAME` uses the import converter, then applies target,
 environment, header, auth, description, and protocol overrides. `--from PATH`

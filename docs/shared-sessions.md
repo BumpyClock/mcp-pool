@@ -13,8 +13,11 @@ them atomic.
 
 ## Caching and notifications
 
-Successful `initialize` and unpaginated `tools/list` results are cached.
-`notifications/tools/list_changed` invalidates discovery; upstream notifications
+Successful `initialize`, eligible `server/discover`, and unpaginated
+`tools/list` results are cached. For the two discovery caches, `ttlMs` limits
+retention; `ttlMs: 0` or a non-`public` `cacheScope` prevents retention.
+Initialization uses a separate cache. `notifications/tools/list_changed`
+invalidates the `tools/list` cache, not `server/discover`; upstream notifications
 broadcast to connected clients. Within a response, notification, or expiration
 batch, ready client queues receive messages before delivery waits on full queues.
 Per-client order and the barrier before routing the next upstream message remain
@@ -22,8 +25,9 @@ unchanged.
 
 ## Shared requests and deadlines
 
-Concurrent initialization and cacheable unpaginated `tools/list` share one upstream
-request. Each MCP command retains its local deadline. A longer-lived follower can
+Concurrent initialization, `server/discover`, and cacheable unpaginated
+`tools/list` requests each share one upstream request. Each MCP command retains
+its local deadline. A longer-lived follower can
 extend the shared upstream wait, including HTTP headers and JSON/SSE body reads,
 without resending the leader request. The shared wait retains the backend default
 or configured budget as a minimum. A short caller's timeout or disconnect does not
@@ -41,10 +45,19 @@ Responses route only by exact upstream request ID. An uncorrelated empty-ID
 response is not assigned to another client's oldest pending request. HTTP POST
 failures can return an error to their known requesting client.
 
-Sampling and roots requests go to a client advertising the required capability,
-preferring the most recently active capable client. Other server requests use a
-most-recently-active fallback. This heuristic does not prove callback causality or
-provide per-client callback isolation.
+Sampling and roots requests go to the client marked last active if it is still
+connected and advertises the required capability. Otherwise, they go to an
+arbitrary connected capable client; if none exists, the upstream receives an error.
+Other server requests go to the client marked last active if still connected,
+or an arbitrary connected client otherwise. This heuristic does not prove callback
+causality or provide per-client callback isolation.
+
+## Raw proxy cancellation
+
+The pool rewrites top-level request IDs, but forwards raw proxy
+`notifications/cancelled` messages without rewriting `params.requestId`. A
+cancellation can miss its intended upstream request or cancel another client's
+request if the IDs coincide. Raw proxy cancellation is not isolated per client.
 
 ## Unknown outcomes
 

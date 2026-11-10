@@ -14,8 +14,10 @@ precautions.
 
 ## Quick start
 
-Configure a server, replacing the example command and arguments with those for
-your MCP server. This example runs an npm package and may download it when started.
+Inspect the destination with `mcp-cli config list` and choose an unused name.
+`add` replaces an existing entry of the same name in the destination. Replace the
+example command and arguments with those for your MCP server. This example runs
+an npm package and may download it when started.
 
 ```sh
 mcp-cli add echo -- npx -y @modelcontextprotocol/server-everything stdio
@@ -26,14 +28,19 @@ mcp-cli list echo
 `pool list` reads configuration without connecting. `list echo` starts or attaches
 to the pool and discovers tools. To let an agent use the same pool, add an entry
 in the agent's MCP configuration using its required syntax. For JSON-based agent
-configs, the entry generally looks like this:
+configs, the entry generally looks like this, with `/absolute/path/to/project`
+replaced by the absolute path to the project used above. On Windows, use an
+absolute path such as `C:/path/to/project`.
 
 ```json
-{"mcpServers":{"echo":{"command":"mcp-cli","args":["proxy","echo"]}}}
+{"mcpServers":{"echo":{"command":"mcp-cli","args":["--root","/absolute/path/to/project","proxy","echo"]}}}
 ```
 
-The agent must be able to find `mcp-cli` on its PATH. `proxy` starts the daemon
-and upstream if needed; `mcp-cli start echo` is optional pre-warming. See
+When the agent runs from a different working directory, select the same project
+with `--root` or the same explicit file with `--config`. Put these global flags
+before `proxy`. The agent must be able to find `mcp-cli` on its PATH. `proxy`
+starts the daemon and upstream if needed; `mcp-cli start echo` is optional
+pre-warming. See
 [pool lifecycle](docs/pools.md) and [configuration](docs/configuration.md).
 
 ## Before sharing a pool
@@ -44,8 +51,10 @@ repeating it. Requests with unknown outcomes are never replayed automatically.
 See [shared sessions](docs/shared-sessions.md).
 
 Local sockets are restricted to the same user, but raw proxy access bypasses tool
-filters. The HTTP bridge has no downstream authentication; binding it outside
-loopback exposes tools to other users or hosts. See
+filters. The HTTP bridge has no downstream authentication. Even on loopback,
+other local users can connect and invoke tools. Binding outside loopback can also
+expose tools to other hosts. Use separate access isolation when local users are
+not trusted. See
 [pool security](docs/pools.md#local-endpoint-security) and
 [bridge security](docs/bridge.md).
 

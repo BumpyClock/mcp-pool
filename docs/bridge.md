@@ -6,17 +6,23 @@
 Top-level `serve` exposes selected keep-alive servers over stdio or HTTP. It is
 different from `pool serve`, the daemon control socket.
 
+Before running these examples, replace `docs` with a configured server that
+qualifies for keep-alive, for example one with `"lifecycle": "keep-alive"`.
+See [keep-alive eligibility](#keep-alive-eligibility) for overrides.
+
 ```sh
 mcp-cli serve --stdio --servers docs
 mcp-cli serve --http 3333 --servers docs
 mcp-cli serve --http 3333 --servers docs --concurrency 8
 ```
 
-Replace `docs` with a configured server. Stdio is the default; `--stdio` and
-`--http` are mutually exclusive, and `--host` requires HTTP. HTTP defaults to
-`127.0.0.1`. The HTTP bridge has no downstream authentication. Binding a
-non-loopback host exposes tools without authentication; keep it on loopback unless
-access is controlled separately.
+Stdio is the default; `--stdio` and `--http` are mutually exclusive, and `--host`
+requires HTTP. HTTP defaults to `127.0.0.1`. The HTTP bridge has no downstream
+authentication. Unlike owner-only local pool endpoints, even a loopback bridge can
+be reached by other local users, who can invoke its tools. Use separate access
+isolation when local users are not trusted. Binding a non-loopback host can also
+expose tools to other hosts; keep it on loopback unless access is controlled
+separately.
 
 ## Keep-alive eligibility
 
@@ -55,8 +61,9 @@ Review eligible entries before exposing a bridge.
 Higher values allow independent calls while another waits, though the upstream may
 serialize them. Discovery shares the limit; notification listeners have separate
 limits. Connections use the same pooled upstream, not additional upstreams or
-isolated state. Calls can finish out of order; retain the default for ordered
-operations.
+isolated state. Calls can finish out of order. The default prevents overlapping
+operations per server but does not guarantee arrival order. Clients should wait
+for each response before sending an operation that depends on it.
 
 ## HTTP protocol
 

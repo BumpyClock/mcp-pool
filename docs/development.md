@@ -49,10 +49,12 @@ stashing, or source rewriting occurs.
 The hook uses the installed pinned toolchain, `cargo fmt --all -- --check`, and
 `cargo check --offline --locked --bin mcp-cli`. Missing tools, components, or
 dependencies fail with setup instructions; it downloads nothing. Source,
-dependency, shared config, and uncertain changes run the Unix security/transport
-filter serially on Unix. Socket fixtures use a fresh private short `/tmp` MCP home,
-cleaned on failure, never user state. Markdown-only changes retain format/check but
-omit the IPC runtime gate. Failures propagate.
+dependency, shared config, and uncertain changes run the `local_security` and
+`transport::tests` filters serially on Unix. The broader CI gate also runs
+documentation, config-output, and `cli_presentation` tests. Run
+`bash scripts/test_unix_ipc.sh` for that gate. Socket fixtures use a fresh private
+short `/tmp` MCP home, cleaned on failure, never user state. Markdown-only changes
+retain format/check but omit the IPC runtime gate. Failures propagate.
 
 Unix tests are not Windows acceptance. Non-Unix hosts report that Unix IPC remains
 required in CI; Windows named-pipe/process behavior and the full suite require
@@ -76,6 +78,7 @@ protocols, transports, and concurrency. Synthetic throughput is not hosted capac
 summed RSS is not unique physical memory.
 
 ```sh
+cargo build --release --locked
 python3 benchmarks/run.py --products mcp-cli --mcp-cli target/release/mcp-cli --self-test
 python3 benchmarks/run.py --products mcp-cli --mcp-cli target/release/mcp-cli \
   --cases bridge,hol --bridge-modes 1,8

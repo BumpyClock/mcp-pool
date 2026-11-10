@@ -35,14 +35,18 @@ Git revision and source fingerprint, including dirty source changes.
 
 ## Upgrade from mcp-pool
 
-Before upgrading, stop the old daemon with the old executable using
-`mcp-pool daemon stop`. Repeat for each original `MCP_POOL_HOME` override with that
-same value. Socket names changed, so the new CLI cannot discover or retire old-brand
-daemons. Running both can create duplicate upstreams that still share `.mcp` config
-and credentials.
+Before upgrading, drain clients and stop the old daemon with the old executable
+using `mcp-pool daemon stop`. Repeat for each original `MCP_POOL_HOME` override with
+that same value. Before reconnecting, change agent proxy commands and automation
+from `mcp-pool` to `mcp-cli`; an old proxy command can start the old daemon again.
+Socket names changed, so the new CLI cannot discover or retire old-brand daemons.
+Running both can create duplicate upstreams that still share config and credentials.
 
-Runtime state is not migrated; config and credentials remain in `.mcp` and are not
-moved or deleted. See [imports](imports.md) to convert former native TOML
+Runtime state is not migrated; config and credentials remain in their configured
+locations and are not moved or deleted. The default home location is `~/.mcp/`.
+A `MCP_CLI_HOME` override (or `MCP_POOL_HOME` fallback) uses its `config/` directory.
+Credentials for an explicit config are beside that config unless a credential cache
+path is configured. See [imports](imports.md) to convert former native TOML
 definitions and [pools](pools.md) for verified legacy retirement.
 
 The legacy `import mcp-pool` selector, `_mcp_pool_timeout_ms` local wire field,

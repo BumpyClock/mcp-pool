@@ -21,8 +21,10 @@ mcp-cli import mcp-pool --from OLD_CONFIG_TOML
 ```
 
 Replace `PATH`, `OLD_CONFIG_TOML`, and `docs` with your source path and server name.
-The default destination is home; `--scope project` selects
-`PROJECT/.mcp/config.json`, and `--config PATH` selects an explicit destination.
+Without `--scope`, the destination is `--config PATH` if supplied, otherwise
+`MCP_CLI_CONFIG` or its `MCP_POOL_CONFIG` fallback if set, otherwise home.
+`--scope home` explicitly selects home; `--scope project` selects
+`PROJECT/.mcp/config.json`.
 `--from PATH` selects a source file; optional server names select a subset.
 
 Unchanged imports preserve bytes and modification time, including JSONC comments,
