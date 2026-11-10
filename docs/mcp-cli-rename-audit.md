@@ -1,7 +1,7 @@
 # Project rename audit
 
 This is the historical pre-rename inventory at `46bc986`. The current CLI is
-`mcp-cli`; see [README.md](../README.md#config-credentials-and-isolation) for
+`mcp-cli`; see the [upgrade guide](installation.md#upgrade-from-mcp-pool) for
 current names, retained compatibility contracts, and daemon cutover instructions.
 The baseline counts and source-line appendix below intentionally remain unchanged.
 
