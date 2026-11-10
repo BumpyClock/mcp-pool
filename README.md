@@ -38,10 +38,12 @@ absolute path such as `C:/path/to/project`.
 
 When the agent runs from a different working directory, select the same project
 with `--root` or the same explicit file with `--config`. Put these global flags
-before `proxy`. The agent must be able to find `mcp-cli` on its PATH. `proxy`
-starts the daemon and upstream if needed; `mcp-cli start echo` is optional
-pre-warming. See
-[pool lifecycle](docs/pools.md) and [configuration](docs/configuration.md).
+before `proxy`. If using a home override, give the shell and agent the same
+absolute `MCP_CLI_HOME` path, or `MCP_POOL_HOME` fallback, to reach the same daemon.
+`--root` does not select daemon state. The agent must be able to find `mcp-cli` on its
+PATH. `proxy` starts the daemon and upstream if needed; `mcp-cli start echo` is
+optional pre-warming. See [pool lifecycle](docs/pools.md) and
+[configuration](docs/configuration.md).
 
 ## Before sharing a pool
 

@@ -78,8 +78,8 @@ enables diagnostic state-directory logging.
 
 ## Legacy retirement
 
-`daemon migrate --json` inventories observed legacy owners as `pid` and `verified`
-records; config conversion is a separate [import](imports.md). Legacy retirement
+`daemon migrate --json` inventories observed legacy mcporter owners as `pid` and
+`verified` records; config conversion is a separate [import](imports.md). Retirement
 requires `--stop-legacy --confirmed-drained`, drained clients, and authorization.
 It requires a same-user local handshake and verified process identities/tree
 ownership. The CLI asks the verified runtime to stop rather than signaling

@@ -47,7 +47,8 @@ locations and are not moved or deleted. The default home location is `~/.mcp/`.
 A `MCP_CLI_HOME` override (or `MCP_POOL_HOME` fallback) uses its `config/` directory.
 Credentials for an explicit config are beside that config unless a credential cache
 path is configured. See [imports](imports.md) to convert former native TOML
-definitions and [pools](pools.md) for verified legacy retirement.
+definitions and [mcporter legacy retirement](pools.md#legacy-retirement) for
+mcporter daemon migration, not verification of `mcp-pool` shutdown.
 
 The legacy `import mcp-pool` selector, `_mcp_pool_timeout_ms` local wire field,
 `__mcp_pool_commit` credential metadata, and `mcp-pool-legacy-v1` retirement

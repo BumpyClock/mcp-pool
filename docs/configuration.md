@@ -87,8 +87,12 @@ and returns the first name-ordered error without partial output or another batch
 `remove`. They write an existing project config by default, otherwise home.
 Removing a project override exposes the home entry. `--persist PATH` selects an
 add destination; `--scope home|project` selects a home or project config.
-`--dry-run` validates without writing. For `--copy-from`, it prints a `Would add`
-status rather than the definition; other adds print a redacted definition.
+`--dry-run` does not write. Ordinary adds validate the proposed definition, not
+the existing destination or replacement, and print the definition with environment
+and header values redacted. Command arguments are not redacted; see
+[Inspect configuration](#inspect-configuration) before sharing output. With
+`--copy-from`, dry runs validate the destination mutation and print a `Would add`
+status instead of the definition.
 
 Copying with `--copy-from SOURCE:NAME` uses the import converter, then applies target,
 environment, header, auth, description, and protocol overrides. `--from PATH`

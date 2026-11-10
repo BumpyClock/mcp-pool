@@ -57,13 +57,16 @@ Review eligible entries before exposing a bridge.
 
 ## Concurrency
 
-`--concurrency N` allows 1 to 64 operation connections per server, default 1.
-Higher values allow independent calls while another waits, though the upstream may
-serialize them. Discovery shares the limit; notification listeners have separate
-limits. Connections use the same pooled upstream, not additional upstreams or
-isolated state. Calls can finish out of order. The default prevents overlapping
-operations per server but does not guarantee arrival order. Clients should wait
-for each response before sending an operation that depends on it.
+`--concurrency N` allows 1 to 64 operation connections per server within this
+bridge process, default 1. Discovery shares the limit; notification listeners
+have separate limits. Higher values allow independent calls while another waits,
+though the upstream may serialize them. Other bridges and raw proxies do not
+share this limit. Connections use the same pooled upstream, not additional
+upstreams or isolated state. Calls can finish out of order, and even the default
+does not guarantee arrival order. Wait for a successful response before sending
+a dependent operation. A timeout can leave the upstream operation running;
+resolve any [unknown outcome](shared-sessions.md#unknown-outcomes) after a
+failure or timeout before continuing.
 
 ## HTTP protocol
 

@@ -53,8 +53,11 @@ dependency, shared config, and uncertain changes run the `local_security` and
 `transport::tests` filters serially on Unix. The broader CI gate also runs
 documentation, config-output, and `cli_presentation` tests. Run
 `bash scripts/test_unix_ipc.sh` for that gate. Socket fixtures use a fresh private
-short `/tmp` MCP home, cleaned on failure, never user state. Markdown-only changes
-retain format/check but omit the IPC runtime gate. Failures propagate.
+short `/tmp` MCP home, cleaned on failure, never user state. When all selected
+paths are `.md` files outside `src/`, `tests/`, `scripts/`, `.githooks/`, and
+`.cargo/`, the hook retains format/check but omits the IPC runtime gate. Path
+selection can broaden as described in [push requirements](#push-requirements).
+Failures propagate.
 
 Unix tests are not Windows acceptance. Non-Unix hosts report that Unix IPC remains
 required in CI; Windows named-pipe/process behavior and the full suite require
