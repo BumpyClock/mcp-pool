@@ -2,6 +2,8 @@ use std::mem;
 
 use super::MAX_RESPONSE_BYTES;
 
+const MAX_RETAINED_LINE_BYTES: usize = 64 * 1024;
+
 #[derive(Debug)]
 pub(super) struct Event {
     pub name: String,
@@ -72,9 +74,13 @@ impl Decoder {
     }
 
     fn finish_line(&mut self, events: &mut Vec<Event>) -> Result<(), String> {
-        let bytes = mem::take(&mut self.line);
-        let mut line =
-            std::str::from_utf8(&bytes).map_err(|_| "HTTP SSE contains invalid UTF-8")?;
+        let mut line = match std::str::from_utf8(&self.line) {
+            Ok(line) => line,
+            Err(_) => {
+                self.clear_line();
+                return Err("HTTP SSE contains invalid UTF-8".into());
+            }
+        };
         if self.first_line {
             line = line.strip_prefix('\u{feff}').unwrap_or(line);
             self.first_line = false;
@@ -89,22 +95,28 @@ impl Decoder {
             }
             self.name.clear();
             self.frame_bytes = 0;
-            return Ok(());
-        }
-        if line.starts_with(':') {
-            return Ok(());
-        }
-        let (field, value) = line.split_once(':').unwrap_or((line, ""));
-        let value = value.strip_prefix(' ').unwrap_or(value);
-        match field {
-            "data" => {
-                self.data.push_str(value);
-                self.data.push('\n');
+        } else if !line.starts_with(':') {
+            let (field, value) = line.split_once(':').unwrap_or((line, ""));
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            match field {
+                "data" => {
+                    self.data.push_str(value);
+                    self.data.push('\n');
+                }
+                "event" => self.name = value.to_string(),
+                _ => {}
             }
-            "event" => self.name = value.to_string(),
-            _ => {}
         }
+        self.clear_line();
         Ok(())
+    }
+
+    fn clear_line(&mut self) {
+        if self.line.capacity() > MAX_RETAINED_LINE_BYTES {
+            self.line = Vec::new();
+        } else {
+            self.line.clear();
+        }
     }
 }
 
@@ -132,6 +144,78 @@ mod tests {
         assert_eq!(event.name, "message");
         assert_eq!(event.data, "{\"id\":\n7}");
         Ok(())
+    }
+
+    #[test]
+    fn bom_is_only_stripped_from_the_first_line() {
+        let bytes = "\u{feff}: heartbeat\n\n\u{feff}data: ignored\ndata: kept\n\n".as_bytes();
+        for boundary in 0..=bytes.len() {
+            let (first, second) = bytes.split_at(boundary);
+            let mut decoder = Decoder::new();
+            let first = decoder.feed(first);
+            let second = decoder.feed(second);
+            assert!(first.error.is_none(), "boundary {boundary}");
+            assert!(second.error.is_none(), "boundary {boundary}");
+            let events: Vec<Event> = first.events.into_iter().chain(second.events).collect();
+            assert_eq!(events.len(), 1, "boundary {boundary}");
+            assert_eq!(
+                events
+                    .first()
+                    .map(|event| (event.name.as_str(), event.data.as_str())),
+                Some(("", "kept")),
+                "boundary {boundary}"
+            );
+        }
+    }
+
+    #[test]
+    fn large_valid_line_then_small_event_across_chunks() {
+        let payload = "x".repeat(MAX_RETAINED_LINE_BYTES + 1);
+        let frame = format!("data: {payload}\n\ndata: small\n\n");
+        let mut decoder = Decoder::new();
+        let mut events = Vec::new();
+        for chunk in frame.as_bytes().chunks(1023) {
+            let feed = decoder.feed(chunk);
+            assert!(feed.error.is_none());
+            events.extend(feed.events);
+        }
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events
+                .first()
+                .map(|event| (event.name.as_str(), event.data.as_str())),
+            Some(("", payload.as_str()))
+        );
+        assert_eq!(
+            events
+                .last()
+                .map(|event| (event.name.as_str(), event.data.as_str())),
+            Some(("", "small"))
+        );
+    }
+
+    #[test]
+    fn completed_lines_retain_only_bounded_scratch_capacity() {
+        for invalid_utf8 in [false, true] {
+            let mut decoder = Decoder::new();
+            let feed = decoder.feed(b": warmup\n");
+            assert!(feed.error.is_none());
+            assert!(decoder.line.capacity() > 0);
+            assert!(decoder.line.capacity() <= MAX_RETAINED_LINE_BYTES);
+            let mut line = vec![b':'; MAX_RETAINED_LINE_BYTES + 1];
+            if invalid_utf8 {
+                line.push(0xff);
+            }
+            line.push(b'\n');
+            let feed = decoder.feed(&line);
+            assert_eq!(
+                feed.error.as_deref(),
+                invalid_utf8.then_some("HTTP SSE contains invalid UTF-8")
+            );
+            assert!(feed.events.is_empty());
+            assert!(decoder.line.is_empty());
+            assert!(decoder.line.capacity() <= MAX_RETAINED_LINE_BYTES);
+        }
     }
 
     #[test]

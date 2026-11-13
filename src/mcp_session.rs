@@ -130,12 +130,8 @@ pub fn cacheable_request(value: &Value) -> Option<CacheableMethod> {
     Some(method)
 }
 
-pub fn build_success_response(original_id: Value, result: Value) -> String {
-    let mut object = serde_json::Map::new();
-    object.insert("jsonrpc".to_string(), Value::from("2.0"));
-    object.insert("id".to_string(), original_id);
-    object.insert("result".to_string(), result);
-    Value::Object(object).to_string()
+pub fn build_success_response(original_id: &Value, result: &Value) -> String {
+    format!("{{\"jsonrpc\":\"2.0\",\"id\":{original_id},\"result\":{result}}}")
 }
 
 pub fn build_error_response(original_id: Value, code: i64, message: &str) -> String {
@@ -203,8 +199,8 @@ impl HandshakeCache {
                 Initialization::Ready { result, .. } => Some(result.clone()),
                 _ => None,
             },
-            Some(CacheableMethod::ServerDiscover) => self.server_discovery.requests.get(),
-            Some(CacheableMethod::ToolsList) => self.tools_list.get(),
+            Some(CacheableMethod::ServerDiscover) => self.server_discovery.requests.get().cloned(),
+            Some(CacheableMethod::ToolsList) => self.tools_list.get().cloned(),
             None => None,
         }
     }
@@ -296,6 +292,10 @@ fn cache_deadline(result: &Value) -> Option<Instant> {
         None => None,
     }
 }
+
+#[cfg(test)]
+#[path = "session_cache_state_tests.rs"]
+mod state_tests;
 
 #[cfg(test)]
 mod tests {

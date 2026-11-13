@@ -175,7 +175,7 @@ impl Request {
         &self,
         response: &mut reqwest::Response,
         options: &Options,
-    ) -> Result<Option<Vec<u8>>, HttpFailure> {
+    ) -> Result<Option<Bytes>, HttpFailure> {
         if self.shared {
             read_chunk_with_deadline(response, &self.budget).await
         } else {

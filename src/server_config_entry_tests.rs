@@ -215,3 +215,72 @@ fn preserving_transport_references_does_not_require_the_callers_environment() ->
     assert_eq!(server(&configuration)?.definition.transport, "sse");
     Ok(())
 }
+
+#[test]
+fn borrowed_entry_decode_preserves_commands_and_large_unknown_metadata() -> Result<()> {
+    for command in [json!("node server.js"), json!(["node", "server.js"])] {
+        let raw = json!({
+            "command": command,
+            "custom": {"payload": "metadata".repeat(32 * 1024), "nested": [1, null, true]},
+            "baseUrl": null,
+            "url": null
+        });
+        let original = raw.clone();
+        let borrowed = Entry::decode(&raw)?;
+        let owned: Entry = serde_json::from_value(raw.clone())?;
+        match (borrowed.command, owned.command) {
+            (Some(Command::Text(actual)), Some(Command::Text(expected))) => {
+                assert_eq!(actual, expected);
+            }
+            (Some(Command::Tokens(actual)), Some(Command::Tokens(expected))) => {
+                assert_eq!(actual, expected);
+            }
+            _ => bail!("command variants differ"),
+        }
+        let configuration = parse_document(&source()?, &json!({"mcpServers":{"test":raw}}))?;
+        assert_eq!(server(&configuration)?.definition.command, "node");
+        assert_eq!(server(&configuration)?.definition.args, ["server.js"]);
+        assert_eq!(server(&configuration)?.raw, original);
+        assert_eq!(raw, original);
+    }
+    Ok(())
+}
+
+#[test]
+fn borrowed_entry_decode_preserves_type_alias_and_url_errors() -> Result<()> {
+    for raw in [
+        Value::Null,
+        json!({"command": 7}),
+        json!({"command": ["node", 7]}),
+        json!({"args": null}),
+        json!({"env": {"KEY": false}}),
+        json!({"headers": []}),
+        json!({"timeoutMs": -1}),
+        json!({"protocolVersion": null}),
+        json!({"timeoutMs": 1, "timeout_ms": 2}),
+        json!({"protocolVersion": "auto", "protocol_version": "legacy"}),
+        json!({"bearerToken": "one", "bearer_token": "two"}),
+        json!({"bearerTokenEnv": "ONE", "bearer_token_env": "TWO"}),
+        json!({"baseUrl": 7, "args": null}),
+    ] {
+        assert!(
+            serde_json::from_value::<Entry>(raw.clone()).is_err(),
+            "accepted: {raw}"
+        );
+        let error = Entry::decode(&raw)
+            .err()
+            .context("invalid entry accepted")?;
+        assert_eq!(error.to_string(), "Invalid server field types");
+    }
+    for &field in URL_FIELDS {
+        let raw = json!({"command":"node", field:7});
+        let error = Entry::decode(&raw).err().context("invalid URL accepted")?;
+        assert_eq!(error.to_string(), "Invalid URL field type");
+    }
+    let raw = json!({"baseUrl":null,"base_url":"https://selected.invalid","url":"ignored"});
+    assert_eq!(
+        Entry::decode(&raw)?.remote_url(),
+        Some("https://selected.invalid")
+    );
+    Ok(())
+}

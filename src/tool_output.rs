@@ -37,11 +37,11 @@ pub fn render(result: &Value, output: Output) -> Result<String> {
         .and_then(structured_json)
         .or_else(|| {
             if content.json.len() == 1 {
-                content.json.first().cloned()
+                content.json.pop()
             } else if content.json.is_empty() {
                 None
             } else {
-                Some(Value::Array(content.json.clone()))
+                Some(Value::Array(std::mem::take(&mut content.json)))
             }
         })
         .or_else(|| {
@@ -330,6 +330,7 @@ pub fn options(tool: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Context;
 
     #[test]
     fn output_contract_extracts_structured_and_text_content() -> Result<()> {
@@ -374,6 +375,55 @@ mod tests {
         assert_eq!(render(&markdown, Output::Text)?, "# fallback");
         let text = json!({"content":[{"type":"text","text":"fallback"}]});
         assert_eq!(render(&text, Output::Markdown)?, "fallback");
+        Ok(())
+    }
+
+    #[test]
+    fn json_items_keep_order_precedence_and_borrowed_result() -> Result<()> {
+        let result = json!({"raw":{"result":{"content":[
+            {"type":"json","json":{"first":1}},
+            {"type":"text","text":"human"},
+            {"type":"text","text":"[2,3]"},
+            {"type":"json","json":null},
+            {"type":"markdown","text":"# heading"}
+        ]}}});
+        let original = result.clone();
+        for output in [Output::Auto, Output::Json] {
+            assert_eq!(
+                serde_json::from_str::<Value>(&render(&result, output)?)?,
+                json!([{"first":1}, [2,3], null])
+            );
+        }
+        assert_eq!(render(&result, Output::Text)?, "human\n[2,3]\n# heading");
+        assert_eq!(render(&result, Output::Markdown)?, "# heading");
+        assert_eq!(
+            serde_json::from_str::<Value>(&render(&result, Output::Raw)?)?,
+            original
+        );
+        assert_eq!(result, original);
+
+        let mut structured = result;
+        structured.as_object_mut().context("result object")?.insert(
+            "structuredContent".to_owned(),
+            json!({"json":{"priority":true}}),
+        );
+        let original = structured.clone();
+        assert_eq!(
+            serde_json::from_str::<Value>(&render(&structured, Output::Json)?)?,
+            json!({"priority":true})
+        );
+        assert_eq!(
+            render(&structured, Output::Text)?,
+            "human\n[2,3]\n# heading"
+        );
+        assert_eq!(structured, original);
+        assert_eq!(
+            serde_json::from_str::<Value>(&render(
+                &json!({"content":[{"type":"json","json":null}]}),
+                Output::Json
+            )?)?,
+            Value::Null
+        );
         Ok(())
     }
 

@@ -9,13 +9,12 @@ pub(super) async fn save_images(result: &Value, directory: Option<&Path>) -> Res
     let Some(directory) = directory else {
         return Ok(());
     };
+    let images = image_entries(result);
+    if images.is_empty() {
+        return Ok(());
+    }
     let directory = directory.to_path_buf();
-    let content = result
-        .get("content")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let paths = tokio::task::spawn_blocking(move || save(&directory, &content))
+    let paths = tokio::task::spawn_blocking(move || save(&directory, &images))
         .await
         .context("Image write task failed")??;
     for path in paths {
@@ -24,20 +23,28 @@ pub(super) async fn save_images(result: &Value, directory: Option<&Path>) -> Res
     Ok(())
 }
 
-fn save(directory: &Path, content: &[Value]) -> Result<Vec<PathBuf>> {
+fn image_entries(result: &Value) -> Vec<(usize, Value)> {
+    result
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, value)| value.get("type").and_then(Value::as_str) == Some("image"))
+        .map(|(index, image)| (index, image.clone()))
+        .collect()
+}
+
+fn save(directory: &Path, images: &[(usize, Value)]) -> Result<Vec<PathBuf>> {
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_millis();
-    save_at(directory, content, timestamp)
+    save_at(directory, images, timestamp)
 }
 
-fn save_at(directory: &Path, content: &[Value], timestamp: u128) -> Result<Vec<PathBuf>> {
+fn save_at(directory: &Path, images: &[(usize, Value)], timestamp: u128) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
-    for (index, image) in content
-        .iter()
-        .enumerate()
-        .filter(|(_, value)| value.get("type").and_then(Value::as_str) == Some("image"))
-    {
+    for (index, image) in images {
         let data = image
             .get("data")
             .and_then(Value::as_str)

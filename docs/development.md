@@ -87,6 +87,19 @@ python3 benchmarks/run.py --products mcp-cli --mcp-cli target/release/mcp-cli \
   --cases bridge,hol --bridge-modes 1,8
 ```
 
+The standalone SSE decoder benchmark also runs on Windows. Build baseline and
+candidate binaries separately with the same compiler and optimization setting,
+then alternate their runs. Each run verifies exact event contents and emits seven
+post-warmup samples per chunk size, each parsing 100,000 frames.
+
+```sh
+rustc -C opt-level=2 --edition 2024 benchmarks/sse_decoder.rs -o target/sse-decoder
+./target/sse-decoder
+```
+
+These parser-only observations exclude HTTP, pool routing, server work, and CLI
+startup. They do not establish end-to-end latency or hosted capacity.
+
 Short-lived CLI commands default to one Tokio worker. Daemon, bridge, proxy, and
 native `pool` commands retain Tokio defaults. `TOKIO_WORKER_THREADS` overrides this
 choice.

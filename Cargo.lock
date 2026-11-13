@@ -788,6 +788,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "bytes",
  "clap",
  "dirs",
  "jsonc-parser",
