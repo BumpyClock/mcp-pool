@@ -58,8 +58,8 @@ pub(super) struct Entry {
 
 impl Entry {
     pub(super) fn decode(raw: &Value) -> Result<Self> {
-        let mut entry: Self = serde_json::from_value(raw.clone())
-            .map_err(|_| anyhow!("Invalid server field types"))?;
+        let mut entry =
+            Self::deserialize(raw).map_err(|_| anyhow!("Invalid server field types"))?;
         for field in URL_FIELDS {
             if raw
                 .get(*field)

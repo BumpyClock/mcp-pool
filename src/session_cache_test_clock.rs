@@ -32,8 +32,16 @@ impl HandshakeCache {
                 Initialization::InFlight { waiters, .. } => waiters,
                 _ => return,
             },
-            CacheableMethod::ServerDiscover => &mut self.server_discovery.requests.waiters,
-            CacheableMethod::ToolsList => &mut self.tools_list.waiters,
+            CacheableMethod::ServerDiscover => {
+                match &mut self.server_discovery.requests.in_flight {
+                    Some(in_flight) => &mut in_flight.waiters,
+                    None => return,
+                }
+            }
+            CacheableMethod::ToolsList => match &mut self.tools_list.in_flight {
+                Some(in_flight) => &mut in_flight.waiters,
+                None => return,
+            },
         };
         for waiter in waiters {
             if let Some(shifted) = waiter.inserted_at.checked_sub(elapsed) {
@@ -44,9 +52,9 @@ impl HandshakeCache {
 }
 
 fn elapse_request(request: &mut RequestCache, elapsed: Duration) {
-    if let Some(deadline) = &mut request.in_flight
-        && let Some(shifted) = deadline.current().checked_sub(elapsed)
+    if let Some(in_flight) = &mut request.in_flight
+        && let Some(shifted) = in_flight.deadline.current().checked_sub(elapsed)
     {
-        *deadline = SharedDeadline::new(shifted);
+        in_flight.deadline = SharedDeadline::new(shifted);
     }
 }

@@ -15,17 +15,22 @@ use crate::request_deadline::SharedDeadline;
 pub(super) struct RequestCache {
     cached_result: Option<Value>,
     cached_until: Option<Instant>,
-    invalidated_in_flight: bool,
+    in_flight: Option<InFlightRequest>,
+}
+
+#[derive(Debug)]
+struct InFlightRequest {
+    deadline: SharedDeadline,
     waiters: Vec<PendingWaiter>,
-    in_flight: Option<SharedDeadline>,
+    invalidated: bool,
 }
 
 impl RequestCache {
-    pub(super) fn get(&self) -> Option<Value> {
+    pub(super) fn get(&self) -> Option<&Value> {
         if self.expired() {
             None
         } else {
-            self.cached_result.clone()
+            self.cached_result.as_ref()
         }
     }
 
@@ -37,7 +42,9 @@ impl RequestCache {
     pub(super) fn invalidate(&mut self) {
         self.cached_result = None;
         self.cached_until = None;
-        self.invalidated_in_flight = self.in_flight.is_some();
+        if let Some(in_flight) = &mut self.in_flight {
+            in_flight.invalidated = true;
+        }
     }
 
     pub(super) fn clear_expired(&mut self) {
@@ -48,7 +55,15 @@ impl RequestCache {
     }
 
     pub(super) fn deadline(&self) -> Option<SharedDeadline> {
-        self.in_flight.clone()
+        self.in_flight
+            .as_ref()
+            .map(|in_flight| in_flight.deadline.clone())
+    }
+
+    fn waiters(&self) -> impl Iterator<Item = &PendingWaiter> {
+        self.in_flight
+            .iter()
+            .flat_map(|in_flight| &in_flight.waiters)
     }
 
     fn prepare(
@@ -57,24 +72,29 @@ impl RequestCache {
         transport_deadline: Instant,
     ) -> SharedRequestAction {
         if let Some(result) = self.get() {
-            return SharedRequestAction::Cached(build_success_response(waiter.original_id, result));
+            return SharedRequestAction::Cached(build_success_response(
+                &waiter.original_id,
+                result,
+            ));
         }
-        if let Some(deadline) = &self.in_flight {
-            deadline.extend(transport_deadline);
-            self.waiters.push(waiter);
+        if let Some(in_flight) = &mut self.in_flight {
+            in_flight.deadline.extend(transport_deadline);
+            in_flight.waiters.push(waiter);
             SharedRequestAction::Coalesced
         } else {
-            self.invalidated_in_flight = false;
-            self.in_flight = Some(SharedDeadline::new(transport_deadline));
+            self.in_flight = Some(InFlightRequest {
+                deadline: SharedDeadline::new(transport_deadline),
+                waiters: Vec::new(),
+                invalidated: false,
+            });
             SharedRequestAction::Leader
         }
     }
 
     fn finish(&mut self) -> (Vec<PendingWaiter>, bool) {
-        self.in_flight = None;
-        (
-            std::mem::take(&mut self.waiters),
-            std::mem::take(&mut self.invalidated_in_flight),
+        self.in_flight.take().map_or_else(
+            || (Vec::new(), false),
+            |in_flight| (in_flight.waiters, in_flight.invalidated),
         )
     }
 
@@ -122,9 +142,9 @@ impl HandshakeCache {
         }
         match method {
             CacheableMethod::Initialize => match &mut self.initialize {
-                Initialization::Ready { result, .. } => SharedRequestAction::Cached(
-                    build_success_response(waiter.original_id, result.clone()),
-                ),
+                Initialization::Ready { result, .. } => {
+                    SharedRequestAction::Cached(build_success_response(&waiter.original_id, result))
+                }
                 Initialization::InFlight { waiters, deadline } => {
                     deadline.extend(transport_deadline);
                     waiters.push(waiter);
@@ -194,13 +214,13 @@ impl HandshakeCache {
         if let Initialization::InFlight { waiters, .. } = &mut self.initialize {
             waiters.retain(|waiter| waiter.client_id != client_id);
         }
-        self.server_discovery
-            .requests
-            .waiters
-            .retain(|waiter| waiter.client_id != client_id);
-        self.tools_list
-            .waiters
-            .retain(|waiter| waiter.client_id != client_id);
+        for request in [&mut self.server_discovery.requests, &mut self.tools_list] {
+            if let Some(in_flight) = &mut request.in_flight {
+                in_flight
+                    .waiters
+                    .retain(|waiter| waiter.client_id != client_id);
+            }
+        }
     }
 
     pub fn initialization_ready(&self) -> bool {
@@ -223,9 +243,8 @@ impl HandshakeCache {
             .map(|pending| self.pending_expiration(pending))
             .chain(
                 self.tools_list
-                    .waiters
-                    .iter()
-                    .chain(&self.server_discovery.requests.waiters)
+                    .waiters()
+                    .chain(self.server_discovery.requests.waiters())
                     .map(|waiter| expiration(waiter.inserted_at, waiter.expires_after)),
             )
             .min()
@@ -278,16 +297,17 @@ impl HandshakeCache {
                 }));
             }
         }
-        responses.extend(expire_waiters(
-            &mut self.tools_list.waiters,
-            CacheableMethod::ToolsList,
-            now,
-        ));
-        responses.extend(expire_waiters(
-            &mut self.server_discovery.requests.waiters,
-            CacheableMethod::ServerDiscover,
-            now,
-        ));
+        for (request, method) in [
+            (&mut self.tools_list, CacheableMethod::ToolsList),
+            (
+                &mut self.server_discovery.requests,
+                CacheableMethod::ServerDiscover,
+            ),
+        ] {
+            if let Some(in_flight) = &mut request.in_flight {
+                responses.extend(expire_waiters(&mut in_flight.waiters, method, now));
+            }
+        }
         responses.extend(
             stale_requests
                 .into_iter()
@@ -320,8 +340,8 @@ impl HandshakeCache {
                 Initialization::InFlight { waiters, .. } => waiters.len(),
                 _ => 0,
             },
-            CacheableMethod::ServerDiscover => self.server_discovery.requests.waiters.len(),
-            CacheableMethod::ToolsList => self.tools_list.waiters.len(),
+            CacheableMethod::ServerDiscover => self.server_discovery.requests.waiters().count(),
+            CacheableMethod::ToolsList => self.tools_list.waiters().count(),
         }
     }
 }

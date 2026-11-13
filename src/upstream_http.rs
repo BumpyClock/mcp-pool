@@ -3,6 +3,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::Value;
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
@@ -298,13 +299,12 @@ fn content_type(response: &reqwest::Response) -> String {
 async fn read_chunk_with_timeout(
     response: &mut reqwest::Response,
     deadline: Duration,
-) -> Result<Option<Vec<u8>>, HttpFailure> {
+) -> Result<Option<Bytes>, HttpFailure> {
     timeout(deadline, response.chunk())
         .await
         .map_err(|_| {
             HttpFailure::new(FailureKind::Timeout, "HTTP response read deadline exceeded")
         })?
-        .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
         .map_err(|_| {
             HttpFailure::new(
                 FailureKind::Offline,
@@ -316,14 +316,13 @@ async fn read_chunk_with_timeout(
 async fn read_chunk_with_deadline(
     response: &mut reqwest::Response,
     deadline: &crate::request_deadline::SharedDeadline,
-) -> Result<Option<Vec<u8>>, HttpFailure> {
+) -> Result<Option<Bytes>, HttpFailure> {
     deadline
         .wait(response.chunk())
         .await
         .map_err(|_| {
             HttpFailure::new(FailureKind::Timeout, "HTTP response read deadline exceeded")
         })?
-        .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
         .map_err(|_| {
             HttpFailure::new(
                 FailureKind::Offline,

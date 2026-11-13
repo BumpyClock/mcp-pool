@@ -20,7 +20,7 @@ async fn nested_help_is_specific_and_never_loads_configuration() -> io::Result<(
         ("config", "get", "--json"),
         ("config", "add", "--command"),
         ("config", "remove", "Remove a local definition"),
-        ("config", "import", "--include-auth"),
+        ("config", "import", "mcp-pool,"),
         ("config", "login", "--no-browser"),
         ("config", "logout", "Clear credentials"),
         ("config", "doctor", "Does not connect"),
